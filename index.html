@@ -1586,7 +1586,13 @@ function itensAcompanhamento(){
     else { asoFinal.push(a); }
   });
   const q = norm(UIAcomp.q);
-  return asoFinal.concat(fornItens, laudoItens).filter(x => !q || norm(x.colaborador).includes(q));
+  const filtro = x => !q || norm(x.colaborador).includes(q);
+  /* A FAZER: ASOs vencidos/vencendo ainda sem exame pedido (ação = agendar).
+     ACOMPANHAR: exames já solicitados/agendados no fornecedor + laudos solicitados. */
+  return {
+    aFazer: asoFinal.filter(filtro),
+    acompanhar: fornItens.concat(laudoItens).filter(filtro)
+  };
 }
 /* junta numa linha só tudo do mesmo colaborador (mesma pessoa + unidade):
    quem está com ASO atrasado e o exame já solicitado aparece uma vez, não duas */
@@ -1599,7 +1605,7 @@ function agruparAcompanhamento(lista){
   });
   return ordem.map(k => grupos[k]);
 }
-function gridAcompanhamento(lista){
+function gridAcompanhamento(lista, titulo, icon, comBusca, vazioMsg){
   const grupos = agruparAcompanhamento(lista);
   const linhas = grupos.map(g => g.itens.map((x, idx) => `
     <tr class="hover:bg-slate-50 align-top">
@@ -1618,13 +1624,13 @@ function gridAcompanhamento(lista){
   return `
     <div class="bg-white rounded-xl border border-slate-200 overflow-hidden print-block">
       <div class="px-5 py-4 border-b border-slate-200 flex items-center gap-2 flex-wrap">
-        <i class="fa-solid fa-truck-medical text-accent"></i>
-        <h3 class="font-semibold text-sm text-slate-700">Exames no fornecedor, alertas de ASOs e laudos solicitados</h3>
+        <i class="fa-solid ${icon} text-accent"></i>
+        <h3 class="font-semibold text-sm text-slate-700">${titulo}</h3>
         <span class="text-xs text-slate-500">${grupos.length} colaborador(es) · ${lista.length} pendência(s)</span>
-        <div class="ml-auto flex gap-2 no-print">
+        ${comBusca ? `<div class="ml-auto flex gap-2 no-print">
           ${inputBusca('bAcomp','Buscar por nome...','UIAcomp.q=this.value;viewAcompanhamentos();focarBusca(&quot;bAcomp&quot;)', UIAcomp.q)}
           ${botao('CSV','fa-file-csv','exportarAcompanhamento()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
-        </div>
+        </div>` : ''}
       </div>
       <div class="overflow-x-auto max-h-[520px] overflow-y-auto">
         <table class="w-full text-sm data">
@@ -1634,24 +1640,27 @@ function gridAcompanhamento(lista){
                 <th class="px-4 py-3">Status</th><th class="px-4 py-3 text-right no-print">Ação</th></tr>
           </thead>
           <tbody class="divide-y divide-slate-100">
-            ${grupos.length ? linhas : vazio(UIAcomp.q ? 'Nenhum resultado para essa busca.' : 'Nada em aberto — tudo em dia!')}
+            ${grupos.length ? linhas : vazio(UIAcomp.q ? 'Nenhum resultado para essa busca.' : (vazioMsg || 'Nada em aberto — tudo em dia!'))}
           </tbody>
         </table>
       </div>
     </div>`;
 }
 function exportarAcompanhamento(){
-  const l = itensAcompanhamento();
+  const it = itensAcompanhamento();
+  const l = it.aFazer.concat(it.acompanhar);
   exportCSV('acompanhamentos',
-    ['Colaborador / documento','Unidade','Função','Tipo','Quando','Dias','Status'],
-    l.map(x => [x.colaborador, uniNome(x.unidadeId), x.funcao||'', x.tipo, x.quando,
+    ['Situação','Colaborador / documento','Unidade','Função','Tipo','Quando','Dias','Status'],
+    l.map(x => [it.aFazer.indexOf(x)>=0?'A fazer':'Acompanhar', x.colaborador, uniNome(x.unidadeId), x.funcao||'', x.tipo, x.quando,
       x.dias==null ? '' : (x.dias<0 ? Math.abs(x.dias)+' d vencido' : 'em '+x.dias+' d'), x.statusLabel]));
 }
 function viewAcompanhamentos(){
+  const it = itensAcompanhamento();
   const alertasLaudo = alertasCriticos().filter(a => a.tipo === 'Laudo');
   $('#view').innerHTML = `
     <div class="space-y-5">
-      ${gridAcompanhamento(itensAcompanhamento())}
+      ${gridAcompanhamento(it.aFazer, 'Agendamentos a fazer', 'fa-calendar-plus', true, 'Nenhum exame a agendar — tudo em dia!')}
+      ${gridAcompanhamento(it.acompanhar, 'Acompanhar agendamentos', 'fa-truck-medical', false, 'Nada solicitado ou agendado no momento.')}
       ${gridAlertas('Laudo', 'Alertas de laudos SST — atrasos e próximos vencimentos', alertasLaudo)}
     </div>`;
 }
