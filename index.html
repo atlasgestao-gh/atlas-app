@@ -1656,11 +1656,32 @@ function exportarAcompanhamento(){
     l.map(x => [it.aFazer.indexOf(x)>=0?'A fazer':'Acompanhar', x.colaborador, uniNome(x.unidadeId), x.funcao||'', x.tipo, x.quando,
       x.dias==null ? '' : (x.dias<0 ? Math.abs(x.dias)+' d vencido' : 'em '+x.dias+' d'), x.statusLabel]));
 }
+/* nomes com exame EM ABERTO no fornecedor que não existem no cadastro de colaboradores */
+function emissoesSemCadastro(){
+  const vistos = {};
+  return itensAcompanhamento().acompanhar.filter(x => x.semCadastro).filter(x => {
+    const k = norm(x.colaborador); if(vistos[k]) return false; vistos[k] = 1; return true;
+  });
+}
+function alertaSemCadastro(){
+  const l = emissoesSemCadastro();
+  if(!l.length) return '';
+  return `
+    <div class="rounded-xl border border-amber-300 bg-amber-50 px-5 py-4 flex items-start gap-3">
+      <i class="fa-solid fa-triangle-exclamation text-amber-500 mt-0.5"></i>
+      <div class="text-sm text-amber-800">
+        <p class="font-semibold">${l.length} exame(s) em aberto sem colaborador cadastrado</p>
+        <p class="text-xs mt-1">Há emissão em aberto para ${l.length===1?'este nome':'estes nomes'}, mas ${l.length===1?'ele não consta':'eles não constam'} em Colaboradores (cadastro excluído ou nome digitado diferente). Recadastre com o nome exato ou encerre a emissão (Editar → status Realizado/Cancelado).</p>
+        <p class="text-xs mt-2 font-medium">${l.map(x => esc(x.colaborador) + (x.unidadeId ? ' · ' + esc(uniNome(x.unidadeId)) : '')).join(' &nbsp;•&nbsp; ')}</p>
+      </div>
+    </div>`;
+}
 function viewAcompanhamentos(){
   const it = itensAcompanhamento();
   const alertasLaudo = alertasCriticos().filter(a => a.tipo === 'Laudo');
   $('#view').innerHTML = `
     <div class="space-y-5">
+      ${alertaSemCadastro()}
       ${gridAcompanhamento(it.aFazer, 'Agendamentos a fazer', 'fa-calendar-plus', true, 'Nenhum exame a agendar — tudo em dia!')}
       ${gridAcompanhamento(it.acompanhar, 'Acompanhar agendamentos', 'fa-truck-medical', false, 'Nada solicitado ou agendado no momento.')}
       ${gridAlertas('Laudo', 'Alertas de laudos SST — atrasos e próximos vencimentos', alertasLaudo)}
@@ -3268,6 +3289,18 @@ function ultimoExameDe(c){
   if(!a) return '';
   return [a].concat(a.historico||[]).map(x => x.dataExame||'').filter(Boolean).sort().pop() || '';
 }
+/* edição direta da data do último exame no grid: atualiza o ASO vigente e
+   recalcula o vencimento (+1 ano), mesma regra do resto do sistema */
+function setUltimoExame(colabId, iso){
+  const a = asoVigente(colabId);
+  if(!a){ toast('Colaborador sem ASO registrado — cadastre um exame primeiro.', 'erro'); return; }
+  if(!iso){ viewCadastros(); return; }
+  a.dataExame = iso;
+  a.vencimento = addDays(iso, 365);
+  save();
+  toast('Último exame atualizado — vencimento recalculado.', 'ok');
+  viewCadastros();
+}
 function paginaColabs(p){ UIColab.page = p; viewCadastros(); }
 
 function abaColaboradores(){
@@ -3310,8 +3343,11 @@ function abaColaboradores(){
                 <p>${esc(c.celular||'—')}</p>
                 ${c.telefone?`<p>${esc(c.telefone)}</p>`:''}
                 <p class="truncate max-w-[180px]">${esc(c.email||'')}</p></td>
-              <td class="px-4 py-3 text-xs whitespace-nowrap">${(() => { const ue = ultimoExameDe(c);
-                  return ue ? fmtDate(ue) : '<span class="text-slate-300">—</span>'; })()}</td>
+              <td class="px-4 py-3 text-xs whitespace-nowrap">${a
+                  ? `<input type="date" value="${ultimoExameDe(c)||''}" onchange="setUltimoExame('${c.id}', this.value)"
+                       title="Editar a data do último exame (recalcula o vencimento em +1 ano)"
+                       class="px-2 py-1 border border-slate-200 rounded text-xs bg-white hover:border-accent focus:border-accent focus:ring-1 focus:ring-accent focus:outline-none">`
+                  : '<span class="text-slate-300">—</span>'}</td>
               <td class="px-4 py-3 text-xs whitespace-nowrap">${a ? fmtDate(a.vencimento) + ' ' + badge(s.label, s.cls) : '<span class="text-slate-400">sem ASO</span>'}</td>
               <td class="px-4 py-3">${badgeStatusColab(c.status)}</td>
               <td class="px-4 py-3 text-right whitespace-nowrap no-print">
