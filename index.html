@@ -1673,8 +1673,90 @@ function alertaSemCadastro(){
         <p class="font-semibold">${l.length} exame(s) em aberto sem colaborador cadastrado</p>
         <p class="text-xs mt-1">Há emissão em aberto para ${l.length===1?'este nome':'estes nomes'}, mas ${l.length===1?'ele não consta':'eles não constam'} em Colaboradores (cadastro excluído ou nome digitado diferente). Recadastre com o nome exato ou encerre a emissão (Editar → status Realizado/Cancelado).</p>
         <p class="text-xs mt-2 font-medium">${l.map(x => esc(x.colaborador) + (x.unidadeId ? ' · ' + esc(uniNome(x.unidadeId)) : '')).join(' &nbsp;•&nbsp; ')}</p>
+        <button onclick="conciliarSemCadastro()" class="mt-3 px-3 py-1.5 rounded-lg text-xs bg-amber-500 text-white hover:bg-amber-600 no-print"><i class="fa-solid fa-wand-magic-sparkles mr-1"></i>Conciliar agora</button>
       </div>
     </div>`;
+}
+/* ---- Conciliação: liga exames órfãos ao colaborador certo do cadastro ----
+   Sugere automaticamente o colaborador mais parecido (nome), a Jessica confirma. */
+function tokensNome(s){
+  return (s||'').normalize('NFD').replace(/[̀-ͯ]/g,'').toUpperCase().split(/[^A-Z0-9]+/).filter(t => t.length > 1);
+}
+function scoreNome(orfao, cand){
+  const a = norm(orfao), b = norm(cand);
+  if(!a || !b) return 0;
+  if(a === b) return 1;
+  const ta = tokensNome(orfao), tb = tokensNome(cand);
+  if(!ta.length || !tb.length) return 0;
+  const setB = new Set(tb);
+  const inter = ta.filter(t => setB.has(t)).length;
+  let s = inter / Math.max(ta.length, tb.length);
+  if(ta[0] === tb[0]) s += 0.15;                             /* mesmo primeiro nome */
+  if(ta[ta.length-1] === tb[tb.length-1]) s += 0.15;         /* mesmo sobrenome final */
+  if(a.includes(b) || b.includes(a)) s = Math.max(s, 0.85);  /* um contém o outro */
+  return Math.min(s, 1);
+}
+let _concCasos = [];
+function conciliarSemCadastro(){
+  const abertos = DB.emissoes.filter(e => (e.status === 'SOLICITADO' || e.status === 'AGENDADO')
+    && !DB.colaboradores.find(c => norm(c.nome) === norm(e.colaborador)));
+  const grupos = {}, ordem = [];
+  abertos.forEach(e => { const k = norm(e.colaborador);
+    if(!grupos[k]){ grupos[k] = { nome:e.colaborador, unidadeId:e.unidadeId, ids:[] }; ordem.push(k); }
+    grupos[k].ids.push(e.id); });
+  _concCasos = ordem.map(k => grupos[k]);
+  if(!_concCasos.length){ toast('Nenhum exame sem cadastro para conciliar.', 'ok'); return; }
+  const colabsOrd = DB.colaboradores.slice().sort((a,b) => (a.nome||'').localeCompare(b.nome||''));
+  const linhas = _concCasos.map((caso,i) => {
+    let best = null, bs = 0;
+    colabsOrd.forEach(c => { const sc = scoreNome(caso.nome, c.nome); if(sc > bs){ bs = sc; best = c; } });
+    const sug = bs >= 0.6 ? best : null;
+    const opts = colabsOrd.map(c => `<option value="${c.id}" ${sug && sug.id === c.id ? 'selected' : ''}>${esc(c.nome)}${c.cpf ? ' — ' + esc(c.cpf) : ''} (${esc(uniNome(c.unidadeId))})</option>`).join('');
+    return `<tr class="border-t border-slate-100 align-top">
+      <td class="px-3 py-2 text-sm">
+        <p class="font-medium text-slate-700">${esc(caso.nome)}</p>
+        <p class="text-[11px] text-slate-500">${esc(uniNome(caso.unidadeId))} · ${caso.ids.length} emissão(ões)</p>
+        ${sug ? `<p class="text-[11px] text-emerald-600 mt-0.5"><i class="fa-solid fa-wand-magic-sparkles mr-1"></i>sugestão: ${esc(best.nome)} (${Math.round(bs*100)}%)</p>`
+              : `<p class="text-[11px] text-amber-600 mt-0.5">sem sugestão automática — escolha manualmente</p>`}
+      </td>
+      <td class="px-3 py-2">
+        <select id="conc_${i}" class="w-full px-2 py-1.5 text-sm border border-slate-300 rounded-lg">
+          <option value="">— decidir depois —</option>
+          <option value="REMOVER">✗ Remover emissão (não é colaborador)</option>
+          <optgroup label="Vincular ao colaborador">${opts}</optgroup>
+        </select>
+      </td></tr>`;
+  }).join('');
+  openInfo('Conciliar exames sem cadastro', `
+    <div class="space-y-3">
+      <p class="text-sm text-slate-600">Para cada exame em aberto sem colaborador no cadastro, escolha o colaborador correto — o nome da emissão será corrigido para o nome exato do cadastro — ou remova a emissão. As sugestões já vêm pré-selecionadas; revise antes de aplicar.</p>
+      <div class="overflow-x-auto border border-slate-200 rounded-lg max-h-[55vh] overflow-y-auto">
+        <table class="w-full"><thead class="bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500 text-left sticky top-0">
+          <tr><th class="px-3 py-2">Nome na emissão</th><th class="px-3 py-2 w-1/2">Ação</th></tr></thead>
+          <tbody>${linhas}</tbody></table>
+      </div>
+      <div class="flex justify-end">
+        <button onclick="aplicarConciliacao()" class="px-4 py-2 rounded-lg text-sm bg-accent text-white hover:bg-blue-700"><i class="fa-solid fa-check mr-1"></i>Aplicar</button>
+      </div>
+    </div>`, 'max-w-4xl');
+}
+function aplicarConciliacao(){
+  let vinc = 0, del = 0;
+  _concCasos.forEach((caso,i) => {
+    const sel = document.getElementById('conc_' + i); if(!sel) return;
+    const v = sel.value; if(!v) return;
+    if(v === 'REMOVER'){
+      DB.emissoes = DB.emissoes.filter(e => !caso.ids.includes(e.id)); del += caso.ids.length;
+    } else {
+      const c = colab(v); if(!c) return;
+      DB.emissoes.forEach(e => { if(caso.ids.includes(e.id)){ e.colaborador = c.nome; e.unidadeId = c.unidadeId; } }); vinc++;
+    }
+  });
+  if(!vinc && !del){ toast('Nada selecionado — escolha uma ação em cada linha.', 'info'); return; }
+  save();
+  closeModal();
+  toast(`Conciliação aplicada: ${vinc} vinculado(s), ${del} removido(s).`, 'ok');
+  viewAcompanhamentos();
 }
 function viewAcompanhamentos(){
   const it = itensAcompanhamento();
