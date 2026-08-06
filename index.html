@@ -1553,7 +1553,8 @@ function fmtDiasAcomp(d){
   return `<span class="text-amber-700">em ${d} d</span>`;
 }
 function itensAcompanhamento(){
-  const funcaoDe = nome => { const c = DB.colaboradores.find(x => norm(x.nome) === norm(nome)); return c ? (c.funcao||'') : ''; };
+  const colabDe = nome => DB.colaboradores.find(x => norm(x.nome) === norm(nome)) || null;
+  const funcaoDe = nome => { const c = colabDe(nome); return c ? (c.funcao||'') : ''; };
   const asoItens = alertasCriticos().filter(a => a.tipo === 'ASO').map(a => ({
     origem:'ASO', colaborador:a.nome, unidadeId:a.unidadeId,
     tipo: a.tipoExameLabel, funcao: a.funcao, quando: 'vence ' + fmtDate(a.vencimento), dias: a.dias,
@@ -1561,7 +1562,7 @@ function itensAcompanhamento(){
     acaoLabel:a.acaoLabel, acaoIcon:a.acaoIcon, acao:a.acao
   }));
   const fornItens = emissoesPendentesFornecedor().map(e => ({
-    origem:'Fornecedor', colaborador:e.colaborador, unidadeId:e.unidadeId,
+    origem:'Fornecedor', colaborador:e.colaborador, unidadeId:e.unidadeId, semCadastro: !colabDe(e.colaborador),
     tipo: tipoLabel(e.tipoExame) + ' (no fornecedor)', funcao: funcaoDe(e.colaborador),
     quando: e.dataClinico ? 'agendado ' + fmtDate(e.dataClinico) : 'a agendar', dias: null,
     statusLabel:FLUXO_LABEL[e.status], statusCls:corFluxo(e.status),
@@ -1600,7 +1601,7 @@ function agruparAcompanhamento(lista){
   const grupos = {}, ordem = [];
   lista.forEach(x => {
     const k = norm(x.colaborador) + '|' + (x.unidadeId||'');
-    if(!grupos[k]){ grupos[k] = { colaborador:x.colaborador, unidadeId:x.unidadeId, itens:[] }; ordem.push(k); }
+    if(!grupos[k]){ grupos[k] = { colaborador:x.colaborador, unidadeId:x.unidadeId, semCadastro:x.semCadastro, itens:[] }; ordem.push(k); }
     grupos[k].itens.push(x);
   });
   return ordem.map(k => grupos[k]);
@@ -1610,7 +1611,8 @@ function gridAcompanhamento(lista, titulo, icon, comBusca, vazioMsg){
   const linhas = grupos.map(g => g.itens.map((x, idx) => `
     <tr class="hover:bg-slate-50 align-top">
       ${idx === 0 ? `<td class="px-4 py-3 font-medium text-slate-700" rowspan="${g.itens.length}">${esc(g.colaborador)}
-            ${g.itens.length>1?`<span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700">${g.itens.length}</span>`:''}</td>
+            ${g.itens.length>1?`<span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700">${g.itens.length}</span>`:''}
+            ${g.semCadastro?`<span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 whitespace-nowrap" title="Existe uma emissão em aberto neste nome, mas ele não está no cadastro de colaboradores (colaborador excluído ou nome digitado diferente)."><i class="fa-solid fa-triangle-exclamation mr-0.5"></i>não cadastrado</span>`:''}</td>
           <td class="px-4 py-3 text-xs text-slate-600" rowspan="${g.itens.length}">${esc(uniNome(g.unidadeId))}</td>
           <td class="px-4 py-3 text-xs text-slate-600" rowspan="${g.itens.length}">${esc(g.itens[0].funcao || '—')}</td>` : ''}
       <td class="px-4 py-3 text-xs text-slate-700">${esc(x.tipo)}</td>
