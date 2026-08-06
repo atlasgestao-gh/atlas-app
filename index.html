@@ -4758,12 +4758,14 @@ function aplicarEfeitosNoCadastro(e){
     c.funcao = e.funcao;
     avisos.push('função atualizada: ' + (antes || '—') + ' → ' + e.funcao);
   }
-  /* 2. data de emissão do ASO alimenta o exame vigente */
+  /* 2. data de emissão do ASO alimenta o exame vigente.
+     Um novo exame SEMPRE renova a validade para 1 ano a partir dele — mesmo
+     em renovação antecipada (quando o vencimento antigo ainda estava no futuro). */
   if(e.dataAso){
     const aso = asoVigente(c.id);
-    if(aso && aso.dataExame !== e.dataAso){
+    if(aso){
       aso.dataExame = e.dataAso;
-      if(!aso.vencimento || aso.vencimento < e.dataAso) aso.vencimento = addDays(e.dataAso, 365);
+      aso.vencimento = addDays(e.dataAso, 365);
     }
   }
   /* 3. demissional desliga o colaborador — sai da lista de ASOs em atraso */
