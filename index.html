@@ -1543,28 +1543,48 @@ function agendarDeAlerta(colaboradorId){
    junta os exames parados no fornecedor com os alertas de ASO num só painel,
    pesquisável por nome — separado do painel geral a pedido da Jessica */
 const UIAcomp = { q:'' };
+const chaveAcomp = (nome, uni) => norm(nome) + '|' + (uni||'');
+/* coluna "Dias": contagem a vencer (âmbar) ou vencido (vermelho); nulo = travessão */
+function fmtDiasAcomp(d){
+  if(d == null) return '<span class="text-slate-300">—</span>';
+  if(d < 0)     return `<span class="text-red-700 font-semibold">${Math.abs(d)} d vencido</span>`;
+  if(d === 0)   return `<span class="text-amber-700 font-semibold">vence hoje</span>`;
+  return `<span class="text-amber-700">em ${d} d</span>`;
+}
 function itensAcompanhamento(){
   const asoItens = alertasCriticos().filter(a => a.tipo === 'ASO').map(a => ({
     origem:'ASO', colaborador:a.nome, unidadeId:a.unidadeId,
-    detalhe: a.detalhe + ' · vence ' + fmtDate(a.vencimento),
-    situacaoLabel:a.sem.label, situacaoCls:a.sem.cls, dias:a.dias,
+    tipo: a.detalhe, quando: 'vence ' + fmtDate(a.vencimento), dias: a.dias,
+    statusLabel:a.sem.label, statusCls:a.sem.cls,
     acaoLabel:a.acaoLabel, acaoIcon:a.acaoIcon, acao:a.acao
   }));
   const fornItens = emissoesPendentesFornecedor().map(e => ({
     origem:'Fornecedor', colaborador:e.colaborador, unidadeId:e.unidadeId,
-    detalhe: tipoLabel(e.tipoExame) + (e.dataClinico ? ' · agendado ' + fmtDate(e.dataClinico) : ''),
-    situacaoLabel:FLUXO_LABEL[e.status], situacaoCls:corFluxo(e.status), dias:null,
+    tipo: tipoLabel(e.tipoExame) + ' (no fornecedor)',
+    quando: e.dataClinico ? 'agendado ' + fmtDate(e.dataClinico) : 'a agendar', dias: null,
+    statusLabel:FLUXO_LABEL[e.status], statusCls:corFluxo(e.status),
     acaoLabel:'Editar', acaoIcon:'fa-pen', acao:`editarEmissao('${e.id}')`
   }));
   /* laudo pedido à clínica e ainda não entregue também é coisa a cobrar */
   const laudoItens = DB.laudos.filter(l => l.atual && l.atual.pagamento === 'Solicitado').map(l => ({
     origem:'Laudo', colaborador: docsLabel(l.atual.documentos), unidadeId:l.unidadeId,
-    detalhe: 'Clínica: ' + (l.atual.clinica || '—'),
-    situacaoLabel:'Solicitado', situacaoCls:'bg-amber-100 text-amber-700', dias:null,
+    tipo: 'Laudo SST', quando: 'Clínica: ' + (l.atual.clinica || '—'), dias: null,
+    statusLabel:'Solicitado', statusCls:'bg-amber-100 text-amber-700',
     acaoLabel:'Abrir laudo', acaoIcon:'fa-file-shield', acao:`editarLaudo('${l.id}')`
   }));
+  /* Fusão: se o colaborador já tem exame no fornecedor (solicitado/agendado), o
+     alerta de ASO dele não precisa do botão "agendar" nem da badge "vencido" —
+     leva a contagem de dias (urgência) para o item do fornecedor e descarta o ASO. */
+  const fornPorChave = {};
+  fornItens.forEach(f => { fornPorChave[chaveAcomp(f.colaborador, f.unidadeId)] = f; });
+  const asoFinal = [];
+  asoItens.forEach(a => {
+    const f = fornPorChave[chaveAcomp(a.colaborador, a.unidadeId)];
+    if(f){ if(f.dias == null) f.dias = a.dias; }   /* já solicitado: some com o ASO redundante */
+    else { asoFinal.push(a); }
+  });
   const q = norm(UIAcomp.q);
-  return asoItens.concat(fornItens, laudoItens).filter(x => !q || norm(x.colaborador).includes(q));
+  return asoFinal.concat(fornItens, laudoItens).filter(x => !q || norm(x.colaborador).includes(q));
 }
 /* junta numa linha só tudo do mesmo colaborador (mesma pessoa + unidade):
    quem está com ASO atrasado e o exame já solicitado aparece uma vez, não duas */
@@ -1577,9 +1597,21 @@ function agruparAcompanhamento(lista){
   });
   return ordem.map(k => grupos[k]);
 }
-const corOrigem = o => o==='ASO'?'bg-red-50 text-danger':(o==='Laudo'?'bg-stone-100 text-stone-600':'bg-blue-50 text-blue-600');
 function gridAcompanhamento(lista){
   const grupos = agruparAcompanhamento(lista);
+  const linhas = grupos.map(g => g.itens.map((x, idx) => `
+    <tr class="hover:bg-slate-50 align-top">
+      ${idx === 0 ? `<td class="px-4 py-3 font-medium text-slate-700" rowspan="${g.itens.length}">${esc(g.colaborador)}
+            ${g.itens.length>1?`<span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700">${g.itens.length}</span>`:''}</td>
+          <td class="px-4 py-3 text-xs text-slate-600" rowspan="${g.itens.length}">${esc(uniNome(g.unidadeId))}</td>` : ''}
+      <td class="px-4 py-3 text-xs text-slate-700">${esc(x.tipo)}</td>
+      <td class="px-4 py-3 text-xs text-slate-500 whitespace-nowrap">${esc(x.quando)}</td>
+      <td class="px-4 py-3 text-xs whitespace-nowrap">${fmtDiasAcomp(x.dias)}</td>
+      <td class="px-4 py-3">${badge(x.statusLabel, x.statusCls)}</td>
+      <td class="px-4 py-3 text-right whitespace-nowrap no-print">
+        <button onclick="${x.acao}" class="px-2.5 py-1.5 rounded-lg text-xs bg-accent text-white hover:bg-blue-700 whitespace-nowrap">
+          <i class="fa-solid ${x.acaoIcon} mr-1"></i>${x.acaoLabel}</button></td>
+    </tr>`).join('')).join('');
   return `
     <div class="bg-white rounded-xl border border-slate-200 overflow-hidden print-block">
       <div class="px-5 py-4 border-b border-slate-200 flex items-center gap-2 flex-wrap">
@@ -1594,22 +1626,12 @@ function gridAcompanhamento(lista){
       <div class="overflow-x-auto max-h-[520px] overflow-y-auto">
         <table class="w-full text-sm data">
           <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
-            <tr><th class="px-4 py-3">Colaborador / documento</th><th class="px-4 py-3">Unidade</th><th class="px-4 py-3">Origem</th>
-                <th class="px-4 py-3">Detalhe</th><th class="px-4 py-3">Situação</th><th class="px-4 py-3 text-right no-print">Ação</th></tr>
+            <tr><th class="px-4 py-3">Colaborador / documento</th><th class="px-4 py-3">Unidade</th>
+                <th class="px-4 py-3">Tipo</th><th class="px-4 py-3">Quando</th><th class="px-4 py-3">Dias</th>
+                <th class="px-4 py-3">Status</th><th class="px-4 py-3 text-right no-print">Ação</th></tr>
           </thead>
           <tbody class="divide-y divide-slate-100">
-            ${grupos.length ? grupos.map(g => `
-              <tr class="hover:bg-slate-50 align-top">
-                <td class="px-4 py-3 font-medium text-slate-700">${esc(g.colaborador)}
-                  ${g.itens.length>1?`<span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700">${g.itens.length} pendências</span>`:''}</td>
-                <td class="px-4 py-3 text-xs text-slate-600">${esc(uniNome(g.unidadeId))}</td>
-                <td class="px-4 py-3"><div class="flex flex-col gap-1 items-start">${g.itens.map(x => badge(x.origem, corOrigem(x.origem))).join('')}</div></td>
-                <td class="px-4 py-3 text-xs text-slate-600"><div class="flex flex-col gap-1">${g.itens.map(x => `<span>${esc(x.detalhe)}</span>`).join('')}</div></td>
-                <td class="px-4 py-3"><div class="flex flex-col gap-1 items-start">${g.itens.map(x => badge(x.situacaoLabel, x.situacaoCls)).join('')}</div></td>
-                <td class="px-4 py-3 text-right whitespace-nowrap no-print"><div class="flex flex-col gap-1 items-end">${g.itens.map(x => `
-                  <button onclick="${x.acao}" class="px-2.5 py-1.5 rounded-lg text-xs bg-accent text-white hover:bg-blue-700 whitespace-nowrap">
-                    <i class="fa-solid ${x.acaoIcon} mr-1"></i>${x.acaoLabel}</button>`).join('')}</div></td>
-              </tr>`).join('') : vazio(UIAcomp.q ? 'Nenhum resultado para essa busca.' : 'Nada em aberto — tudo em dia!')}
+            ${grupos.length ? linhas : vazio(UIAcomp.q ? 'Nenhum resultado para essa busca.' : 'Nada em aberto — tudo em dia!')}
           </tbody>
         </table>
       </div>
@@ -1618,8 +1640,9 @@ function gridAcompanhamento(lista){
 function exportarAcompanhamento(){
   const l = itensAcompanhamento();
   exportCSV('acompanhamentos',
-    ['Origem','Colaborador','Unidade','Detalhe','Situação'],
-    l.map(x => [x.origem, x.colaborador, uniNome(x.unidadeId), x.detalhe, x.situacaoLabel]));
+    ['Colaborador / documento','Unidade','Tipo','Quando','Dias','Status'],
+    l.map(x => [x.colaborador, uniNome(x.unidadeId), x.tipo, x.quando,
+      x.dias==null ? '' : (x.dias<0 ? Math.abs(x.dias)+' d vencido' : 'em '+x.dias+' d'), x.statusLabel]));
 }
 function viewAcompanhamentos(){
   const alertasLaudo = alertasCriticos().filter(a => a.tipo === 'Laudo');
@@ -6970,6 +6993,7 @@ function baixarRelatorio(id){
 /* ═══════════════════════════ 8. BACKUP E SEGURANÇA ═══════════════════════════ */
 function renderBanner(){
   const b = $('#banner'); if(!b) return;
+  if(CLOUD_ON){ b.innerHTML = ''; return; }   /* nuvem é o backup — aviso de "só neste navegador" não se aplica */
   if(FS.permissao){ b.innerHTML = ''; return; }
   const jaTem = !!FS.pasta;
   b.innerHTML = `
