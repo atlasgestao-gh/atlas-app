@@ -5218,7 +5218,7 @@ function viewFaturamento(){
         <div class="overflow-x-auto max-h-[460px] overflow-y-auto">
           <table class="w-full text-sm data">
             <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
-              <tr><th class="px-4 py-3">Clínica</th><th class="px-4 py-3">Colaborador</th><th class="px-4 py-3">Unidade</th><th class="px-4 py-3">Exame</th>
+              <tr><th class="px-4 py-3 w-8"></th><th class="px-4 py-3">Colaborador</th><th class="px-4 py-3">Unidade</th><th class="px-4 py-3">Exame</th>
                   <th class="px-4 py-3">Data</th><th class="px-4 py-3 text-right">Custo</th>
                   <th class="px-4 py-3 text-right">Cobrança unidade</th><th class="px-4 py-3 text-right">Total da linha</th></tr></thead>
             <tbody class="divide-y divide-slate-100">
@@ -5229,9 +5229,8 @@ function viewFaturamento(){
                 const vExame = naoCompareceu(e) ? 0 : (Number(e.valor)||0);
                 return `
                 <tr class="hover:bg-slate-50 ${naoCompareceu(e)?'bg-red-50/40':''}">
-                  <td class="px-4 py-3 text-xs text-slate-600 whitespace-nowrap">
-                    <input type="checkbox" class="mr-2 align-middle accent-emerald-600" title="marcação auxiliar (não é salva)">
-                    ${esc(nomeClinicaUnidade(uni(e.unidadeId)))}</td>
+                  <td class="px-4 py-3 text-center">
+                    <input type="checkbox" class="align-middle accent-emerald-600" title="marcação auxiliar (não é salva)"></td>
                   <td class="px-4 py-3 font-medium text-slate-700">${esc(e.colaborador)}
                     ${naoCompareceu(e)?`<br>${badge('Não compareceu','bg-red-100 text-red-700')}`:''}</td>
                   <td class="px-4 py-3 text-xs text-slate-600">${esc(uniNome(e.unidadeId))}</td>
