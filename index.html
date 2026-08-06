@@ -1656,12 +1656,19 @@ function exportarAcompanhamento(){
     l.map(x => [it.aFazer.indexOf(x)>=0?'A fazer':'Acompanhar', x.colaborador, uniNome(x.unidadeId), x.funcao||'', x.tipo, x.quando,
       x.dias==null ? '' : (x.dias<0 ? Math.abs(x.dias)+' d vencido' : 'em '+x.dias+' d'), x.statusLabel]));
 }
-/* nomes com exame EM ABERTO no fornecedor que não existem no cadastro de colaboradores */
+/* uma emissão é "órfã" quando o nome dela não existe no cadastro de colaboradores
+   (vale para QUALQUER status — em aberto ou já realizado) */
+function semCadastroEmissao(e){
+  return !!norm(e.colaborador) && !DB.colaboradores.find(c => norm(c.nome) === norm(e.colaborador));
+}
+function emissoesOrfas(){ return DB.emissoes.filter(semCadastroEmissao); }
+/* agrupa as emissões órfãs por nome → [{nome, unidadeId, ids:[...]}] */
 function emissoesSemCadastro(){
-  const vistos = {};
-  return itensAcompanhamento().acompanhar.filter(x => x.semCadastro).filter(x => {
-    const k = norm(x.colaborador); if(vistos[k]) return false; vistos[k] = 1; return true;
-  });
+  const grupos = {}, ordem = [];
+  emissoesOrfas().forEach(e => { const k = norm(e.colaborador);
+    if(!grupos[k]){ grupos[k] = { nome:e.colaborador, unidadeId:e.unidadeId, ids:[] }; ordem.push(k); }
+    grupos[k].ids.push(e.id); });
+  return ordem.map(k => grupos[k]);
 }
 function alertaSemCadastro(){
   const l = emissoesSemCadastro();
@@ -1670,9 +1677,9 @@ function alertaSemCadastro(){
     <div class="rounded-xl border border-amber-300 bg-amber-50 px-5 py-4 flex items-start gap-3">
       <i class="fa-solid fa-triangle-exclamation text-amber-500 mt-0.5"></i>
       <div class="text-sm text-amber-800">
-        <p class="font-semibold">${l.length} exame(s) em aberto sem colaborador cadastrado</p>
-        <p class="text-xs mt-1">Há emissão em aberto para ${l.length===1?'este nome':'estes nomes'}, mas ${l.length===1?'ele não consta':'eles não constam'} em Colaboradores (cadastro excluído ou nome digitado diferente). Recadastre com o nome exato ou encerre a emissão (Editar → status Realizado/Cancelado).</p>
-        <p class="text-xs mt-2 font-medium">${l.map(x => esc(x.colaborador) + (x.unidadeId ? ' · ' + esc(uniNome(x.unidadeId)) : '')).join(' &nbsp;•&nbsp; ')}</p>
+        <p class="font-semibold">${l.length} exame(s) sem colaborador cadastrado</p>
+        <p class="text-xs mt-1">Há emissão para ${l.length===1?'este nome':'estes nomes'}, mas ${l.length===1?'ele não consta':'eles não constam'} em Colaboradores (cadastro excluído ou nome digitado diferente). Use "Conciliar" para vincular ao colaborador certo ou remover a emissão.</p>
+        <p class="text-xs mt-2 font-medium">${l.map(x => esc(x.nome) + (x.unidadeId ? ' · ' + esc(uniNome(x.unidadeId)) : '') + (x.ids.length>1?` (${x.ids.length}×)`:'')).join(' &nbsp;•&nbsp; ')}</p>
       </div>
     </div>`;
 }
@@ -1697,13 +1704,7 @@ function scoreNome(orfao, cand){
 }
 let _concCasos = [];
 function conciliarSemCadastro(){
-  const abertos = DB.emissoes.filter(e => (e.status === 'SOLICITADO' || e.status === 'AGENDADO')
-    && !DB.colaboradores.find(c => norm(c.nome) === norm(e.colaborador)));
-  const grupos = {}, ordem = [];
-  abertos.forEach(e => { const k = norm(e.colaborador);
-    if(!grupos[k]){ grupos[k] = { nome:e.colaborador, unidadeId:e.unidadeId, ids:[] }; ordem.push(k); }
-    grupos[k].ids.push(e.id); });
-  _concCasos = ordem.map(k => grupos[k]);
+  _concCasos = emissoesSemCadastro();
   if(!_concCasos.length){ toast('Nenhum exame sem cadastro para conciliar.', 'ok'); return; }
   const colabsOrd = DB.colaboradores.slice().sort((a,b) => (a.nome||'').localeCompare(b.nome||''));
   const linhas = _concCasos.map((caso,i) => {
@@ -4468,6 +4469,9 @@ function viewExames(){
         ${selectFiltro('fExF','Fechamento: todos', [{v:'SIM',l:'Com mês'},{v:'NAO',l:'Sem mês'}], 'UIEx.fech=this.value;UIEx.page=1;viewExames()', UIEx.fech)}
         ${selectFiltro('fExCart','Carteirinha: todas', [{v:'SIM',l:'Emitida (ok)'},{v:'PEND',l:'Pendente'},{v:'NAO',l:'Sem carteirinha'}], 'UIEx.cart=this.value;UIEx.page=1;viewExames()', UIEx.cart)}
         ${botao('Nova emissão','fa-plus','novaEmissao()')}
+        ${(() => { const n = emissoesSemCadastro().length; return n
+          ? `<button onclick="conciliarSemCadastro()" class="inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm bg-white border border-amber-300 text-amber-700 hover:bg-amber-50"><i class="fa-solid fa-wand-magic-sparkles"></i>Conciliar sem cadastro <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700">${n}</span></button>`
+          : ''; })()}
         ${botao('CSV','fa-file-csv','exportarExames()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
       </div>
       <div class="overflow-x-auto">
@@ -4482,7 +4486,8 @@ function viewExames(){
             ${lista.length ? lista.map(e => `
               <tr class="hover:bg-slate-50 align-top ${naoCompareceu(e)?'bg-red-50/40':''}">
                 <td class="px-4 py-3"><p class="font-medium text-slate-700">${esc(e.colaborador)}
-                    ${contColab[norm(e.colaborador)] > 1 ? `<span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700" title="${contColab[norm(e.colaborador)]} exames deste colaborador">${contColab[norm(e.colaborador)]}×</span>` : ''}</p></td>
+                    ${contColab[norm(e.colaborador)] > 1 ? `<span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700" title="${contColab[norm(e.colaborador)]} exames deste colaborador">${contColab[norm(e.colaborador)]}×</span>` : ''}
+                    ${semCadastroEmissao(e) ? `<span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 whitespace-nowrap" title="Este nome não está no cadastro de colaboradores. Use 'Conciliar exames sem cadastro' para vincular ou remover."><i class="fa-solid fa-triangle-exclamation mr-0.5"></i>não cadastrado</span>` : ''}</p></td>
                 <td class="px-4 py-3 text-xs text-slate-600">${esc(uniNome(e.unidadeId))}</td>
                 <td class="px-4 py-3 text-xs">${esc(tipoLabel(e.tipoExame))}
                   ${e.resultado ? '<br>'+badge(e.resultado, e.resultado==='Apto'?'bg-emerald-100 text-emerald-700':(e.resultado==='Inapto'?'bg-red-100 text-red-700':'bg-amber-100 text-amber-700')) : ''}</td>
