@@ -4517,13 +4517,27 @@ function novaEmissao(pre, opts){
     values: Object.assign({ status:'SOLICITADO', tipoExame:'PERIODICO', valor:0 }, pre || {}),
     afterRender: form => {
       ligarMatrizEmissao(form, true, true);
-      const foot = document.getElementById('modalFoot');
-      if(foot && !document.getElementById('btnArys')){
-        foot.insertAdjacentHTML('afterbegin',
-          `<button id="btnArys" type="button" onclick="agendarNaArys()" title="Copiar os dados e abrir o agendamento na Arys"
-            class="px-4 py-2 rounded-lg text-sm bg-emerald-600 text-white hover:bg-emerald-700 mr-auto">
-            <i class="fa-solid fa-truck-medical mr-1"></i>Agendar na Arys</button>`);
+      /* quadro com todos os dados para copiar no site da Arys, no topo da modal */
+      if(!document.getElementById('painelArys')){
+        form.insertAdjacentHTML('afterbegin', `
+          <div id="painelArys" class="sm:col-span-2 rounded-lg border border-emerald-200 bg-emerald-50/60 px-4 py-3">
+            <div class="flex items-center gap-2 mb-2">
+              <i class="fa-solid fa-truck-medical text-emerald-600"></i>
+              <p class="text-[11px] font-semibold uppercase tracking-wide text-emerald-700 flex-1">Dados para agendar na Arys</p>
+              <button type="button" onclick="agendarNaArys()"
+                class="px-3 py-1.5 rounded-lg text-xs bg-emerald-600 text-white hover:bg-emerald-700 whitespace-nowrap">
+                <i class="fa-solid fa-arrow-up-right-from-square mr-1"></i>Abrir site da Arys</button>
+            </div>
+            <div id="painelArysBox" class="text-sm"></div>
+            <p class="text-[10px] text-slate-500 mt-2"><i class="fa-solid fa-circle-info mr-1"></i>Abra o site, copie cada campo pelo ícone <i class="fa-regular fa-copy"></i> e cole. A DATA você preenche no site.</p>
+          </div>`);
       }
+      ['colaborador','unidadeId','tipoExame','funcao'].forEach(n => {
+        const el = form.elements[n]; if(!el) return;
+        el.addEventListener('change', atualizarPainelArys);
+        el.addEventListener('input', atualizarPainelArys);
+      });
+      atualizarPainelArys();
     },
     onSave: v => {
       if(v.colaborador) v.colaborador = maiusc(v.colaborador);
@@ -4567,22 +4581,36 @@ function dadosAgendamentoArys(){
     tipoExame: TIPOS[tipoExame] || tipoExame || '', telemedicina: 'Não', observacao: obs.join(' ')
   };
 }
-function agendarNaArys(){
-  const d = dadosAgendamentoArys();
-  if(!d){ toast('Abra a emissão primeiro.', 'erro'); return; }
-  if(!d.nome){ toast('Escolha o colaborador antes de agendar na Arys.', 'erro'); return; }
-  const linhas = [
+function linhasArys(d){
+  return [
     ['CNPJ', d.cnpj], ['Nome da Empresa', d.empresa], ['E-mail Solicitante', d.solicitante],
     ['Setor', d.setor], ['Função', d.funcao], ['Nome', d.nome],
     ['Data de Nascimento', fmtDate(d.nascimento)], ['CPF', d.cpf], ['RG', d.rg],
     ['E-mail Colaborador', d.email], ['Celular', d.celular], ['Gênero', d.genero],
     ['Tipo de Exame', d.tipoExame], ['Telemedicina', d.telemedicina], ['Observação', d.observacao]
   ];
-  const texto = linhas.map(l => l[0] + ': ' + (l[1] || '')).join('\n');
-  try{ navigator.clipboard.writeText(texto); }catch(e){}
-  window.open(ARYS_URL + '#atlas=' + encodeURIComponent(JSON.stringify(d)), '_blank');
-  toast('Dados copiados e site da Arys aberto. Confira, preencha a DATA e clique Agendar.');
 }
+let _arysLinhas = [];
+function copiarArys(i){
+  const l = _arysLinhas[i]; if(!l) return;
+  try{ navigator.clipboard.writeText(l[1] || ''); toast('Copiado: ' + l[0]); }
+  catch(e){ toast('Não foi possível copiar.', 'erro'); }
+}
+/* atualiza o quadro de dados na modal a partir dos campos AO VIVO */
+function atualizarPainelArys(){
+  const box = document.getElementById('painelArysBox'); if(!box) return;
+  const d = dadosAgendamentoArys(); if(!d) return;
+  _arysLinhas = linhasArys(d);
+  box.innerHTML = _arysLinhas.map((l, i) => `
+    <div class="flex items-start gap-2 py-1 border-b border-emerald-100 last:border-0">
+      <span class="text-[11px] text-slate-500 w-36 shrink-0 pt-0.5">${esc(l[0])}</span>
+      <span class="text-xs text-slate-800 flex-1 min-w-0 break-words">${esc(l[1] || '—')}</span>
+      <button type="button" onclick="copiarArys(${i})" title="Copiar este campo"
+        class="shrink-0 text-slate-400 hover:text-emerald-700 px-1"><i class="fa-regular fa-copy"></i></button>
+    </div>`).join('');
+}
+/* botão: por ora só abre o site; o preenchimento é copiando do quadro acima */
+function agendarNaArys(){ window.open(ARYS_URL, '_blank'); }
 /* atalho a partir do módulo de ASOs: exame já como Realizado, para virar ASO na hora */
 function novaEmissaoRetroativa(){
   novaEmissao({ status:'REALIZADO', tipoExame:'PERIODICO', dataClinico: isoToday(), valor:0 },
@@ -5181,7 +5209,7 @@ function viewFaturamento(){
         <div class="overflow-x-auto max-h-[460px] overflow-y-auto">
           <table class="w-full text-sm data">
             <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
-              <tr><th class="px-4 py-3">Colaborador</th><th class="px-4 py-3">Unidade</th><th class="px-4 py-3">Exame</th>
+              <tr><th class="px-4 py-3">Clínica</th><th class="px-4 py-3">Colaborador</th><th class="px-4 py-3">Unidade</th><th class="px-4 py-3">Exame</th>
                   <th class="px-4 py-3">Data</th><th class="px-4 py-3 text-right">Custo</th>
                   <th class="px-4 py-3 text-right">Cobrança unidade</th><th class="px-4 py-3 text-right">Total da linha</th></tr></thead>
             <tbody class="divide-y divide-slate-100">
@@ -5192,6 +5220,9 @@ function viewFaturamento(){
                 const vExame = naoCompareceu(e) ? 0 : (Number(e.valor)||0);
                 return `
                 <tr class="hover:bg-slate-50 ${naoCompareceu(e)?'bg-red-50/40':''}">
+                  <td class="px-4 py-3 text-xs text-slate-600 whitespace-nowrap">
+                    <input type="checkbox" class="mr-2 align-middle accent-emerald-600" title="marcação auxiliar (não é salva)">
+                    ${esc(nomeClinicaUnidade(uni(e.unidadeId)))}</td>
                   <td class="px-4 py-3 font-medium text-slate-700">${esc(e.colaborador)}
                     ${naoCompareceu(e)?`<br>${badge('Não compareceu','bg-red-100 text-red-700')}`:''}</td>
                   <td class="px-4 py-3 text-xs text-slate-600">${esc(uniNome(e.unidadeId))}</td>
@@ -5210,7 +5241,7 @@ function viewFaturamento(){
                 </tr>`; }).join('') : vazio('Nenhum exame no mês selecionado.')}
             </tbody>
             ${d.ems.length ? `<tfoot class="bg-slate-50 font-semibold text-sm sticky bottom-0 shadow-[0_-1px_0_rgba(0,0,0,.08)]">
-              <tr><td colspan="4" class="px-4 py-3 text-right bg-slate-50">Totais <span class="font-normal text-xs text-slate-500">(faltas não somam${d.carts.length?'; inclui carteirinhas':''})</span></td>
+              <tr><td colspan="5" class="px-4 py-3 text-right bg-slate-50">Totais <span class="font-normal text-xs text-slate-500">(faltas não somam${d.carts.length?'; inclui carteirinhas':''})</span></td>
                   <td class="px-4 py-3 text-right text-red-600 bg-slate-50">${fmtMoney(d.custoEx + d.custoCart)}</td>
                   <td class="px-4 py-3 text-right text-slate-600 bg-slate-50">${fmtMoney(d.recEx)}${d.recCart?`<span class="block text-[10px] font-normal text-teal-600">+ ${fmtMoney(d.recCart)} cart.</span>`:''}</td>
                   <td class="px-4 py-3 text-right text-success bg-slate-50">${fmtMoney(d.recEx + d.recCart)}</td></tr></tfoot>` : ''}
