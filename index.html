@@ -4515,7 +4515,16 @@ function novaEmissao(pre, opts){
     title: opts.titulo || 'Nova emissão de exame',
     fields: camposEmissao(),
     values: Object.assign({ status:'SOLICITADO', tipoExame:'PERIODICO', valor:0 }, pre || {}),
-    afterRender: form => ligarMatrizEmissao(form, true, true),
+    afterRender: form => {
+      ligarMatrizEmissao(form, true, true);
+      const foot = document.getElementById('modalFoot');
+      if(foot && !document.getElementById('btnArys')){
+        foot.insertAdjacentHTML('afterbegin',
+          `<button id="btnArys" type="button" onclick="agendarNaArys()" title="Copiar os dados e abrir o agendamento na Arys"
+            class="px-4 py-2 rounded-lg text-sm bg-emerald-600 text-white hover:bg-emerald-700 mr-auto">
+            <i class="fa-solid fa-truck-medical mr-1"></i>Agendar na Arys</button>`);
+      }
+    },
     onSave: v => {
       if(v.colaborador) v.colaborador = maiusc(v.colaborador);
       const nova = Object.assign({ id: uid('em'), localRaw:'', origem:'Cadastro manual', arys:'' }, v);
@@ -4530,6 +4539,49 @@ function novaEmissao(pre, opts){
       toast('Emissão registrada.' + (r ? ' ' + r : '') + (efeitos ? ' ' + efeitos + '.' : ''));
     }
   });
+}
+/* ═══════════════ Agendar na Arys ═══════════════
+   Lê os dados AO VIVO da modal (colaborador, unidade, tipo e função podem
+   ter acabado de mudar), completa com o cadastro do colaborador e as regras
+   fixas, copia tudo formatado e abre o site da Arys já com os dados no link. */
+const ARYS_URL = 'https://aryz.com.br/agende-seu-exame-2/';
+const ARYS_SOLICITANTE = 'gestão@atlasgestao.com';
+const ARYS_COPIA = 'carmen@emeraldvip.com.br';
+function dadosAgendamentoArys(){
+  const f = document.getElementById('modalForm'); if(!f) return null;
+  const val = n => f.elements[n] ? (f.elements[n].value || '').trim() : '';
+  const nome = val('colaborador'), unidadeId = val('unidadeId'), tipoExame = val('tipoExame');
+  const c = DB.colaboradores.find(x => norm(x.nome) === norm(nome)) || {};
+  const u = uni(unidadeId), e = u ? emp(u.empresaId) : null, cli = u ? clinicaDaUnidade(u) : null;
+  const funcao = val('funcao') || c.funcao || '';           /* modal vence; senão, cadastro */
+  const cart = exigeCarteirinha(unidadeId, funcao);
+  const obs = [];
+  if(cart && cart.exige) obs.push('Carteirinha sanitária.');
+  if(cli && cli.nome) obs.push('Clínica: ' + cli.nome + (cli.endereco ? ' - ' + cli.endereco : ''));
+  obs.push('Copiar para ' + ARYS_COPIA);
+  return {
+    cnpj: u ? (u.cnpj || '') : '', empresa: e ? (e.nome || '') : '', solicitante: ARYS_SOLICITANTE,
+    setor: u ? (u.sigla || '') : '', funcao, nome,
+    nascimento: c.nascimento || '', cpf: c.cpf || '', rg: c.rg || '',
+    email: c.email || '', celular: c.celular || '', genero: SEXO_PESSOA[c.sexo || ''] || '',
+    tipoExame: TIPOS[tipoExame] || tipoExame || '', telemedicina: 'Não', observacao: obs.join(' ')
+  };
+}
+function agendarNaArys(){
+  const d = dadosAgendamentoArys();
+  if(!d){ toast('Abra a emissão primeiro.', 'erro'); return; }
+  if(!d.nome){ toast('Escolha o colaborador antes de agendar na Arys.', 'erro'); return; }
+  const linhas = [
+    ['CNPJ', d.cnpj], ['Nome da Empresa', d.empresa], ['E-mail Solicitante', d.solicitante],
+    ['Setor', d.setor], ['Função', d.funcao], ['Nome', d.nome],
+    ['Data de Nascimento', fmtDate(d.nascimento)], ['CPF', d.cpf], ['RG', d.rg],
+    ['E-mail Colaborador', d.email], ['Celular', d.celular], ['Gênero', d.genero],
+    ['Tipo de Exame', d.tipoExame], ['Telemedicina', d.telemedicina], ['Observação', d.observacao]
+  ];
+  const texto = linhas.map(l => l[0] + ': ' + (l[1] || '')).join('\n');
+  try{ navigator.clipboard.writeText(texto); }catch(e){}
+  window.open(ARYS_URL + '#atlas=' + encodeURIComponent(JSON.stringify(d)), '_blank');
+  toast('Dados copiados e site da Arys aberto. Confira, preencha a DATA e clique Agendar.');
 }
 /* atalho a partir do módulo de ASOs: exame já como Realizado, para virar ASO na hora */
 function novaEmissaoRetroativa(){
