@@ -3639,7 +3639,138 @@ function setUltimoExame(colabId, iso){
   toast('Último exame atualizado — vencimento recalculado.', 'ok');
   viewCadastros();
 }
+/* Vazio honesto: se existe gente que casa com a busca mas está escondida pelos
+   filtros (o padrão é "Ativo"!), diz isso em vez de "não encontrado" — era o que
+   fazia parecer que um colaborador desligado/inativo não estava cadastrado. */
+function mensagemVazioColabs(){
+  const q = norm(UIColab.q);
+  if(q){
+    const todos = DB.colaboradores.filter(c => norm(c.nome + c.cpf + c.funcao + c.email).includes(q));
+    if(todos.length){
+      const st = [...new Set(todos.map(c => c.status || 'sem status'))].join(', ');
+      return `${todos.length} colaborador(es) casam com "${UIColab.q}", mas estão ocultos pelos filtros (status: ${st}). ` +
+             `Clique em "Limpar filtros" acima para ver.`;
+    }
+    return `Nenhum colaborador encontrado para "${UIColab.q}" — nem entre os inativos/desligados.`;
+  }
+  const total = DB.colaboradores.length;
+  const visiveis = colabsFiltrados().length;
+  if(total && !visiveis) return `Nenhum colaborador com os filtros atuais (${total} cadastrado(s) no total). Clique em "Limpar filtros".`;
+  return 'Nenhum colaborador encontrado.';
+}
+function limparFiltrosColabs(){
+  UIColab.emp=''; UIColab.uni=''; UIColab.status=''; UIColab.sexo=''; UIColab.revisar=false; UIColab.page=1;
+  viewCadastros();
+}
 function paginaColabs(p){ UIColab.page = p; viewCadastros(); }
+
+/* ══════════ DIAGNÓSTICO: por que este nome não bate com o cadastro? ══════════
+   Responde caso a caso (ex.: MARIANA FAUSTINA DA SILVA): existe cadastro?
+   está oculto por filtro? o nome tem caractere invisível? há parecidos? */
+function revelarCaracteres(s){
+  const bruto = String(s == null ? '' : s);
+  const estranhos = [];
+  for(const ch of bruto){
+    const cp = ch.codePointAt(0);
+    /* fora de A-Z a-z 0-9, espaço simples e acentos latinos comuns */
+    if(cp < 32 || (cp > 126 && !(cp >= 192 && cp <= 255)) ) estranhos.push('U+' + cp.toString(16).toUpperCase().padStart(4,'0') + ' (' + JSON.stringify(ch) + ')');
+  }
+  return { comprimento: bruto.length, temEspacoDuplo: /\s{2,}/.test(bruto),
+           temBordaEmBranco: bruto !== bruto.trim(), estranhos };
+}
+function diagnosticarNome(nome){
+  const alvo = String(nome || '').trim();
+  const n = norm(alvo);
+  const exato   = DB.colaboradores.filter(c => c.nome === alvo);
+  const porNorm = DB.colaboradores.filter(c => norm(c.nome) === n);
+  const parecidos = DB.colaboradores
+    .map(c => ({ c, s: scoreNome(alvo, c.nome) }))
+    .filter(x => x.s >= 0.45 && norm(x.c.nome) !== n)
+    .sort((a,b) => b.s - a.s).slice(0, 6);
+  const ems = DB.emissoes.filter(e => norm(e.colaborador) === n);
+  return { alvo, exato, porNorm, parecidos, ems, chars: revelarCaracteres(alvo) };
+}
+function abrirDiagnostico(nome){
+  const nomes = [...new Set(DB.emissoes.map(e => e.colaborador).filter(Boolean))].sort();
+  const inicial = nome || UIEx.q || '';
+  openInfo('Diagnóstico de vínculo do colaborador', `
+    <div class="space-y-3">
+      <p class="text-sm text-slate-600">Digite (ou escolha) o nome como ele aparece no agendamento. Eu explico exatamente por que ele bate — ou não — com o cadastro.</p>
+      <div class="flex gap-2">
+        <input id="diagNome" list="diagLista" value="${esc(inicial)}" placeholder="Ex.: MARIANA FAUSTINA DA SILVA"
+          class="flex-1 px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-accent/40">
+        <datalist id="diagLista">${nomes.map(x => `<option value="${esc(x)}">`).join('')}</datalist>
+        <button onclick="rodarDiagnostico()" class="px-4 py-2 rounded-lg text-sm bg-accent text-white hover:bg-blue-700">
+          <i class="fa-solid fa-stethoscope mr-1"></i>Analisar</button>
+      </div>
+      <div id="diagSaida"></div>
+    </div>`, 'max-w-3xl');
+  const inp = document.getElementById('diagNome');
+  if(inp){ inp.addEventListener('keydown', e => { if(e.key === 'Enter') rodarDiagnostico(); }); inp.focus(); }
+  if(inicial) rodarDiagnostico();
+}
+function rodarDiagnostico(){
+  const inp = document.getElementById('diagNome'), out = document.getElementById('diagSaida');
+  if(!inp || !out) return;
+  const nome = inp.value.trim();
+  if(!nome){ out.innerHTML = ''; return; }
+  const d = diagnosticarNome(nome);
+  const fichaLinha = c => `<li class="flex flex-wrap items-center gap-2 py-1">
+      <b class="text-slate-700">${esc(c.nome)}</b>
+      ${badgeStatusColab(c.status)}
+      <span class="text-xs text-slate-500">${esc(uniNome(c.unidadeId) || 'sem unidade')}</span>
+      ${c.cpf ? `<span class="text-xs text-slate-400">CPF ${esc(c.cpf)}</span>` : ''}
+      <button onclick="closeModal();editarColab('${c.id}')" class="text-xs text-accent underline">abrir ficha</button>
+    </li>`;
+  let veredito, cor, detalhe = '';
+
+  if(d.porNorm.length){
+    const c = d.porNorm[0];
+    const ocultoPorStatus = UIColab.status && c.status !== UIColab.status;
+    veredito = 'ESTÁ cadastrado — o vínculo está correto';
+    cor = 'emerald';
+    detalhe = `
+      <p class="text-sm text-slate-700 mb-2">Encontrei ${d.porNorm.length} cadastro(s) com este nome:</p>
+      <ul class="text-sm divide-y divide-slate-100">${d.porNorm.map(fichaLinha).join('')}</ul>
+      ${!d.exato.length ? `<p class="text-xs text-amber-700 mt-2"><i class="fa-solid fa-circle-info mr-1"></i>A grafia difere da emissão (acento, espaço ou maiúscula), mas o sistema considera o mesmo nome.</p>` : ''}
+      ${ocultoPorStatus ? `<div class="mt-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          <b>Por isso parecia que não estava cadastrada:</b> o status é <b>${esc(c.status||'—')}</b> e a lista de Colaboradores está filtrada por <b>${esc(UIColab.status)}</b>, então a ficha fica escondida.
+          <button onclick="closeModal();limparFiltrosColabs()" class="underline ml-1">Limpar os filtros e mostrar</button>
+        </div>` : ''}
+      ${d.porNorm.length > 1 ? `<div class="mt-3 rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-800"><b>Atenção:</b> há cadastro duplicado para o mesmo nome — convém excluir um deles.</div>` : ''}`;
+  } else {
+    veredito = 'NÃO está no cadastro de colaboradores';
+    cor = 'red';
+    detalhe = `
+      <p class="text-sm text-slate-700">Nenhuma ficha com este nome, em nenhum status (procurei ignorando acento, espaço e maiúsculas).</p>
+      ${d.parecidos.length ? `
+        <p class="text-sm text-slate-700 mt-3 mb-1">Nomes parecidos no cadastro — pode ser erro de digitação:</p>
+        <ul class="text-sm divide-y divide-slate-100">${d.parecidos.map(x => `<li class="flex flex-wrap items-center gap-2 py-1">
+            <span class="text-[11px] px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700">${Math.round(x.s*100)}%</span>
+            ${fichaLinha(x.c).replace('<li class="flex flex-wrap items-center gap-2 py-1">','').replace('</li>','')}
+          </li>`).join('')}</ul>` : '<p class="text-xs text-slate-500 mt-2">Também não achei nenhum nome parecido.</p>'}
+      <div class="flex flex-wrap gap-2 mt-3">
+        <button onclick="closeModal();conciliarSemCadastro()" class="px-3 py-1.5 rounded-lg text-xs bg-white border border-slate-300 text-slate-700 hover:bg-slate-50"><i class="fa-solid fa-wand-magic-sparkles mr-1"></i>Conciliar (vincular a um existente)</button>
+        <button onclick="closeModal();criarCadastrosFaltantes()" class="px-3 py-1.5 rounded-lg text-xs bg-amber-500 text-white hover:bg-amber-600"><i class="fa-solid fa-user-plus mr-1"></i>Criar os cadastros faltantes</button>
+      </div>`;
+  }
+  const ch = d.chars;
+  const alertaTexto = (ch.estranhos.length || ch.temEspacoDuplo || ch.temBordaEmBranco)
+    ? `<div class="mt-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+         <b>O texto do nome tem irregularidades:</b>
+         ${ch.temBordaEmBranco ? '<br>· espaço no começo/fim' : ''}
+         ${ch.temEspacoDuplo ? '<br>· espaço duplo no meio' : ''}
+         ${ch.estranhos.length ? '<br>· caractere invisível/estranho: ' + esc(ch.estranhos.join(', ')) : ''}
+       </div>` : '';
+  const cores = { emerald:'border-emerald-300 bg-emerald-50 text-emerald-800', red:'border-red-300 bg-red-50 text-red-800' };
+  out.innerHTML = `
+    <div class="rounded-lg border ${cores[cor]} px-4 py-3">
+      <p class="font-semibold text-sm mb-1"><i class="fa-solid fa-${cor==='emerald'?'circle-check':'circle-xmark'} mr-1"></i>${esc(d.alvo)} — ${veredito}</p>
+      <p class="text-xs">${d.ems.length} emissão(ões) com este nome em Agendamento de exames.</p>
+    </div>
+    <div class="mt-3">${detalhe}</div>
+    ${alertaTexto}`;
+}
 
 function abaColaboradores(){
   const todos = colabsFiltrados();
@@ -3668,6 +3799,9 @@ function abaColaboradores(){
       ${DB.colaboradores.some(c => !c.sexo)
         ? botao('Definir sexo pelo nome ('+DB.colaboradores.filter(c=>!c.sexo).length+')','fa-venus-mars','preencherSexoPorNome()',
                 'bg-white border border-amber-300 text-amber-700 hover:bg-amber-50')
+        : ''}
+      ${(UIColab.emp||UIColab.uni||UIColab.status||UIColab.sexo||UIColab.revisar)
+        ? botao('Limpar filtros','fa-filter-circle-xmark','limparFiltrosColabs()','bg-white border border-amber-300 text-amber-700 hover:bg-amber-50')
         : ''}
       ${botao('CSV','fa-file-csv','exportarColabs()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
     </div>
@@ -3705,7 +3839,7 @@ function abaColaboradores(){
                 <button onclick="editarColab('${c.id}')" class="text-slate-400 hover:text-accent px-1.5" title="Editar"><i class="fa-solid fa-pen"></i></button>
                 <button onclick="excluirColab('${c.id}')" class="text-slate-400 hover:text-danger px-1.5" title="Excluir"><i class="fa-solid fa-trash"></i></button>
               </td></tr>`;
-          }).join('') : vazio('Nenhum colaborador encontrado.')}
+          }).join('') : vazio(mensagemVazioColabs())}
         </tbody>
       </table>
     </div>
@@ -4819,6 +4953,7 @@ function viewExames(){
         ${(() => { const n = emissoesSemCadastro().length; return n
           ? `<button onclick="conciliarSemCadastro()" class="inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm bg-white border border-amber-300 text-amber-700 hover:bg-amber-50"><i class="fa-solid fa-wand-magic-sparkles"></i>Conciliar sem cadastro <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700">${n}</span></button>`
           : ''; })()}
+        ${botao('Diagnosticar vínculo','fa-stethoscope','abrirDiagnostico()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
         ${botao('CSV','fa-file-csv','exportarExames()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
       </div>
       <div class="overflow-x-auto">
@@ -4834,7 +4969,7 @@ function viewExames(){
               <tr class="hover:bg-slate-50 align-top ${naoCompareceu(e)?'bg-red-50/40':''}">
                 <td class="px-4 py-3"><p class="font-medium text-slate-700">${esc(e.colaborador)}
                     ${contColab[norm(e.colaborador)] > 1 ? `<span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700" title="${contColab[norm(e.colaborador)]} exames deste colaborador">${contColab[norm(e.colaborador)]}×</span>` : ''}
-                    ${semCadastroEmissao(e) ? `<span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 whitespace-nowrap" title="Este nome não está no cadastro de colaboradores. Use 'Conciliar exames sem cadastro' para vincular ou remover."><i class="fa-solid fa-triangle-exclamation mr-0.5"></i>não cadastrado</span>` : ''}</p></td>
+                    ${semCadastroEmissao(e) ? `<button onclick="abrirDiagnostico('${esc(e.colaborador).replace(/'/g,"\\'")}')" class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 hover:bg-red-200 whitespace-nowrap" title="Este nome não está no cadastro. Clique para ver o diagnóstico completo."><i class="fa-solid fa-triangle-exclamation mr-0.5"></i>não cadastrado</button>` : ''}</p></td>
                 <td class="px-4 py-3 text-xs text-slate-600">${esc(uniNome(e.unidadeId))}</td>
                 <td class="px-4 py-3 text-xs">${esc(tipoLabel(e.tipoExame))}
                   ${e.resultado ? '<br>'+badge(e.resultado, e.resultado==='Apto'?'bg-emerald-100 text-emerald-700':(e.resultado==='Inapto'?'bg-red-100 text-red-700':'bg-amber-100 text-amber-700')) : ''}</td>
