@@ -6135,19 +6135,12 @@ function viewFaturamento(){
           <h3 class="font-semibold text-sm text-slate-700">Exames a cobrar — ${mesLabel(d.mes)}</h3>
           <span id="selFatResumo" class="text-xs px-2 py-1 rounded-full bg-emerald-50 text-emerald-700 hidden no-print"></span>
           <button onclick="limparSelecaoFat()" id="selFatLimpar" class="text-[11px] underline text-slate-500 hover:text-slate-700 hidden no-print">limpar seleção</button>
-          ${(() => { const n = idsArysDoEscopo().length; return n
-            ? `<button onclick="remarcarPelaArys()" class="text-[11px] px-2 py-1 rounded-lg bg-white border border-slate-300 text-slate-600 hover:bg-slate-50 no-print"
-                 title="Marca exatamente os ${n} exame(s) com data na coluna Arys, desfazendo ajustes manuais deste mês">
-                 <i class="fa-solid fa-rotate mr-1"></i>Marcar pela Arys (${n})</button>`
-            : ''; })()}
           <span class="ml-auto text-xs text-slate-500">${d.exValidos.length} exame(s)${d.carts.length?' · '+d.carts.length+' carteirinha(s)':''}</span>
         </div>
         <div class="overflow-x-auto max-h-[460px] overflow-y-auto">
           <table class="w-full text-sm data">
             <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
-              <tr><th class="px-4 py-3 w-8 text-center no-print">
-                    <input type="checkbox" id="selFatTodas" onchange="alternarTodasSelFat(this.checked)"
-                      class="align-middle accent-emerald-600" title="marcar/desmarcar todas as linhas"></th>
+              <tr><th class="px-4 py-3 w-8"></th>
                   <th class="px-4 py-3">Colaborador</th><th class="px-4 py-3">Unidade</th><th class="px-4 py-3">Exame</th>
                   <th class="px-4 py-3">Data</th><th class="px-4 py-3 text-right">Custo</th>
                   <th class="px-4 py-3 text-right">Cobrança unidade</th><th class="px-4 py-3 text-right">Total da linha</th></tr></thead>
@@ -6163,8 +6156,7 @@ function viewFaturamento(){
                     <input type="checkbox" class="selFat align-middle accent-emerald-600" onchange="recalcularSelecaoFat()"
                       data-id="${e.id}" ${selecionadoFat(e.id)?'checked':''}
                       data-custo="${naoCompareceu(e)?0:(custoEmissao(e)+cCart)}" data-receita="${vExame + vCart}"
-                      title="${temArys(e)?'Consta na coluna Arys da planilha — já veio marcado':'Sem data na coluna Arys'} · a marcação soma no topo e nos cartões e fica guardada só neste navegador">
-                    ${temArys(e)?'<span class="block text-[9px] text-emerald-600 leading-none mt-0.5" title="tem data na coluna Arys">Arys</span>':''}</td>
+                      title="${temArys(e)?'Consta na coluna Arys da planilha — já veio marcado':'Sem data na coluna Arys'} · a marcação soma no topo e nos cartões e fica guardada só neste navegador"></td>
                   <td class="px-4 py-3 font-medium text-slate-700">${esc(e.colaborador)}
                     ${naoCompareceu(e)?`<br>${badge('Não compareceu','bg-red-100 text-red-700')}`:''}</td>
                   <td class="px-4 py-3 text-xs text-slate-600">${esc(uniNome(e.unidadeId))}</td>
@@ -6309,15 +6301,6 @@ function gravarSelFat(set){
   _selFatCache = { chave:k, set };
 }
 function selecionadoFat(id){ return lerSelFat().has(id); }
-/* refaz a marcação a partir da coluna Arys, descartando ajustes manuais do mês */
-function remarcarPelaArys(){
-  const ids = idsArysDoEscopo();
-  gravarSelFat(new Set(ids));
-  viewFaturamento();
-  toast(ids.length
-    ? ids.length + ' exame(s) marcados pela coluna Arys.'
-    : 'Nenhum exame deste mês tem data na coluna Arys.', ids.length ? 'ok' : 'info');
-}
 function recalcularSelecaoFat(){
   /* guarda o estado atual das caixas antes de somar */
   const todas = [...document.querySelectorAll('.selFat')];
@@ -6327,13 +6310,6 @@ function recalcularSelecaoFat(){
 
   const marcados = todas.filter(el => el.checked);
   const n = marcados.length;
-
-  /* caixa do cabeçalho reflete tudo/nada/parcial */
-  const cabec = document.getElementById('selFatTodas');
-  if(cabec){
-    cabec.checked = n > 0 && n === todas.length;
-    cabec.indeterminate = n > 0 && n < todas.length;
-  }
   const custoSel   = marcados.reduce((s,el) => s + (Number(el.dataset.custo)   || 0), 0);
   const receitaSel = marcados.reduce((s,el) => s + (Number(el.dataset.receita) || 0), 0);
   const margemSel  = receitaSel - custoSel;
@@ -6361,11 +6337,6 @@ function limparSelecaoFat(){
   document.querySelectorAll('.selFat:checked').forEach(el => { el.checked = false; });
   /* grava vazio (em vez de apagar a chave) para não voltar a espelhar a Arys sozinho */
   gravarSelFat(new Set());
-  recalcularSelecaoFat();
-}
-/* marca/desmarca todas as linhas visíveis de uma vez */
-function alternarTodasSelFat(marcar){
-  document.querySelectorAll('.selFat').forEach(el => { el.checked = !!marcar; });
   recalcularSelecaoFat();
 }
 function setValorEmissao(id, v){
