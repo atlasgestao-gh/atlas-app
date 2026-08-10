@@ -588,6 +588,7 @@ function seedFresh(){
   migrarNaoCompareceu(d);
   migrarDemissionais(d);
   migrarDataAso(d);
+  migrarSelecaoFat(d);
   return d;
 }
 
@@ -683,6 +684,7 @@ async function bootStorage(){
   migrarNaoCompareceu(DB);
   migrarDemissionais(DB);
   migrarDataAso(DB);
+  migrarSelecaoFat(DB);
 
   /* nuvem ligada mas a cópia mais recente veio de outra camada → sobe p/ nuvem */
   if(CLOUD_ON && candidatos[0].fonte !== 'nuvem') nuvemGravar(true);
@@ -6043,9 +6045,6 @@ function quadroResumoFat(d){
 
 function viewFaturamento(){
   const d = fechamentoDados();
-  /* a base pode ter chegado nova da nuvem — descarta o cache da seleção */
-  _selFatCache = { chave:null, set:null };
-
   $('#view').innerHTML = `
   <div class="space-y-5">
     <div class="bg-white rounded-xl border border-slate-200 p-4 flex flex-wrap gap-3 items-end no-print">
@@ -6253,68 +6252,47 @@ function viewFaturamento(){
 }
 /* ═══════ Seleção auxiliar da grade "Exames a cobrar" ═══════
    Marcação de trabalho: soma quantidade, custo, cobrança e margem dos marcados.
-   Fica guardada só NESTE navegador (localStorage), separada por mês + unidade —
-   assim sobrevive a re-render, troca de tela e até fechar o navegador, mas NUNCA
-   entra na base: não vai para a nuvem, nem para backup, CSV, e-mail ou impressão. */
-function chaveSelFat(){
-  const mes = UIFat.mes || mesFaturamentoPadrao();
-  return mes + '|' + (UIFat.unidade || 'todas');
-}
+   A marca pertence AO EXAME, não à tela: é uma lista simples de ids na base.
+   Assim ela não depende do mês nem do filtro de unidade que estava aberto, e
+   qualquer login, em qualquer navegador, enxerga as mesmas caixas marcadas.
+   Continua sem aparecer em nenhuma outra tela, nem em CSV, e-mail ou impressão. */
+
 /* A planilha traz uma coluna "Arys" na aba de emissões: quando ela tem data,
    aquele exame foi lançado na Arys. A data em si não importa — só a presença. */
 function temArys(e){ return !!(e && e.arys && String(e.arys).trim()); }
-/* ids com Arys preenchida dentro do mês/unidade que estão na tela */
-function idsArysDoEscopo(){
-  const mes = UIFat.mes || mesFaturamentoPadrao();
-  return DB.emissoes
-    .filter(e => exameEncerrado(e)
-      && (e.fechamento||'').slice(0,7) === mes
-      && (!UIFat.unidade || e.unidadeId === UIFat.unidade)
-      && temArys(e))
-    .map(e => e.id);
+
+/* Conversão única: o formato antigo guardava um mapa "mês|unidade" → ids, que
+   fazia a marcação sumir ao trocar de filtro. Junta tudo o que já estava
+   marcado em qualquer recorte e soma os exames com a coluna Arys preenchida. */
+function migrarSelecaoFat(d){
+  if(d.selFatVersao === 1) return;
+  const ids = new Set();
+  const antigo = d.selecaoFaturamento;
+  if(antigo && typeof antigo === 'object' && !Array.isArray(antigo))
+    Object.keys(antigo).forEach(k => (Array.isArray(antigo[k]) ? antigo[k] : []).forEach(id => ids.add(id)));
+  else if(Array.isArray(antigo)) antigo.forEach(id => ids.add(id));
+  (d.emissoes||[]).forEach(e => { if(temArys(e)) ids.add(e.id); });
+  d.selecaoFaturamento = [...ids];
+  d.selFatVersao = 1;
 }
-/* A seleção mora na BASE (DB), não no navegador: assim qualquer login, em
-   qualquer máquina, enxerga as mesmas marcações. Continua sem aparecer em
-   nenhuma outra tela, nem em CSV, e-mail ou impressão. */
-function selFatMapa(){
-  if(!DB.selecaoFaturamento || typeof DB.selecaoFaturamento !== 'object') DB.selecaoFaturamento = {};
+
+function selFatIds(){
+  if(!Array.isArray(DB.selecaoFaturamento)) migrarSelecaoFat(DB);
   return DB.selecaoFaturamento;
 }
-let _selFatCache = { chave:null, set:null };
-/* Primeira vez que um mês é aberto, a seleção nasce espelhando a coluna Arys.
-   Depois disso vale o que foi marcado — inclusive deixar tudo desmarcado
-   (por isso gravamos [] em vez de apagar a chave). */
-function lerSelFat(){
-  const k = chaveSelFat();
-  if(_selFatCache.chave === k && _selFatCache.set) return _selFatCache.set;
-  const mapa = selFatMapa();
-  if(!Array.isArray(mapa[k])){
-    mapa[k] = idsArysDoEscopo();
-    save();
-  }
-  const set = new Set(mapa[k]);
-  _selFatCache = { chave:k, set };
-  return set;
+function selecionadoFat(id){ return selFatIds().indexOf(id) >= 0; }
+function marcarFat(id, ligado){
+  const a = selFatIds(), i = a.indexOf(id);
+  if(ligado && i < 0){ a.push(id); return true; }
+  if(!ligado && i >= 0){ a.splice(i,1); return true; }
+  return false;
 }
-function gravarSelFat(set){
-  const k = chaveSelFat();
-  const mapa = selFatMapa();
-  const novo = [...set].sort();
-  const atual = Array.isArray(mapa[k]) ? mapa[k].slice().sort() : null;
-  /* só grava (e sobe para a nuvem) quando algo realmente mudou */
-  const igual = atual && atual.length === novo.length && atual.every((v,i) => v === novo[i]);
-  _selFatCache = { chave:k, set };
-  if(igual) return;
-  mapa[k] = novo;
-  save();
-}
-function selecionadoFat(id){ return lerSelFat().has(id); }
 function recalcularSelecaoFat(){
-  /* guarda o estado atual das caixas antes de somar */
+  /* o que está na tela manda: sincroniza as caixas visíveis com a base */
   const todas = [...document.querySelectorAll('.selFat')];
-  const set = lerSelFat();
-  todas.forEach(el => { if(el.checked) set.add(el.dataset.id); else set.delete(el.dataset.id); });
-  gravarSelFat(set);
+  let mudou = false;
+  todas.forEach(el => { if(marcarFat(el.dataset.id, el.checked)) mudou = true; });
+  if(mudou) save();
 
   const marcados = todas.filter(el => el.checked);
   const n = marcados.length;
@@ -6341,12 +6319,9 @@ function recalcularSelecaoFat(){
     ? `<span class="${margemSel>=0?'text-accent':'text-warning'} font-semibold">${fmtMoney(margemSel)}</span> nos ${n} selecionado(s)`
     : esc(cMargem.dataset.original || '');
 }
+/* limpa só o que está na tela — o que está fora do filtro não é tocado */
 function limparSelecaoFat(){
   document.querySelectorAll('.selFat:checked').forEach(el => { el.checked = false; });
-  /* grava vazio (em vez de apagar a chave) para não voltar a espelhar a Arys sozinho */
-  selFatMapa()[chaveSelFat()] = [];
-  _selFatCache = { chave:null, set:null };
-  save();
   recalcularSelecaoFat();
 }
 function setValorEmissao(id, v){
