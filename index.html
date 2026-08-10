@@ -2142,6 +2142,7 @@ function abaUnidades(){
                 <td class="px-4 py-3 text-right whitespace-nowrap no-print">
                   <button onclick="detalheUnidade('${u.id}')" class="text-slate-400 hover:text-accent px-1.5" title="Detalhes"><i class="fa-solid fa-eye"></i></button>
                   <button onclick="editarUnidade('${u.id}')" class="text-slate-400 hover:text-accent px-1.5" title="Editar"><i class="fa-solid fa-pen"></i></button>
+                  <button onclick="excluirUnidade('${u.id}')" class="text-slate-400 hover:text-danger px-1.5" title="Excluir"><i class="fa-solid fa-trash"></i></button>
                 </td>
               </tr>`; }).join('') : vazio('Nenhuma unidade encontrada.')}
           </tbody>
@@ -2313,6 +2314,51 @@ function editarEmpresa(id, aposSalvar){
       else viewEmpresas();
     }
   });
+}
+
+/* tudo o que ficaria órfão se a unidade sumisse — excluir só quando estiver vazia */
+function dependenciasUnidade(id){
+  return [
+    ['colaborador(es) cadastrado(s)', DB.colaboradores.filter(c => c.unidadeId === id).length, 'cadastros'],
+    ['exame(s) / agendamento(s)',     DB.emissoes.filter(e => e.unidadeId === id).length,      'exames'],
+    ['laudo(s) técnico(s)',           (DB.laudos||[]).filter(l => l.unidadeId === id).length,  'laudos'],
+    ['visita(s) técnica(s)',          (DB.visitas||[]).filter(v => v.unidadeId === id).length, 'visitas'],
+    ['documento(s) oficial(is)',      (DB.docsOficiais||[]).filter(d => d.unidadeId === id).length, 'documentos']
+  ].filter(x => x[1] > 0);
+}
+async function excluirUnidade(id){
+  const u = uni(id);
+  if(!u) return;
+  const dep = dependenciasUnidade(id);
+  if(dep.length){
+    openInfo('Não é possível excluir ' + u.nome, `
+      <div class="space-y-4">
+        <p class="text-sm text-slate-600">Esta unidade ainda tem registros vinculados. Apagá-la deixaria esse histórico
+          sem dono e tiraria os valores do faturamento dos meses já apurados.</p>
+        <ul class="text-sm text-slate-700 space-y-1">
+          ${dep.map(([rot,n,rota]) => `<li class="flex items-center gap-2">
+            <i class="fa-solid fa-circle text-[5px] text-slate-400"></i>
+            <b>${n}</b> ${esc(rot)}
+            <button onclick="closeModal();go('${rota}')" class="text-xs text-accent underline">abrir</button></li>`).join('')}
+        </ul>
+        <p class="text-sm text-slate-600">Para excluir, primeiro mova esses registros para outra unidade (ou exclua-os).
+          Se a unidade apenas deixou de operar, o caminho certo é <b>editá-la</b> e manter o histórico.</p>
+      </div>`);
+    return;
+  }
+  if(!confirm(`Excluir a unidade ${u.nome}?\n\nEla não tem colaboradores, exames, laudos, visitas nem documentos vinculados.\n\nUm ponto de retorno será guardado em "Backup e segurança".`)) return;
+  await guardarSnapshotLocal('antes de excluir a unidade ' + u.nome);
+  DB.unidades = DB.unidades.filter(x => x.id !== id);
+  if(DB.precosUnidade) delete DB.precosUnidade[id];        /* preço específico morre junto */
+  /* filtros de tela que apontavam para ela voltam para "todas" */
+  if(UIFat.unidade === id) UIFat.unidade = '';
+  if(UIColab.uni === id) UIColab.uni = '';
+  if(UIEx.uni === id) UIEx.uni = '';
+  if(UILaudo.uni === id) UILaudo.uni = '';
+  if(UIVis.uni === id) UIVis.uni = '';
+  if(UIRelGer.unidade === id) UIRelGer.unidade = '';
+  UIEmail.unidades = UIEmail.unidades.filter(x => x !== id);
+  save(); viewEmpresas(); toast('Unidade excluída.');
 }
 
 let _unidadeEditId = null;
@@ -6466,12 +6512,11 @@ function montarEmail(unidadeIds, mes){
     if(e.status !== 'REALIZADO') return false;
     return (e.fechamento||'').slice(0,7) === mes && unidadeIds.includes(e.unidadeId);
   }).sort((a,b) => (a.dataClinico||a.dataLab||'').localeCompare(b.dataClinico||b.dataLab||''));
-  const lds = [], vis = [], mensais = [];
+  const lds = [], vis = [];
   unidadeIds.forEach(uid2 => {
     entregasLaudos(mes, uid2).forEach(x => lds.push(Object.assign({ unidadeId:x.laudo.unidadeId }, x.v)));
   });
   (DB.visitas||[]).forEach(v => { if(v.status==='REALIZADO' && (v.fechamento||v.mes||(v.data||'').slice(0,7))===mes && unidadeIds.includes(v.unidadeId)) vis.push(v); });
-  unidadeIds.forEach(uid2 => { const m = precoMensal(uid2); if(m>0) mensais.push({ unidadeId:uid2, valor:m }); });
 
   const unidades = unidadeIds.map(uni).filter(Boolean);
   const siglas = unidades.map(u => u.sigla).join(', ');
@@ -6481,13 +6526,9 @@ function montarEmail(unidadeIds, mes){
   const mesBarra = (nomesMes[Number(mm)-1]||'') + '/' + my;
   const assunto = `Fechamento Mensal: Exames Clínicos e Laboratoriais de ${mesBarra} - ${siglas}`;
 
-  const recEx = ems.reduce((s,e)=>s+(Number(e.valor)||0),0);
-  const recLd = lds.reduce((s,l)=>s+(Number(l.valor)||0),0);
-  const recVi = vis.reduce((s,v)=>s+(Number(v.valor)||0),0);
-  const recMe = mensais.reduce((s,m)=>s+(Number(m.valor)||0),0);
+  /* este e-mail é o RELATO do que foi realizado — nenhum valor entra aqui.
+     A cobrança segue à parte, pela nota; ver "Exportar consolidado" no faturamento. */
   const carts = ems.filter(e => e.carteirinha && tipoAceitaCarteirinha(e.tipoExame));
-  const recCa = carts.reduce((s,e)=>s+precoCarteirinha(e.unidadeId),0);
-  const total = recEx+recLd+recVi+recMe+recCa;
 
   const th = 'style="background:#1e293b;color:#fff;padding:6px 8px;text-align:left;font-size:12px;border:1px solid #cbd5e1"';
   const td = 'style="padding:6px 8px;border:1px solid #cbd5e1;font-size:12px"';
@@ -6516,63 +6557,63 @@ function montarEmail(unidadeIds, mes){
   const tabLaudos = lds.length ? `
     <p style="font-size:13px;margin:14px 0 4px"><b>Laudos técnicos (PCMSO / PGR / LTCAT)</b></p>
     <table style="border-collapse:collapse;width:100%;margin:4px 0">
-      <thead><tr><th ${th}>Unidade</th><th ${th}>Documentos</th><th ${th}>Emissão</th><th ${th}>Valor</th></tr></thead>
-      <tbody>${lds.map(l => `<tr><td ${td}>${esc(uniNome(l.unidadeId))}</td><td ${td}>${esc(docsLabel(l.documentos))}</td><td ${td}>${fmtDate(l.emissao)}</td><td ${td}>${fmtMoney(l.valor||0)}</td></tr>`).join('')}</tbody>
+      <thead><tr><th ${th}>Unidade</th><th ${th}>Documentos</th><th ${th}>Emissão</th></tr></thead>
+      <tbody>${lds.map(l => `<tr><td ${td}>${esc(uniNome(l.unidadeId))}</td><td ${td}>${esc(docsLabel(l.documentos))}</td><td ${td}>${fmtDate(l.emissao)}</td></tr>`).join('')}</tbody>
     </table>` : '';
 
   const tabVisitas = vis.length ? `
     <p style="font-size:13px;margin:14px 0 4px"><b>Visitas técnicas</b></p>
     <table style="border-collapse:collapse;width:100%;margin:4px 0">
-      <thead><tr><th ${th}>Unidade</th><th ${th}>Data</th><th ${th}>Observação</th><th ${th}>Valor</th></tr></thead>
-      <tbody>${vis.map(v => `<tr><td ${td}>${esc(uniNome(v.unidadeId))}</td><td ${td}>${fmtDate(v.data)}</td><td ${td}>${esc(v.obs||'')}</td><td ${td}>${fmtMoney(v.valor||0)}</td></tr>`).join('')}</tbody>
+      <thead><tr><th ${th}>Unidade</th><th ${th}>Data</th><th ${th}>Observação</th></tr></thead>
+      <tbody>${vis.map(v => `<tr><td ${td}>${esc(uniNome(v.unidadeId))}</td><td ${td}>${fmtDate(v.data)}</td><td ${td}>${esc(v.obs||'—')}</td></tr>`).join('')}</tbody>
     </table>` : '';
 
   const tabCarts = carts.length ? `
-    <p style="font-size:13px;margin:14px 0 4px"><b>Carteirinhas sanitárias emitidas</b></p>
+    <p style="font-size:13px;margin:14px 0 4px"><b>Carteirinhas sanitárias emitidas (${carts.length})</b></p>
     <table style="border-collapse:collapse;width:100%;margin:4px 0">
-      <thead><tr><th ${th}>Colaborador</th><th ${th}>Local</th><th ${th}>Data</th><th ${th}>Valor</th></tr></thead>
+      <thead><tr><th ${th}>Colaborador</th><th ${th}>Local</th><th ${th}>Data</th></tr></thead>
       <tbody>${carts.map(e => `<tr><td ${td}>${esc(e.colaborador)}</td>
         <td ${td}>${esc((uni(e.unidadeId)||{}).sigla||'')}</td>
-        <td ${td}>${fmtDate(e.dataClinico||e.dataLab)}</td>
-        <td ${td}>${fmtMoney(precoCarteirinha(e.unidadeId))}</td></tr>`).join('')}
-        <tr><td ${td} colspan="3"><b>Total — ${carts.length} carteirinha(s)</b></td><td ${td}><b>${fmtMoney(recCa)}</b></td></tr>
+        <td ${td}>${fmtDate(e.dataClinico||e.dataLab)}</td></tr>`).join('')}
       </tbody>
     </table>` : '';
 
-  const tabMensais = mensais.length ? `
-    <p style="font-size:13px;margin:14px 0 4px"><b>Mensalidades</b></p>
-    <table style="border-collapse:collapse;width:100%;margin:4px 0">
-      <thead><tr><th ${th}>Unidade</th><th ${th}>Valor mensal</th></tr></thead>
-      <tbody>${mensais.map(m => `<tr><td ${td}>${esc(uniNome(m.unidadeId))}</td><td ${td}>${fmtMoney(m.valor)}</td></tr>`).join('')}</tbody>
-    </table>` : '';
+  /* unidades selecionadas que não tiveram nenhum movimento no mês */
+  const temMovimento = id =>
+    ems.some(e => e.unidadeId===id) || lds.some(l => l.unidadeId===id) || vis.some(v => v.unidadeId===id);
+  const semMovimento = unidades.filter(u => !temMovimento(u.id));
+  const nadaNoMes = !ems.length && !lds.length && !vis.length && !carts.length;
 
-  /* unidades selecionadas que não têm nada a cobrar no mês */
-  const temCobranca = id =>
-    ems.some(e => e.unidadeId===id) || lds.some(l => l.unidadeId===id) ||
-    vis.some(v => v.unidadeId===id) || mensais.some(m => m.unidadeId===id);
-  const semCobranca = unidades.filter(u => !temCobranca(u.id));
-  const totalGeralZero = total === 0 && !ems.length && !lds.length && !vis.length && !mensais.length && !carts.length;
+  /* lista só o que de fato aconteceu — nada de contagem zerada */
+  const partes = [];
+  if(ems.length)   partes.push(`${ems.length} exame(s) ocupacional(is)`);
+  if(carts.length) partes.push(`${carts.length} carteirinha(s) sanitária(s)`);
+  if(lds.length)   partes.push(`${lds.length} laudo(s) técnico(s)`);
+  if(vis.length)   partes.push(`${vis.length} visita(s) técnica(s)`);
+  const resumoTexto = partes.length > 1
+    ? partes.slice(0,-1).join(', ') + ' e ' + partes[partes.length-1]
+    : (partes[0] || '');
 
-  const notaSemCobranca = totalGeralZero
-    ? `<p><b>Não haverá cobrança referente a este período.</b> Não houve exames, laudos, visitas técnicas ou mensalidades a faturar no mês de ${mesLabel(mes)}.</p>`
-    : (semCobranca.length
-        ? `<p style="color:#475569"><i>Observação:</i> ${semCobranca.length>1?'as unidades':'a unidade'}
-           <b>${semCobranca.map(u=>esc(u.nome)).join(', ')}</b> não ${semCobranca.length>1?'tiveram':'teve'} cobrança neste período.</p>`
+  const notaSemMovimento = nadaNoMes
+    ? `<p>Não houve exames, laudos ou visitas técnicas a registrar neste período.</p>`
+    : (semMovimento.length
+        ? `<p style="color:#475569"><i>Observação:</i> ${semMovimento.length>1?'as unidades':'a unidade'}
+           <b>${semMovimento.map(u=>esc(u.nome)).join(', ')}</b> não ${semMovimento.length>1?'registraram':'registrou'} movimento neste período.</p>`
         : '');
 
-  const corpoProcedimentos = totalGeralZero ? '' : `
-    <p>Segue os ASOs e o resumo dos procedimentos realizados:</p>
-    ${tabExames}${tabCarts}${tabLaudos}${tabVisitas}${tabMensais}`;
+  const corpoProcedimentos = nadaNoMes ? '' : `
+    <p>No período foram realizados ${resumoTexto}. Seguem os ASOs e o detalhamento:</p>
+    ${tabExames}${tabCarts}${tabLaudos}${tabVisitas}`;
 
   const html = `<div style="font-family:Arial,Helvetica,sans-serif;color:#1e293b;font-size:13px;line-height:1.5">
     <p>Prezados,</p>
     <p>Gostaria de compartilhar o fechamento referente aos exames clínicos e laboratoriais realizados pelos colaboradores
     ${unidades.length>1?'das unidades':'da unidade'} de <b>${esc(cidades)}</b> durante o mês de <b>${mesLabel(mes)}</b>.</p>
-    ${notaSemCobranca}${corpoProcedimentos}
+    ${notaSemMovimento}${corpoProcedimentos}
     <p>Permanecemos à disposição para qualquer esclarecimento.</p>
     <p>Atenciosamente,<br>Gestão Atlas — Medicina Ocupacional e SST</p>
   </div>`;
-  return { assunto, html, vazio: totalGeralZero };
+  return { assunto, html, vazio: nadaNoMes };
 }
 
 function renderPreviewEmail(){
