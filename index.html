@@ -6043,6 +6043,8 @@ function quadroResumoFat(d){
 
 function viewFaturamento(){
   const d = fechamentoDados();
+  /* a base pode ter chegado nova da nuvem — descarta o cache da seleção */
+  _selFatCache = { chave:null, set:null };
 
   $('#view').innerHTML = `
   <div class="space-y-5">
@@ -6155,8 +6157,7 @@ function viewFaturamento(){
                   <td class="px-4 py-3 text-center">
                     <input type="checkbox" class="selFat align-middle accent-emerald-600" onchange="recalcularSelecaoFat()"
                       data-id="${e.id}" ${selecionadoFat(e.id)?'checked':''}
-                      data-custo="${naoCompareceu(e)?0:(custoEmissao(e)+cCart)}" data-receita="${vExame + vCart}"
-                      title="${temArys(e)?'Consta na coluna Arys da planilha — já veio marcado':'Sem data na coluna Arys'} · a marcação soma no topo e nos cartões e fica guardada só neste navegador"></td>
+                      data-custo="${naoCompareceu(e)?0:(custoEmissao(e)+cCart)}" data-receita="${vExame + vCart}"></td>
                   <td class="px-4 py-3 font-medium text-slate-700">${esc(e.colaborador)}
                     ${naoCompareceu(e)?`<br>${badge('Não compareceu','bg-red-100 text-red-700')}`:''}</td>
                   <td class="px-4 py-3 text-xs text-slate-600">${esc(uniNome(e.unidadeId))}</td>
@@ -6257,7 +6258,7 @@ function viewFaturamento(){
    entra na base: não vai para a nuvem, nem para backup, CSV, e-mail ou impressão. */
 function chaveSelFat(){
   const mes = UIFat.mes || mesFaturamentoPadrao();
-  return 'atlas.selFat.' + mes + '.' + (UIFat.unidade || 'todas');
+  return mes + '|' + (UIFat.unidade || 'todas');
 }
 /* A planilha traz uma coluna "Arys" na aba de emissões: quando ela tem data,
    aquele exame foi lançado na Arys. A data em si não importa — só a presença. */
@@ -6272,33 +6273,40 @@ function idsArysDoEscopo(){
       && temArys(e))
     .map(e => e.id);
 }
+/* A seleção mora na BASE (DB), não no navegador: assim qualquer login, em
+   qualquer máquina, enxerga as mesmas marcações. Continua sem aparecer em
+   nenhuma outra tela, nem em CSV, e-mail ou impressão. */
+function selFatMapa(){
+  if(!DB.selecaoFaturamento || typeof DB.selecaoFaturamento !== 'object') DB.selecaoFaturamento = {};
+  return DB.selecaoFaturamento;
+}
 let _selFatCache = { chave:null, set:null };
 /* Primeira vez que um mês é aberto, a seleção nasce espelhando a coluna Arys.
-   Depois disso vale o que a Jessica marcou — inclusive deixar tudo desmarcado
+   Depois disso vale o que foi marcado — inclusive deixar tudo desmarcado
    (por isso gravamos [] em vez de apagar a chave). */
 function lerSelFat(){
   const k = chaveSelFat();
   if(_selFatCache.chave === k && _selFatCache.set) return _selFatCache.set;
-  let set;
-  let bruto = null;
-  try{ bruto = localStorage.getItem(k); }catch(e){}
-  if(bruto == null){
-    set = new Set(idsArysDoEscopo());
-    gravarSelFatEm(k, set);
-  } else {
-    try{ set = new Set(JSON.parse(bruto)); }catch(e){ set = new Set(); }
+  const mapa = selFatMapa();
+  if(!Array.isArray(mapa[k])){
+    mapa[k] = idsArysDoEscopo();
+    save();
   }
+  const set = new Set(mapa[k]);
   _selFatCache = { chave:k, set };
   return set;
 }
-function gravarSelFatEm(chave, set){
-  try{ localStorage.setItem(chave, JSON.stringify([...set])); }
-  catch(e){ /* localStorage cheio: a seleção segue valendo só nesta tela */ }
-}
 function gravarSelFat(set){
   const k = chaveSelFat();
-  gravarSelFatEm(k, set);
+  const mapa = selFatMapa();
+  const novo = [...set].sort();
+  const atual = Array.isArray(mapa[k]) ? mapa[k].slice().sort() : null;
+  /* só grava (e sobe para a nuvem) quando algo realmente mudou */
+  const igual = atual && atual.length === novo.length && atual.every((v,i) => v === novo[i]);
   _selFatCache = { chave:k, set };
+  if(igual) return;
+  mapa[k] = novo;
+  save();
 }
 function selecionadoFat(id){ return lerSelFat().has(id); }
 function recalcularSelecaoFat(){
@@ -6336,7 +6344,9 @@ function recalcularSelecaoFat(){
 function limparSelecaoFat(){
   document.querySelectorAll('.selFat:checked').forEach(el => { el.checked = false; });
   /* grava vazio (em vez de apagar a chave) para não voltar a espelhar a Arys sozinho */
-  gravarSelFat(new Set());
+  selFatMapa()[chaveSelFat()] = [];
+  _selFatCache = { chave:null, set:null };
+  save();
   recalcularSelecaoFat();
 }
 function setValorEmissao(id, v){
