@@ -6135,6 +6135,11 @@ function viewFaturamento(){
           <h3 class="font-semibold text-sm text-slate-700">Exames a cobrar — ${mesLabel(d.mes)}</h3>
           <span id="selFatResumo" class="text-xs px-2 py-1 rounded-full bg-emerald-50 text-emerald-700 hidden no-print"></span>
           <button onclick="limparSelecaoFat()" id="selFatLimpar" class="text-[11px] underline text-slate-500 hover:text-slate-700 hidden no-print">limpar seleção</button>
+          ${(() => { const n = idsArysDoEscopo().length; return n
+            ? `<button onclick="remarcarPelaArys()" class="text-[11px] px-2 py-1 rounded-lg bg-white border border-slate-300 text-slate-600 hover:bg-slate-50 no-print"
+                 title="Marca exatamente os ${n} exame(s) com data na coluna Arys, desfazendo ajustes manuais deste mês">
+                 <i class="fa-solid fa-rotate mr-1"></i>Marcar pela Arys (${n})</button>`
+            : ''; })()}
           <span class="ml-auto text-xs text-slate-500">${d.exValidos.length} exame(s)${d.carts.length?' · '+d.carts.length+' carteirinha(s)':''}</span>
         </div>
         <div class="overflow-x-auto max-h-[460px] overflow-y-auto">
@@ -6158,7 +6163,8 @@ function viewFaturamento(){
                     <input type="checkbox" class="selFat align-middle accent-emerald-600" onchange="recalcularSelecaoFat()"
                       data-id="${e.id}" ${selecionadoFat(e.id)?'checked':''}
                       data-custo="${naoCompareceu(e)?0:(custoEmissao(e)+cCart)}" data-receita="${vExame + vCart}"
-                      title="marcação de trabalho — soma no topo e nos cartões; fica guardada só neste navegador"></td>
+                      title="${temArys(e)?'Consta na coluna Arys da planilha — já veio marcado':'Sem data na coluna Arys'} · a marcação soma no topo e nos cartões e fica guardada só neste navegador">
+                    ${temArys(e)?'<span class="block text-[9px] text-emerald-600 leading-none mt-0.5" title="tem data na coluna Arys">Arys</span>':''}</td>
                   <td class="px-4 py-3 font-medium text-slate-700">${esc(e.colaborador)}
                     ${naoCompareceu(e)?`<br>${badge('Não compareceu','bg-red-100 text-red-700')}`:''}</td>
                   <td class="px-4 py-3 text-xs text-slate-600">${esc(uniNome(e.unidadeId))}</td>
@@ -6261,17 +6267,57 @@ function chaveSelFat(){
   const mes = UIFat.mes || mesFaturamentoPadrao();
   return 'atlas.selFat.' + mes + '.' + (UIFat.unidade || 'todas');
 }
+/* A planilha traz uma coluna "Arys" na aba de emissões: quando ela tem data,
+   aquele exame foi lançado na Arys. A data em si não importa — só a presença. */
+function temArys(e){ return !!(e && e.arys && String(e.arys).trim()); }
+/* ids com Arys preenchida dentro do mês/unidade que estão na tela */
+function idsArysDoEscopo(){
+  const mes = UIFat.mes || mesFaturamentoPadrao();
+  return DB.emissoes
+    .filter(e => exameEncerrado(e)
+      && (e.fechamento||'').slice(0,7) === mes
+      && (!UIFat.unidade || e.unidadeId === UIFat.unidade)
+      && temArys(e))
+    .map(e => e.id);
+}
+let _selFatCache = { chave:null, set:null };
+/* Primeira vez que um mês é aberto, a seleção nasce espelhando a coluna Arys.
+   Depois disso vale o que a Jessica marcou — inclusive deixar tudo desmarcado
+   (por isso gravamos [] em vez de apagar a chave). */
 function lerSelFat(){
-  try{ return new Set(JSON.parse(localStorage.getItem(chaveSelFat()) || '[]')); }
-  catch(e){ return new Set(); }
+  const k = chaveSelFat();
+  if(_selFatCache.chave === k && _selFatCache.set) return _selFatCache.set;
+  let set;
+  let bruto = null;
+  try{ bruto = localStorage.getItem(k); }catch(e){}
+  if(bruto == null){
+    set = new Set(idsArysDoEscopo());
+    gravarSelFatEm(k, set);
+  } else {
+    try{ set = new Set(JSON.parse(bruto)); }catch(e){ set = new Set(); }
+  }
+  _selFatCache = { chave:k, set };
+  return set;
+}
+function gravarSelFatEm(chave, set){
+  try{ localStorage.setItem(chave, JSON.stringify([...set])); }
+  catch(e){ /* localStorage cheio: a seleção segue valendo só nesta tela */ }
 }
 function gravarSelFat(set){
-  try{
-    if(set.size) localStorage.setItem(chaveSelFat(), JSON.stringify([...set]));
-    else localStorage.removeItem(chaveSelFat());
-  }catch(e){ /* localStorage cheio: a seleção segue valendo só nesta tela */ }
+  const k = chaveSelFat();
+  gravarSelFatEm(k, set);
+  _selFatCache = { chave:k, set };
 }
 function selecionadoFat(id){ return lerSelFat().has(id); }
+/* refaz a marcação a partir da coluna Arys, descartando ajustes manuais do mês */
+function remarcarPelaArys(){
+  const ids = idsArysDoEscopo();
+  gravarSelFat(new Set(ids));
+  viewFaturamento();
+  toast(ids.length
+    ? ids.length + ' exame(s) marcados pela coluna Arys.'
+    : 'Nenhum exame deste mês tem data na coluna Arys.', ids.length ? 'ok' : 'info');
+}
 function recalcularSelecaoFat(){
   /* guarda o estado atual das caixas antes de somar */
   const todas = [...document.querySelectorAll('.selFat')];
@@ -6313,7 +6359,8 @@ function recalcularSelecaoFat(){
 }
 function limparSelecaoFat(){
   document.querySelectorAll('.selFat:checked').forEach(el => { el.checked = false; });
-  try{ localStorage.removeItem(chaveSelFat()); }catch(e){}
+  /* grava vazio (em vez de apagar a chave) para não voltar a espelhar a Arys sozinho */
+  gravarSelFat(new Set());
   recalcularSelecaoFat();
 }
 /* marca/desmarca todas as linhas visíveis de uma vez */
