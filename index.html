@@ -105,9 +105,11 @@ tailwind.config = {
 
   <footer class="px-6 py-4 text-[11px] text-slate-500 border-t border-slate-200 bg-white no-print">
     <span class="font-display text-primary">ATLAS</span> · Rua Comendador Hugo Winter, 267 — Ribeirão Pires/SP · 11 9.4335-6617 · atlas@zamith.adv.br<br class="sm:hidden">
-    <button onclick="sincronizarPlanilha()" class="underline hover:text-accent">sincronizar novidades da planilha</button>
-    ·
-    <button onclick="resetToSeed()" class="underline hover:text-danger">recarregar base das planilhas</button>
+    <span id="rodapePlanilha" class="hidden">
+      <button onclick="sincronizarPlanilha()" class="underline hover:text-accent">sincronizar novidades da planilha</button>
+      ·
+      <button onclick="resetToSeed()" class="underline hover:text-danger">recarregar base das planilhas</button>
+    </span>
   </footer>
 </div>
 
@@ -1026,7 +1028,23 @@ async function importBackup(input){
   };
   r.readAsText(f);
 }
+/* No build de nuvem o SEED vai VAZIO de propósito (os dados vivem no Supabase).
+   Sem esta trava, "Recarregar tudo" apagaria colaboradores, ASOs, exames e laudos. */
+function planilhaOrigemDisponivel(){
+  return !!(SEED && Array.isArray(SEED.colaboradores) && SEED.colaboradores.length);
+}
+function avisarSemPlanilha(){
+  openInfo('Indisponível nesta versão', `
+    <div class="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+      <p class="font-semibold mb-1"><i class="fa-solid fa-shield-halved mr-1"></i>Esta função está desativada por segurança.</p>
+      <p class="text-xs">Nesta versão os dados vivem na <b>nuvem</b>, não numa planilha embutida no arquivo. Recarregar
+      a "base das planilhas" aqui apagaria tudo, porque a planilha de origem vem vazia neste build.</p>
+      <p class="text-xs mt-2">Para trazer dados de planilha, use <b>Restaurar de um arquivo</b> (backup .json) ou a
+      importação por unidade em <b>Clientes e locais → Unidades</b>.</p>
+    </div>`, 'max-w-lg');
+}
 async function resetToSeed(){
+  if(!planilhaOrigemDisponivel()){ avisarSemPlanilha(); return; }
   if(!confirm('Recarregar a base original das planilhas (colaboradores, ASOs, emissões, laudos, cargos, eSocial)?\n\n' +
               'O que foi criado DENTRO da plataforma é preservado: atestados NR-01, relatórios gerados, ' +
               'visitas técnicas, documentos emitidos e preços personalizados.\n\n' +
@@ -1069,6 +1087,7 @@ function analisarSincronia(){
   return { s, colabNovos, emNovas, asosNovos };
 }
 function sincronizarPlanilha(){
+  if(!planilhaOrigemDisponivel()){ avisarSemPlanilha(); return; }
   const a = analisarSincronia();
   const total = a.colabNovos.length + a.emNovas.length;
   if(!total){
@@ -2623,6 +2642,8 @@ const campoDocs = (req) => ({ name:'documentos', label:'Tipos de documento', typ
 function editarLaudo(id){
   const l = id ? DB.laudos.find(x => x.id === id) : null;
   const a = (l && l.atual) || {};
+  /* mesma regra dos exames: laudo já cobrado num mês fechado não se altera */
+  if(a.dataFaturamento && barradoPorFechamento(a.dataFaturamento, 'Edição do laudo')) return;
   openForm({
     title: l ? 'Editar laudo — ' + uniNome(l.unidadeId) : 'Nova unidade no controle de laudos',
     fields: [
@@ -2643,10 +2664,12 @@ function editarLaudo(id){
       if(!l && DB.laudos.some(x => x.unidadeId === v.unidadeId)){
         toast('Esta unidade já tem controle de laudo. Use "Solicitar renovação".', 'erro'); return;
       }
+      const fatNovo = v.pagamento === 'Entregue' ? v.dataFaturamento : '';
+      if(fatNovo && barradoPorFechamento(fatNovo, 'Lançamento nesta competência')) return;
       const versao = { documentos:v.documentos, clinica:v.clinica, emissao:v.emissao,
                        vencimento: v.emissao ? addDays(v.emissao, 365) : v.vencimento,
                        pagamento:v.pagamento, valor: Number(a.valor)||0,
-                       dataFaturamento: v.pagamento === 'Entregue' ? v.dataFaturamento : '' };
+                       dataFaturamento: fatNovo };
       if(l){ l.unidadeId = v.unidadeId; l.email = v.email; l.atual = versao; }
       else DB.laudos.push({ id: uid('ld'), unidadeId:v.unidadeId, localRaw:'', email:v.email,
                             atual: versao, renovacao:null, historico:[] });
@@ -2715,11 +2738,13 @@ function concluirRenovacao(id){
               documentos: r.documentos, pagamento:'Entregue', dataFaturamento: isoToday() },
     afterRender: ligarCamposLaudo,
     onSave: v => {
+      const fatNovo = v.pagamento === 'Entregue' ? v.dataFaturamento : '';
+      if(fatNovo && barradoPorFechamento(fatNovo, 'Lançamento nesta competência')) return;
       if(l.atual && l.atual.emissao) l.historico = [l.atual].concat(l.historico || []);
       l.atual = { documentos:v.documentos, clinica:v.clinica, emissao:v.emissao,
                   vencimento: v.emissao ? addDays(v.emissao, 365) : v.vencimento,
                   pagamento:v.pagamento, valor: 0,
-                  dataFaturamento: v.pagamento === 'Entregue' ? v.dataFaturamento : '',
+                  dataFaturamento: fatNovo,
                   solicitadoEm: r.solicitadoEm };
       l.renovacao = null;
       save(); closeModal(); voltarParaTelaAtual();
@@ -4867,11 +4892,13 @@ function excluirExameCatalogo(id){
   save(); viewCadastros(); toast('Exame excluído do catálogo.');
 }
 /* ═══════════════════════════ 5. EXAMES ═══════════════════════════ */
-const UIEx = { q:'', uni:'', status:'', comp:'', drive:'', fech:'', cart:'', page:1 };
+const UIEx = { q:'', uni:'', status:'', comp:'', drive:'', fech:'', cart:'', page:1, verFechados:false };
 
 function emissoesFiltradas(){
   const q = norm(UIEx.q);
   return DB.emissoes.filter(e =>
+    /* mês já fechado (cobrado) sai da operação — vira histórico financeiro */
+    (UIEx.verFechados || !emissaoTravada(e)) &&
     (!UIEx.uni || e.unidadeId === UIEx.uni) &&
     (!UIEx.status || e.status === UIEx.status) &&
     (!UIEx.drive || (UIEx.drive === 'SIM' ? !!e.drive : !e.drive)) &&
@@ -4953,6 +4980,13 @@ function viewExames(){
         ${(() => { const n = emissoesSemCadastro().length; return n
           ? `<button onclick="conciliarSemCadastro()" class="inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm bg-white border border-amber-300 text-amber-700 hover:bg-amber-50"><i class="fa-solid fa-wand-magic-sparkles"></i>Conciliar sem cadastro <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700">${n}</span></button>`
           : ''; })()}
+        ${(() => { const n = DB.emissoes.filter(emissaoTravada).length; return n
+          ? `<button onclick="UIEx.verFechados=${UIEx.verFechados?'false':'true'};UIEx.page=1;viewExames()"
+               class="inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm ${UIEx.verFechados?'bg-slate-700 text-white':'bg-white border border-slate-300 text-slate-600 hover:bg-slate-50'}"
+               title="Exames de meses já fechados (cobrados) ficam fora da operação">
+               <i class="fa-solid fa-lock"></i>${UIEx.verFechados?'Ocultar':'Ver'} meses fechados
+               <span class="text-[10px] px-1.5 py-0.5 rounded-full ${UIEx.verFechados?'bg-white/20':'bg-slate-100'}">${n}</span></button>`
+          : ''; })()}
         ${botao('Diagnosticar vínculo','fa-stethoscope','abrirDiagnostico()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
         ${botao('CSV','fa-file-csv','exportarExames()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
       </div>
@@ -4965,9 +4999,10 @@ function viewExames(){
                 <th class="px-4 py-3 text-center">Drive</th><th class="px-4 py-3">Mês de fechamento</th>
                 <th class="px-4 py-3">Situação</th><th class="px-4 py-3 text-right no-print">Ações</th></tr></thead>
           <tbody class="divide-y divide-slate-100">
-            ${lista.length ? lista.map(e => `
-              <tr class="hover:bg-slate-50 align-top ${naoCompareceu(e)?'bg-red-50/40':''}">
+            ${lista.length ? lista.map(e => { const trav = emissaoTravada(e); const ro = trav ? 'disabled' : ''; return `
+              <tr class="hover:bg-slate-50 align-top ${naoCompareceu(e)?'bg-red-50/40':''} ${trav?'bg-slate-50':''}">
                 <td class="px-4 py-3"><p class="font-medium text-slate-700">${esc(e.colaborador)}
+                    ${trav ? `<span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-slate-200 text-slate-600 whitespace-nowrap" title="A competência ${mesLabel((e.fechamento||'').slice(0,7))} já foi fechada e cobrada — travada para edição."><i class="fa-solid fa-lock mr-0.5"></i>cobrado</span>` : ''}
                     ${contColab[norm(e.colaborador)] > 1 ? `<span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700" title="${contColab[norm(e.colaborador)]} exames deste colaborador">${contColab[norm(e.colaborador)]}×</span>` : ''}
                     ${semCadastroEmissao(e) ? `<button onclick="abrirDiagnostico('${esc(e.colaborador).replace(/'/g,"\\'")}')" class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 hover:bg-red-200 whitespace-nowrap" title="Este nome não está no cadastro. Clique para ver o diagnóstico completo."><i class="fa-solid fa-triangle-exclamation mr-0.5"></i>não cadastrado</button>` : ''}</p></td>
                 <td class="px-4 py-3 text-xs text-slate-600">${esc(uniNome(e.unidadeId))}</td>
@@ -4975,34 +5010,36 @@ function viewExames(){
                   ${e.resultado ? '<br>'+badge(e.resultado, e.resultado==='Apto'?'bg-emerald-100 text-emerald-700':(e.resultado==='Inapto'?'bg-red-100 text-red-700':'bg-amber-100 text-amber-700')) : ''}</td>
                 <td class="px-4 py-3 text-center">
                   ${tipoAceitaCarteirinha(e.tipoExame) ? `
-                    <input type="checkbox" ${e.carteirinha?'checked':''} onchange="toggleCarteirinha('${e.id}')"
-                      class="w-4 h-4 rounded border-slate-300 text-teal-600 focus:ring-teal-500 cursor-pointer"
+                    <input type="checkbox" ${e.carteirinha?'checked':''} onchange="toggleCarteirinha('${e.id}')" ${ro}
+                      class="w-4 h-4 rounded border-slate-300 text-teal-600 focus:ring-teal-500 cursor-pointer disabled:opacity-50"
                       title="${e.carteirinha?'Carteirinha incluída neste atendimento':'Marcar carteirinha sanitária'}">
                     ${e.carteirinha ? (e.status === 'REALIZADO'
                         ? '<p class="text-[10px] text-teal-600 mt-0.5">ok</p>'
                         : '<p class="text-[10px] text-amber-600 mt-0.5">pendente</p>') : ''}`
                   : '<span class="text-slate-300" title="Demissional não gera carteirinha">—</span>'}</td>
                 <td class="px-4 py-3">
-                  <input type="date" value="${esc(e.dataAso||'')}" onchange="setDataAso('${e.id}',this.value)" onpaste="colarData(event)"
-                    class="w-32 px-2 py-1 text-xs border border-slate-300 rounded focus:outline-none focus:ring-2 focus:ring-accent/40"
+                  <input type="date" value="${esc(e.dataAso||'')}" onchange="setDataAso('${e.id}',this.value)" onpaste="colarData(event)" ${ro}
+                    class="w-32 px-2 py-1 text-xs border border-slate-300 rounded focus:outline-none focus:ring-2 focus:ring-accent/40 disabled:bg-slate-100 disabled:text-slate-500"
                     title="Data de emissão do ASO — atualiza o cadastro do colaborador"></td>
                 <td class="px-4 py-3 text-center">
                   <input type="checkbox" ${e.drive?'checked':''} onchange="toggleDrive('${e.id}',this.checked)"
                     class="w-4 h-4 rounded border-slate-300 text-accent focus:ring-accent cursor-pointer" title="Enviado ao Drive/SOCGED"></td>
                 <td class="px-4 py-3">
-                  <input type="month" value="${esc(e.fechamento||'')}" onchange="setFechamento('${e.id}',this.value)" onpaste="colarData(event)"
-                    class="w-32 px-2 py-1 text-xs border border-slate-300 rounded focus:outline-none focus:ring-2 focus:ring-accent/40"
-                    title="mês de referência para o fechamento financeiro"></td>
+                  <input type="month" value="${esc(e.fechamento||'')}" onchange="setFechamento('${e.id}',this.value)" onpaste="colarData(event)" ${ro}
+                    class="w-32 px-2 py-1 text-xs border border-slate-300 rounded focus:outline-none focus:ring-2 focus:ring-accent/40 disabled:bg-slate-100 disabled:text-slate-500"
+                    title="${trav?'Competência fechada — reabra no Faturamento para alterar':'mês de referência para o fechamento financeiro'}"></td>
                 <td class="px-4 py-3">
-                  <select onchange="setSituacao('${e.id}',this.value)"
-                    class="px-2 py-1 text-xs rounded border-0 font-medium cursor-pointer focus:outline-none focus:ring-2 focus:ring-accent/40 ${corFluxo(e.status)}">
+                  <select onchange="setSituacao('${e.id}',this.value)" ${ro}
+                    class="px-2 py-1 text-xs rounded border-0 font-medium cursor-pointer focus:outline-none focus:ring-2 focus:ring-accent/40 disabled:opacity-60 ${corFluxo(e.status)}">
                     ${FLUXO.map(f => `<option value="${f}" ${e.status===f?'selected':''}>${FLUXO_LABEL[f]}</option>`).join('')}
                   </select></td>
                 <td class="px-4 py-3 text-right whitespace-nowrap no-print">
                   ${contColab[norm(e.colaborador)] > 1 ? `<button onclick="historicoColaborador('${esc(e.colaborador).replace(/'/g,"\\'")}')" class="text-indigo-500 hover:text-indigo-700 px-1.5" title="Ver histórico do colaborador"><i class="fa-solid fa-eye"></i></button>` : ''}
-                  <button onclick="editarEmissao('${e.id}')" class="text-slate-400 hover:text-accent px-1.5" title="Editar"><i class="fa-solid fa-pen"></i></button>
-                  <button onclick="excluirEmissao('${e.id}')" class="text-slate-400 hover:text-danger px-1.5" title="Excluir"><i class="fa-solid fa-trash"></i></button>
-                </td></tr>`).join('') : vazio('Nenhuma emissão encontrada.')}
+                  ${trav
+                    ? `<span class="text-slate-300 px-1.5" title="Competência fechada e cobrada"><i class="fa-solid fa-lock"></i></span>`
+                    : `<button onclick="editarEmissao('${e.id}')" class="text-slate-400 hover:text-accent px-1.5" title="Editar"><i class="fa-solid fa-pen"></i></button>
+                       <button onclick="excluirEmissao('${e.id}')" class="text-slate-400 hover:text-danger px-1.5" title="Excluir"><i class="fa-solid fa-trash"></i></button>`}
+                </td></tr>`; }).join('') : vazio('Nenhuma emissão encontrada.')}
           </tbody></table>
       </div>
       ${paginador(todos.length, p, 'paginaExames')}
@@ -5414,6 +5451,20 @@ function resumoColabParaEmissao(nome){
 }
 function editarEmissao(id){
   const e = DB.emissoes.find(x => x.id === id);
+  if(emissaoTravada(e)){
+    const i = infoMesFechado(e.fechamento);
+    openInfo('Competência já cobrada', `
+      <div class="rounded-lg border border-slate-300 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+        <p class="font-semibold mb-1"><i class="fa-solid fa-lock mr-1"></i>${esc(e.colaborador)} — ${mesLabel((e.fechamento||'').slice(0,7))}</p>
+        <p class="text-xs">Este exame pertence a um mês já <b>fechado e cobrado</b>${i&&i.em?' em '+new Date(i.em).toLocaleDateString('pt-BR'):''}, por isso está travado para edição.</p>
+        <p class="text-xs mt-2">Se precisar corrigir, reabra a competência em <b>Faturamento → Reabrir mês</b>.</p>
+      </div>
+      <div class="flex justify-end mt-3">
+        <button onclick="closeModal();UIFat.mes='${esc((e.fechamento||'').slice(0,7))}';go('faturamento')"
+          class="px-4 py-2 rounded-lg text-sm bg-accent text-white hover:bg-blue-700">Ir para o faturamento do mês</button>
+      </div>`, 'max-w-lg');
+    return;
+  }
   openForm({
     title:'Editar emissão — ' + e.colaborador,
     fields: camposEmissao(),
@@ -5432,6 +5483,8 @@ function editarEmissao(id){
   });
 }
 function excluirEmissao(id){
+  const alvo = DB.emissoes.find(x => x.id === id);
+  if(alvo && barradoPorFechamento(alvo.fechamento, 'Exclusão')) return;
   if(!confirm('Excluir esta emissão?')) return;
   DB.emissoes = DB.emissoes.filter(x => x.id !== id);
   save(); voltarParaTelaAtual(); toast('Emissão excluída.');
@@ -5447,6 +5500,7 @@ function toggleDrive(id, v){
    Sem re-render, para não perder o foco durante a digitação da data. */
 function setDataAso(id, data){
   const e = DB.emissoes.find(x => x.id === id); if(!e) return;
+  if(barradoPorFechamento(e.fechamento, 'Alteração da data do ASO')){ viewExames(); return; }
   e.dataAso = data || '';
   if(data) aplicarEfeitosNoCadastro(e);
   save();
@@ -5454,6 +5508,7 @@ function setDataAso(id, data){
 /* marca/desmarca a carteirinha sanitária do atendimento */
 function toggleCarteirinha(id){
   const e = DB.emissoes.find(x => x.id === id); if(!e) return;
+  if(barradoPorFechamento(e.fechamento, 'Alteração da carteirinha')){ viewExames(); return; }
   if(!tipoAceitaCarteirinha(e.tipoExame)){
     toast('Exame demissional não gera carteirinha sanitária.', 'alerta'); viewExames(); return;
   }
@@ -5469,6 +5524,9 @@ function toggleCarteirinha(id){
    ("2","20","202"...) e recriar a linha no meio da digitação tirava o foco. */
 function setFechamento(id, mes){
   const e = DB.emissoes.find(x => x.id === id);
+  /* não deixa tirar de um mês já cobrado nem jogar para um mês já cobrado */
+  if(barradoPorFechamento(e.fechamento, 'Mudança de competência') ||
+     barradoPorFechamento(mes, 'Lançamento nesta competência')){ viewExames(); return; }
   e.fechamento = mes || '';
   save();
   const el = document.getElementById('contFech');
@@ -5476,6 +5534,7 @@ function setFechamento(id, mes){
 }
 function setSituacao(id, status){
   const e = DB.emissoes.find(x => x.id === id);
+  if(barradoPorFechamento(e.fechamento, 'Mudança de situação')){ viewExames(); return; }
   e.status = status;
   const r = aplicarSyncAso(e);
   save(); viewExames();
@@ -5771,6 +5830,97 @@ function abaEsocial(){
 /* ═══════════════════════════ 7. FATURAMENTO ═══════════════════════════ */
 const UIFat = { unidade:'', mes:'', valorPadrao:'' };
 
+/* ═══════════ FECHAMENTO DE MÊS (competência cobrada) ═══════════
+   Fechar o mês declara que aquilo já foi cobrado do cliente. A partir daí o
+   período fica TRAVADO: nada muda de valor, de situação nem de mês de
+   fechamento, e os itens saem da grade de agendamentos (viraram histórico
+   financeiro). O fechamento é por mês, valendo para exames e laudos. */
+function mesesFechados(){
+  if(!Array.isArray(DB.mesesFechados)) DB.mesesFechados = [];
+  return DB.mesesFechados;
+}
+function mesFechado(mes){
+  const m = (mes || '').slice(0,7);
+  return !!m && mesesFechados().some(x => x.mes === m);
+}
+function infoMesFechado(mes){
+  const m = (mes || '').slice(0,7);
+  return mesesFechados().find(x => x.mes === m) || null;
+}
+/* um exame está travado quando o mês de fechamento dele já foi cobrado */
+function emissaoTravada(e){ return !!e && mesFechado(e.fechamento); }
+/* devolve true e avisa quando a ação for barrada pelo fechamento */
+function barradoPorFechamento(mes, oQue){
+  if(!mesFechado(mes)) return false;
+  const i = infoMesFechado(mes);
+  toast((oQue || 'Alteração') + ' bloqueada: ' + mesLabel((mes||'').slice(0,7)) +
+        ' já foi fechado' + (i && i.em ? ' em ' + new Date(i.em).toLocaleDateString('pt-BR') : '') +
+        '. Reabra o mês no Faturamento para editar.', 'erro');
+  return true;
+}
+async function fecharMes(mes, silencioso){
+  const m = (mes || '').slice(0,7);
+  if(!m || mesFechado(m)) return false;
+  const d = { mes:m, em:new Date().toISOString(), por:(SESSAO && SESSAO.email) || '' };
+  mesesFechados().push(d);
+  if(!silencioso){ save(); }
+  return true;
+}
+async function fecharMesAtual(){
+  const d = fechamentoDados();
+  const m = d.mes;
+  if(mesFechado(m)){ toast(mesLabel(m) + ' já está fechado.', 'info'); return; }
+  const qtdEx = DB.emissoes.filter(e => (e.fechamento||'').slice(0,7) === m).length;
+  const qtdLd = d.lds.length;
+  if(!confirm(`Fechar ${mesLabel(m)}?\n\n` +
+    `Isso declara que ${qtdEx} exame(s) e ${qtdLd} laudo(s) já foram COBRADOS nesta competência.\n\n` +
+    `A partir daí, nesse mês:\n` +
+    `• valores, situação e mês de fechamento ficam travados em todo o sistema;\n` +
+    `• os exames saem da grade de Agendamento de exames;\n` +
+    `• o faturamento do mês fica congelado.\n\n` +
+    `Você pode reabrir depois, se precisar. Um ponto de retorno será guardado.`)) return;
+  await guardarSnapshotLocal('antes de fechar o mês ' + m);
+  await fecharMes(m);
+  save(); viewFaturamento();
+  toast(mesLabel(m) + ' fechado — ' + qtdEx + ' exame(s) e ' + qtdLd + ' laudo(s) marcados como cobrados.', 'ok');
+}
+async function reabrirMes(mes){
+  const m = (mes || '').slice(0,7);
+  if(!mesFechado(m)) return;
+  if(!confirm(`Reabrir ${mesLabel(m)}?\n\nO mês volta a aceitar alterações de valores, situação e fechamento, ` +
+              `e os exames reaparecem na grade de Agendamento. Use quando precisar corrigir algo já cobrado.`)) return;
+  await guardarSnapshotLocal('antes de reabrir o mês ' + m);
+  DB.mesesFechados = mesesFechados().filter(x => x.mes !== m);
+  save(); viewFaturamento();
+  toast(mesLabel(m) + ' reaberto para edição.', 'alerta');
+}
+/* fecha de uma vez todas as competências até um limite (pedido: retroativo até 06/2026) */
+const LIMITE_FECHAMENTO_RETROATIVO = '2026-06';
+function mesesComMovimento(){
+  const s = new Set();
+  DB.emissoes.forEach(e => { const m = (e.fechamento||'').slice(0,7); if(m) s.add(m); });
+  /* a competência do laudo é o mês da data de faturamento (mesma regra de entregasLaudos) */
+  DB.laudos.forEach(l => (l.entregas||[]).concat(l.atual?[l.atual]:[]).forEach(v => {
+    const m = ((v && v.dataFaturamento) || '').slice(0,7);
+    if(m) s.add(m);
+  }));
+  (DB.visitas||[]).forEach(v => { const m = (v.fechamento || v.mes || (v.data||'').slice(0,7) || '').slice(0,7); if(m) s.add(m); });
+  return [...s].filter(Boolean).sort();
+}
+async function fecharRetroativo(limite){
+  const lim = limite || LIMITE_FECHAMENTO_RETROATIVO;
+  const alvos = mesesComMovimento().filter(m => m <= lim && !mesFechado(m));
+  if(!alvos.length){ toast('Nenhum mês em aberto até ' + mesLabel(lim) + '.', 'ok'); return; }
+  const qtd = alvos.reduce((s,m) => s + DB.emissoes.filter(e => (e.fechamento||'').slice(0,7) === m).length, 0);
+  if(!confirm(`Fechar retroativamente ${alvos.length} competência(s) até ${mesLabel(lim)}?\n\n` +
+    alvos.map(mesLabel).join(', ') + `\n\n` +
+    `Total de ${qtd} exame(s) serão marcados como já cobrados e travados. Um ponto de retorno será guardado.`)) return;
+  await guardarSnapshotLocal('antes do fechamento retroativo até ' + lim);
+  for(const m of alvos) await fecharMes(m, true);
+  save(); viewFaturamento();
+  toast(alvos.length + ' competência(s) fechada(s) até ' + mesLabel(lim) + '.', 'ok');
+}
+
 function fechamentoDados(){
   const mes = UIFat.mes || mesFaturamentoPadrao();
   /* a coluna Fechamento é a ÚNICA referência do mês de faturamento —
@@ -5907,7 +6057,33 @@ function viewFaturamento(){
       ${botao('Preços por unidade','fa-building-circle-check','editarPrecosUnidade()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
       ${botao('Gerar resumo para e-mail','fa-envelope','gerarEmailCobranca()')}
       ${botao('Exportar consolidado','fa-file-csv','exportarFaturamento()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
+      ${mesFechado(d.mes)
+        ? botao('Reabrir mês','fa-lock-open',`reabrirMes('${d.mes}')`,'bg-white border border-amber-400 text-amber-700 hover:bg-amber-50')
+        : botao('Fechar mês (cobrado)','fa-lock','fecharMesAtual()','bg-slate-700 text-white hover:bg-slate-800')}
     </div>
+
+    ${(() => { const f = infoMesFechado(d.mes);
+      if(f) return `
+        <div class="rounded-xl border border-slate-300 bg-slate-100 px-5 py-4 flex flex-wrap items-center gap-3">
+          <i class="fa-solid fa-lock text-slate-500"></i>
+          <div class="flex-1 min-w-[240px]">
+            <p class="text-sm font-semibold text-slate-700">${mesLabel(d.mes)} está fechado — já cobrado</p>
+            <p class="text-xs text-slate-500">Fechado em ${new Date(f.em).toLocaleDateString('pt-BR')}${f.por?' por '+esc(f.por):''}.
+              Valores, situação e competência estão travados, e estes exames saíram da grade de Agendamento.</p>
+          </div>
+        </div>`;
+      const pend = mesesComMovimento().filter(m => m <= LIMITE_FECHAMENTO_RETROATIVO && !mesFechado(m));
+      if(pend.length) return `
+        <div class="rounded-xl border border-amber-300 bg-amber-50 px-5 py-4 flex flex-wrap items-center gap-3 no-print">
+          <i class="fa-solid fa-clock-rotate-left text-amber-500"></i>
+          <div class="flex-1 min-w-[240px]">
+            <p class="text-sm font-semibold text-amber-800">${pend.length} competência(s) antiga(s) ainda em aberto</p>
+            <p class="text-xs text-amber-700">Até ${mesLabel(LIMITE_FECHAMENTO_RETROATIVO)}: ${pend.map(mesLabel).join(', ')}. Fechar marca tudo como já cobrado e trava as edições.</p>
+          </div>
+          <button onclick="fecharRetroativo()" class="px-3 py-2 rounded-lg text-xs bg-amber-600 text-white hover:bg-amber-700 whitespace-nowrap">
+            <i class="fa-solid fa-lock mr-1"></i>Fechar tudo até ${mesLabel(LIMITE_FECHAMENTO_RETROATIVO)}</button>
+        </div>`;
+      return ''; })()}
 
     ${d.pendentesFech.length ? `
     <div class="bg-amber-50 border border-amber-200 rounded-xl p-4 flex flex-wrap items-center gap-3 no-print">
@@ -5927,12 +6103,14 @@ function viewFaturamento(){
               sub: d.cobrado ? 'valor cobrado informado'
                    : `${d.exValidos.length} exames · ${d.lds.length} laudos · ${d.vis.length} visitas${d.carts.length?' · '+d.carts.length+' carteirinhas':''}`,
               icon:'fa-arrow-down', cor:'bg-emerald-50 text-success'})}
-      ${card({titulo:'Custo', valor:fmtMoney(d.custo),
-              sub:'exames' + (d.custoCart ? ' + '+d.carts.length+' carteirinha(s)' : ' laboratoriais + clínico'),
-              icon:'fa-arrow-up', cor:'bg-red-50 text-danger'})}
-      ${card({titulo:'Margem', valor:fmtMoney(d.margem),
-              sub: d.efetivo ? Math.round(d.margem/d.efetivo*100) + '% da receita' : '—',
-              icon:'fa-scale-balanced', cor: d.margem>=0 ? 'bg-stone-100 text-accent' : 'bg-amber-50 text-warning'})}
+      ${(() => { const t = 'exames' + (d.custoCart ? ' + '+d.carts.length+' carteirinha(s)' : ' laboratoriais + clínico');
+         return card({titulo:'Custo', valor:fmtMoney(d.custo),
+           sub:`<span id="cardCustoSel" class="block" data-original="${esc(t)}">${esc(t)}</span>`,
+           icon:'fa-arrow-up', cor:'bg-red-50 text-danger'}); })()}
+      ${(() => { const t = d.efetivo ? Math.round(d.margem/d.efetivo*100) + '% da receita' : '—';
+         return card({titulo:'Margem', valor:fmtMoney(d.margem),
+           sub:`<span id="cardMargemSel" class="block" data-original="${esc(t)}">${esc(t)}</span>`,
+           icon:'fa-scale-balanced', cor: d.margem>=0 ? 'bg-stone-100 text-accent' : 'bg-amber-50 text-warning'}); })()}
     </div>
 
     <div class="grid grid-cols-2 lg:grid-cols-6 gap-3">
@@ -5955,6 +6133,8 @@ function viewFaturamento(){
       <div class="bg-white rounded-xl border border-slate-200 overflow-hidden print-block">
         <div class="px-5 py-4 border-b border-slate-200 flex items-center gap-2">
           <h3 class="font-semibold text-sm text-slate-700">Exames a cobrar — ${mesLabel(d.mes)}</h3>
+          <span id="selFatResumo" class="text-xs px-2 py-1 rounded-full bg-emerald-50 text-emerald-700 hidden no-print"></span>
+          <button onclick="limparSelecaoFat()" id="selFatLimpar" class="text-[11px] underline text-slate-500 hover:text-slate-700 hidden no-print">limpar seleção</button>
           <span class="ml-auto text-xs text-slate-500">${d.exValidos.length} exame(s)${d.carts.length?' · '+d.carts.length+' carteirinha(s)':''}</span>
         </div>
         <div class="overflow-x-auto max-h-[460px] overflow-y-auto">
@@ -5972,13 +6152,19 @@ function viewFaturamento(){
                 return `
                 <tr class="hover:bg-slate-50 ${naoCompareceu(e)?'bg-red-50/40':''}">
                   <td class="px-4 py-3 text-center">
-                    <input type="checkbox" class="align-middle accent-emerald-600" title="marcação auxiliar (não é salva)"></td>
+                    <input type="checkbox" class="selFat align-middle accent-emerald-600" onchange="recalcularSelecaoFat()"
+                      data-custo="${naoCompareceu(e)?0:(custoEmissao(e)+cCart)}" data-receita="${vExame + vCart}"
+                      title="marcação auxiliar — soma abaixo e nos cartões; não é salva"></td>
                   <td class="px-4 py-3 font-medium text-slate-700">${esc(e.colaborador)}
                     ${naoCompareceu(e)?`<br>${badge('Não compareceu','bg-red-100 text-red-700')}`:''}</td>
                   <td class="px-4 py-3 text-xs text-slate-600">${esc(uniNome(e.unidadeId))}</td>
                   <td class="px-4 py-3 text-xs">${esc(tipoLabel(e.tipoExame))}${e.exameLab?'<p class="text-[11px] text-slate-400 truncate max-w-[200px]">+ laboratorial</p>':''}
                     ${temCart?'<p class="text-[11px] text-teal-600"><i class="fa-solid fa-id-card mr-0.5"></i>+ carteirinha sanitária</p>':''}</td>
-                  <td class="px-4 py-3 text-xs whitespace-nowrap">${fmtDate(e.dataAso||e.dataClinico||e.dataLab||e.fechamento)}</td>
+                  <td class="px-4 py-3 text-xs whitespace-nowrap">${naoCompareceu(e)
+                      ? '<span class="text-slate-300" title="Não compareceu — sem ASO emitido"></span>'
+                      : (e.dataAso
+                          ? fmtDate(e.dataAso)
+                          : '<span class="text-amber-600" title="Exame realizado sem data de emissão do ASO — preencha em Agendamento de exames">sem data do ASO</span>')}</td>
                   <td class="px-4 py-3 text-right text-xs ${naoCompareceu(e)?'text-slate-300':'text-red-600'}">
                     ${naoCompareceu(e)?'—':fmtMoney(custoEmissao(e)+cCart)}
                     ${cCart?`<p class="text-[10px] text-slate-400">${fmtMoney(custoEmissao(e))} + ${fmtMoney(cCart)}</p>`:''}</td>
@@ -6059,8 +6245,43 @@ function viewFaturamento(){
         </tbody></table></div></div>
   </div>`;
 }
+/* ═══════ Seleção auxiliar da grade "Exames a cobrar" ═══════
+   Marcação efêmera: NÃO é salva em lugar nenhum e não sai em CSV, e-mail ou
+   impressão. Serve só para conferir um subtotal na hora (ex.: o que já foi
+   cobrado numa nota). Soma quantidade, custo, receita e margem dos marcados. */
+function recalcularSelecaoFat(){
+  const marcados = [...document.querySelectorAll('.selFat:checked')];
+  const n = marcados.length;
+  const custoSel   = marcados.reduce((s,el) => s + (Number(el.dataset.custo)   || 0), 0);
+  const receitaSel = marcados.reduce((s,el) => s + (Number(el.dataset.receita) || 0), 0);
+  const margemSel  = receitaSel - custoSel;
+
+  const resumo = document.getElementById('selFatResumo');
+  const limpar = document.getElementById('selFatLimpar');
+  if(resumo){
+    resumo.classList.toggle('hidden', !n);
+    resumo.innerHTML = n
+      ? `<i class="fa-solid fa-check-double mr-1"></i><b>${n}</b> selecionado(s) · custo <b>${fmtMoney(custoSel)}</b> · cobrança <b>${fmtMoney(receitaSel)}</b> · margem <b>${fmtMoney(margemSel)}</b>`
+      : '';
+  }
+  if(limpar) limpar.classList.toggle('hidden', !n);
+
+  const cCusto = document.getElementById('cardCustoSel');
+  if(cCusto) cCusto.innerHTML = n
+    ? `<span class="text-red-600 font-semibold">${fmtMoney(custoSel)}</span> nos ${n} selecionado(s)`
+    : esc(cCusto.dataset.original || '');
+  const cMargem = document.getElementById('cardMargemSel');
+  if(cMargem) cMargem.innerHTML = n
+    ? `<span class="${margemSel>=0?'text-accent':'text-warning'} font-semibold">${fmtMoney(margemSel)}</span> nos ${n} selecionado(s)`
+    : esc(cMargem.dataset.original || '');
+}
+function limparSelecaoFat(){
+  document.querySelectorAll('.selFat:checked').forEach(el => { el.checked = false; });
+  recalcularSelecaoFat();
+}
 function setValorEmissao(id, v){
   const e = DB.emissoes.find(x => x.id === id);
+  if(barradoPorFechamento(e.fechamento, 'Alteração de valor')){ viewFaturamento(); return; }
   e.valor = Number(v) || 0; save(); viewFaturamento();
 }
 
@@ -7885,21 +8106,35 @@ async function viewBackup(){
         ${extra ? `<p class="text-[11px] text-slate-500 mt-1">${extra}</p>` : ''}
       </div></div>`;
 
+  /* No modo nuvem quem protege é o Supabase, não a pasta do Drive —
+     sem isso a tela acusava "dados desprotegidos" mesmo com tudo salvo na nuvem. */
+  const protegido = CLOUD_ON || FS.permissao;
+  const ultimoNuvem = FS.ultimoNuvem ? new Date(FS.ultimoNuvem).toLocaleString('pt-BR') : null;
+
   $('#view').innerHTML = `
   <div class="space-y-5 max-w-5xl">
-    <div class="rounded-xl border-2 ${FS.permissao?'border-success bg-emerald-50':'border-danger bg-red-50'} p-5">
+    <div class="rounded-xl border-2 ${protegido?'border-success bg-emerald-50':'border-danger bg-red-50'} p-5">
       <div class="flex flex-wrap items-center gap-4">
-        <div class="w-14 h-14 rounded-xl ${FS.permissao?'bg-success':'bg-danger'} text-white flex items-center justify-center text-2xl shrink-0">
-          <i class="fa-solid ${FS.permissao?'fa-shield-halved':'fa-triangle-exclamation'}"></i></div>
+        <div class="w-14 h-14 rounded-xl ${protegido?'bg-success':'bg-danger'} text-white flex items-center justify-center text-2xl shrink-0">
+          <i class="fa-solid ${protegido?'fa-shield-halved':'fa-triangle-exclamation'}"></i></div>
         <div class="flex-1 min-w-[240px]">
-          <p class="font-bold text-lg ${FS.permissao?'text-emerald-900':'text-red-900'}">
-            ${FS.permissao ? 'Seus dados estão protegidos' : 'Seus dados estão desprotegidos'}</p>
-          <p class="text-sm ${FS.permissao?'text-emerald-800':'text-red-800'} mt-0.5">
-            ${FS.permissao
-              ? 'Cada alteração é gravada em arquivo na pasta autorizada, que o Google Drive sincroniza automaticamente.'
-              : 'Tudo está apenas na memória deste navegador. Autorize uma pasta para que o sistema grave sozinho.'}</p>
+          <p class="font-bold text-lg ${protegido?'text-emerald-900':'text-red-900'}">
+            ${protegido ? 'Seus dados estão protegidos' : 'Seus dados estão desprotegidos'}</p>
+          <p class="text-sm ${protegido?'text-emerald-800':'text-red-800'} mt-0.5">
+            ${CLOUD_ON
+              ? 'Cada alteração é gravada na <b>nuvem privada</b> (acesso só com login). Você pode entrar de qualquer navegador e ver os mesmos dados.'
+              : (FS.permissao
+                ? 'Cada alteração é gravada em arquivo na pasta autorizada, que o Google Drive sincroniza automaticamente.'
+                : 'Tudo está apenas na memória deste navegador. Autorize uma pasta para que o sistema grave sozinho.')}</p>
         </div>
-        ${FS.permissao
+        ${CLOUD_ON
+          ? `<div class="flex gap-2">
+              <button onclick="nuvemGravarJa().then(()=>{toast('Enviado para a nuvem.');viewBackup();})"
+                class="px-4 py-2 rounded-lg text-sm bg-success text-white hover:bg-emerald-600 whitespace-nowrap">
+                <i class="fa-solid fa-cloud-arrow-up mr-1"></i>Salvar na nuvem agora</button>
+              <button onclick="exportBackup()" class="px-4 py-2 rounded-lg text-sm bg-white border border-slate-300 hover:bg-slate-50 whitespace-nowrap">
+                <i class="fa-solid fa-download mr-1"></i>Baixar cópia</button></div>`
+          : FS.permissao
           ? `<div class="flex gap-2">
               <button onclick="gravarArquivo().then(r=>toast(r?'Gravado agora.':'Falhou — veja o erro abaixo.', r?'ok':'erro')).then(()=>viewBackup())"
                 class="px-4 py-2 rounded-lg text-sm bg-success text-white hover:bg-emerald-600 whitespace-nowrap">
@@ -7920,10 +8155,14 @@ async function viewBackup(){
     </div>
 
     <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-      ${camada(FS.permissao, '1. Arquivo no Google Drive',
-        FS.permissao ? `Pasta autorizada: <b>${esc(FS.pasta.name)}</b> → <code class="text-[11px]">${ARQ_DADOS}</code>`
-                     : 'Nenhuma pasta autorizada ainda.',
-        ultimoArq ? 'Última gravação: ' + ultimoArq : 'Grava 12 s após cada alteração e ao fechar a aba.')}
+      ${CLOUD_ON
+        ? camada(true, '1. Nuvem privada (fonte da verdade)',
+            'Os dados ficam num banco protegido por login. Qualquer navegador logado vê a mesma base.',
+            ultimoNuvem ? 'Último envio: ' + ultimoNuvem : 'Envia poucos segundos após cada alteração.')
+        : camada(FS.permissao, '1. Arquivo no Google Drive',
+            FS.permissao && FS.pasta ? `Pasta autorizada: <b>${esc(FS.pasta.name)}</b> → <code class="text-[11px]">${ARQ_DADOS}</code>`
+                         : 'Nenhuma pasta autorizada ainda.',
+            ultimoArq ? 'Última gravação: ' + ultimoArq : 'Grava 12 s após cada alteração e ao fechar a aba.')}
       ${camada(true, '2. IndexedDB (neste navegador)',
         'Cópia local completa, sem o limite de 5 MB do localStorage.', 'Base atual: ' + tamanho + ' KB')}
       ${camada(!(DB.meta && DB.meta.localStorageCheio), '3. localStorage (terceira cópia)',
@@ -7945,6 +8184,7 @@ async function viewBackup(){
       </div>
     </div>
 
+    ${!planilhaOrigemDisponivel() ? '' : `
     <div class="bg-white rounded-xl border border-slate-200 p-5">
       <h3 class="font-semibold text-sm text-slate-700 mb-1"><i class="fa-solid fa-rotate text-accent mr-2"></i>Planilhas de origem</h3>
       <p class="text-xs text-slate-500 mb-3">Quando a planilha de controle ganha colaboradores ou pedidos novos, traga-os
@@ -7961,7 +8201,7 @@ async function viewBackup(){
           ${botao('Recarregar','fa-rotate-left','resetToSeed()','bg-white border border-slate-300 text-slate-600 hover:bg-amber-50')}
         </div>
       </div>
-    </div>
+    </div>`}
 
     <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
       <div class="px-5 py-4 border-b border-slate-200">
@@ -8063,6 +8303,10 @@ $('#hojeLabel').textContent = HOJE.toLocaleDateString('pt-BR', { weekday:'long',
 
   /* menu do usuário no cabeçalho (substitui o antigo botão "Sair" flutuante) */
   if(CLOUD_ON) montarMenuUsuario();
+
+  /* os atalhos de planilha só fazem sentido quando o arquivo traz a base embutida */
+  const rp = document.getElementById('rodapePlanilha');
+  if(rp && planilhaOrigemDisponivel()) rp.classList.remove('hidden');
 
   /* se ainda não há pasta autorizada, insiste na primeira abertura (só modo local) */
   if(!CLOUD_ON && !FS.pasta) setTimeout(() => {
