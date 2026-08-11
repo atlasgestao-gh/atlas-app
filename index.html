@@ -7405,7 +7405,7 @@ function abaRelatorios(){
                 <td class="px-4 py-3 text-xs text-slate-500">${r.timbrado?'Timbrado':'Sem timbrado'}</td>
                 <td class="px-4 py-3 text-xs text-slate-500 whitespace-nowrap">${r.geradoEm?new Date(r.geradoEm).toLocaleString('pt-BR'):'—'}</td>
                 <td class="px-4 py-3 text-right whitespace-nowrap no-print">
-                  <button onclick="baixarRelatorio('${r.id}')" class="text-slate-400 hover:text-accent px-1.5" title="Baixar (.html — abra e salve em PDF)"><i class="fa-solid fa-download"></i></button>
+                  <button onclick="baixarRelatorio('${r.id}')" class="text-slate-400 hover:text-accent px-1.5" title="Baixar em PDF"><i class="fa-solid fa-file-pdf"></i></button>
                   <button onclick="reemitirRelatorio('${r.id}')" class="text-slate-400 hover:text-accent px-1.5" title="Abrir em nova aba"><i class="fa-solid fa-arrow-up-right-from-square"></i></button>
                   <button onclick="excluirRelatorio('${r.id}')" class="text-slate-400 hover:text-danger px-1.5" title="Remover do histórico"><i class="fa-solid fa-trash"></i></button>
                 </td></tr>`).join('') : vazio('Nenhum relatório emitido ainda. Gere um em "Gerar relatórios › Gerar relatório NR-01".')}
@@ -7642,7 +7642,7 @@ function graficoParaImagem(cfg, largura, altura){
 }
 /* pergunta o tipo, as unidades e o formato antes de gerar */
 /* modal única: escolhe o tipo, o recorte e só então o formato */
-const UIRelGer = { tipo:'CORPORATIVO', unidade:'' };
+const UIRelGer = { tipo:'CORPORATIVO', unidade:'', entrega:'pdf' };
 
 function gerarRelatorioNR01(){
   const mes = UIAte.mes || mesAtestadoPadrao();
@@ -7654,6 +7654,7 @@ function gerarRelatorioNR01(){
 }
 
 function setTipoRelatorio(t){ UIRelGer.tipo = t; renderModalRelatorio(); }
+function setEntregaRel(e){ UIRelGer.entrega = e; renderModalRelatorio(); }
 
 function renderModalRelatorio(){
   const alvo = document.getElementById('relCorpo'); if(!alvo) return;
@@ -7720,6 +7721,13 @@ function renderModalRelatorio(){
     </div>
     ${corp ? seletorCorp : seletorUni}
     <p id="relResumoSel" class="text-xs text-slate-500"></p>
+    <div class="flex items-center gap-2 text-xs">
+      <span class="text-slate-500">Entrega:</span>
+      ${[['pdf','Baixar PDF','fa-file-pdf'],['tela','Abrir na tela','fa-up-right-from-square']].map(([v,l,ic]) => `
+        <button onclick="setEntregaRel('${v}')" class="px-2.5 py-1.5 rounded-lg border ${UIRelGer.entrega===v
+          ? 'border-accent bg-amber-50 text-slate-700 font-medium' : 'border-slate-200 text-slate-500 hover:border-slate-300'}">
+          <i class="fa-solid ${ic} mr-1"></i>${l}</button>`).join('')}
+    </div>
     <div class="grid sm:grid-cols-2 gap-2 pt-1">
       <button onclick="emitirRelatorio(true)"
         class="text-left px-4 py-3 rounded-lg border border-slate-300 hover:border-accent hover:bg-slate-50">
@@ -7768,13 +7776,13 @@ function emitirRelatorio(comTimbrado){
     const ids = unidadesRelSelecionadas();
     if(!ids.length){ toast('Selecione ao menos uma unidade.', 'erro'); return; }
     closeModal();
-    montarRelatorioCorporativo(comTimbrado, ids);
+    montarRelatorioCorporativo(comTimbrado, ids, UIRelGer.entrega === 'pdf' ? 'pdf' : undefined);
   }else{
     const sel = document.getElementById('relUnicaUni');
     UIAte.uni = sel ? sel.value : UIRelGer.unidade;
     UIAte.page = 1;
     closeModal();
-    montarRelatorioNR01(comTimbrado);
+    montarRelatorioNR01(comTimbrado, UIRelGer.entrega === 'pdf' ? 'pdf' : undefined);
   }
 }
 
@@ -8116,15 +8124,95 @@ function montarRelatorioCorporativo(comTimbrado, unidadeIds, acao){
 function nomeArquivoRelatorio(tipo, abrangencia, mes, comTimbrado){
   const mmaaaa = mes.slice(5,7) + '-' + mes.slice(0,4);
   if(tipo === 'Corporativo')
-    return `RELATÓRIO DE MONITORAMENTO DE ATESTADOS MÉDICOS - CORPORATIVO - ${mmaaaa}.html`;
+    return `RELATÓRIO DE MONITORAMENTO DE ATESTADOS MÉDICOS - CORPORATIVO - ${mmaaaa}.pdf`;
   const limpo = String(abrangencia||'').replace(/[\\/:*?"<>|]/g,'').replace(/\s+/g,' ').trim().slice(0,40) || 'GERAL';
-  return `Relatório de Monitoramento - NR-01 - ${limpo} - ${mmaaaa}.html`;
+  return `Relatório de Monitoramento - NR-01 - ${limpo} - ${mmaaaa}.pdf`;
 }
-/* entrega: abrir em nova aba (registra no histórico) ou baixar como arquivo */
-function entregarRelatorio(html, acao, nomeArquivo, reg){
-  if(acao === 'baixar'){
-    baixar(nomeArquivo, html, 'text/html');
-    toast('Relatório baixado — abra o arquivo e use Ctrl+P para gerar o PDF.');
+
+/* ---- geração do PDF ----
+   A biblioteca só é baixada quando o primeiro PDF é pedido: não pesa no arranque
+   e, se a rede falhar, o relatório ainda sai em .html como antes. */
+const HTML2PDF_CDN = 'https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.14.0/html2pdf.bundle.min.js';
+let _html2pdfProm = null;
+function carregarHtml2Pdf(){
+  if(window.html2pdf) return Promise.resolve(true);
+  if(_html2pdfProm) return _html2pdfProm;
+  _html2pdfProm = new Promise(res => {
+    const s = document.createElement('script');
+    s.src = HTML2PDF_CDN;
+    s.onload  = () => res(!!window.html2pdf);
+    s.onerror = () => { _html2pdfProm = null; res(false); };
+    document.head.appendChild(s);
+  });
+  return _html2pdfProm;
+}
+/* o relatório é um documento A4 completo: renderiza dentro de um iframe isolado
+   (o CSS dele não pode vazar para a tela do sistema) e converte esse conteúdo */
+function palcoRelatorio(html){
+  return new Promise(resolve => {
+    const fr = document.createElement('iframe');
+    /* 660px ≈ a largura útil do A4 com as margens abaixo: mantém o corpo em 11pt */
+    fr.setAttribute('aria-hidden','true');
+    fr.style.cssText = 'position:fixed;left:-10000px;top:0;width:660px;height:1200px;border:0;visibility:hidden';
+    fr.onload = async () => {
+      const doc = fr.contentDocument;
+      /* um iframe recém-inserido dispara "load" do about:blank antes do srcdoc */
+      if(!doc || !doc.querySelector('.folha')) return;
+      const ajuste = doc.createElement('style');
+      ajuste.textContent = `body{background:#fff!important;padding:0!important;margin:0!important}
+        .folha{max-width:none!important;width:100%!important;padding:0!important;margin:0!important;box-shadow:none!important}`;
+      doc.head.appendChild(ajuste);
+      try{ await doc.fonts.ready; }catch(e){}
+      /* espera as imagens dos gráficos (data URI, mas o decode não é instantâneo) */
+      await Promise.all([...doc.images].map(im => im.complete ? null :
+        new Promise(r => { im.onload = im.onerror = r; })));
+      resolve({ fr, alvo: doc.querySelector('.folha') });
+    };
+    fr.srcdoc = html;
+    document.body.appendChild(fr);
+  });
+}
+function configPDF(nomePdf){
+  return {
+    margin: [20, 18, 24, 18],                       /* mm — o mesmo @page do relatório */
+    filename: nomePdf,
+    image: { type:'jpeg', quality:0.95 },
+    html2canvas: { scale:2, useCORS:true, backgroundColor:'#ffffff', logging:false },
+    jsPDF: { unit:'mm', format:'a4', orientation:'portrait', compress:true },
+    /* não parte tabelas no meio de uma linha nem os cartões de indicadores */
+    pagebreak: { mode:['css','legacy'], avoid:['tr','.kpi','.legal'] }
+  };
+}
+async function baixarRelatorioPDF(html, nomeArquivo){
+  const nomePdf = nomeArquivo.replace(/\.(html?|pdf)$/i, '') + '.pdf';
+  const ok = await carregarHtml2Pdf();
+  if(!ok){
+    baixar(nomePdf.replace(/\.pdf$/i, '.html'), html, 'text/html');
+    toast('Não consegui carregar o gerador de PDF (sem internet?). Baixei o .html — abra e use Ctrl+P.', 'alerta');
+    return;
+  }
+  toast('Gerando o PDF — leva alguns segundos.');
+  const { fr, alvo } = await palcoRelatorio(html);
+  try{
+    await html2pdf().set(configPDF(nomePdf)).from(alvo).save();
+    toast('PDF baixado.');
+  }catch(e){
+    baixar(nomePdf.replace(/\.pdf$/i, '.html'), html, 'text/html');
+    toast('Falha ao montar o PDF (' + e.message + '). Baixei o .html como alternativa.', 'erro');
+  }finally{
+    fr.remove();
+  }
+}
+
+/* entrega do relatório:
+   undefined → abre na tela e registra no histórico
+   'pdf'     → baixa o PDF e registra no histórico
+   'baixar'  → baixa o PDF de novo, a partir do histórico (não registra outra vez)
+   'reabrir' → abre na tela a partir do histórico (não registra outra vez) */
+async function entregarRelatorio(html, acao, nomeArquivo, reg){
+  if(acao === 'pdf' || acao === 'baixar'){
+    if(reg && acao === 'pdf') registrarRelatorio(reg);
+    await baixarRelatorioPDF(html, nomeArquivo);
     return;
   }
   abrirRelatorio(html);
