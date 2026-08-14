@@ -471,11 +471,16 @@ function mesLabel(ym){
   return new Date(y,m-1,1).toLocaleDateString('pt-BR',{month:'long',year:'numeric'});
 }
 
+/* "Troca de função" e "Mudança de risco" eram a mesma coisa na prática: ficou só
+   "Mudança de Risco". A CHAVE interna segue TROCA_FUNCAO porque é o nome da
+   coluna nas matrizes, nos ASOs e nas emissões já gravadas — trocar a chave
+   obrigaria a migrar toda a base sem ganho nenhum. Só o rótulo mudou. */
 const TIPOS = {
   ADMISSIONAL:'Admissional', PERIODICO:'Periódico', DEMISSIONAL:'Demissional',
-  RETORNO:'Retorno ao Trabalho', TROCA_FUNCAO:'Troca de Função', MUDANCA_RISCO:'Mudança de Risco'
+  RETORNO:'Retorno ao Trabalho', TROCA_FUNCAO:'Mudança de Risco'
 };
-const tipoLabel = t => TIPOS[t] || (t ? t : '—');
+const TIPO_MUDANCA_RISCO = 'TROCA_FUNCAO';
+const tipoLabel = t => TIPOS[t] || (t === 'MUDANCA_RISCO' ? TIPOS.TROCA_FUNCAO : (t ? t : '—'));
 
 /* mantido só para ler bases antigas — a falta virou situação no fluxo */
 const COMPARECIMENTO = [
@@ -588,6 +593,7 @@ function seedFresh(){
   migrarNaoCompareceu(d);
   migrarDemissionais(d);
   migrarDataAso(d);
+  migrarMudancaRisco(d);
   migrarSelecaoFat(d);
   return d;
 }
@@ -684,6 +690,7 @@ async function bootStorage(){
   migrarNaoCompareceu(DB);
   migrarDemissionais(DB);
   migrarDataAso(DB);
+  migrarMudancaRisco(DB);
   migrarSelecaoFat(DB);
 
   /* nuvem ligada mas a cópia mais recente veio de outra camada → sobe p/ nuvem */
@@ -1647,7 +1654,7 @@ function viewDashboard(){
               sub:`${unidadesAtivas} unidades com pessoal ativo`, icon:'fa-building', cor:'bg-slate-100 text-slate-600', onClick:"go('empresas')"})}
       ${card({titulo:'Colaboradores ativos', valor:d.ativos, sub:`${d.inativos} inativos / desligados`,
               icon:'fa-users', cor:'bg-stone-100 text-accent', onClick:"go('cadastros')"})}
-      ${card({titulo:'ASOs de troca de função', valor:d.trocaFuncao, sub:'histórico registrado',
+      ${card({titulo:'ASOs de mudança de risco', valor:d.trocaFuncao, sub:'histórico registrado',
               icon:'fa-right-left', cor:'bg-stone-200 text-stone-600', onClick:"irParaAsos('TROCA_FUNCAO')"})}
       ${card({titulo:'Exames em aberto no fornecedor', valor:emissoesPendentesFornecedor().length, sub:'solicitados ou agendados na Arys',
               icon:'fa-truck-medical', cor:'bg-blue-50 text-blue-600', onClick:"go('acompanhamentos')"})}
@@ -3173,13 +3180,18 @@ function examesCarteirinha(unidadeId, funcao, tipo){
 function funcaoCanonica(funcao){
   if(!funcao) return '';
   const n = norm(funcao);
+  /* Cargo cadastrado à mão manda. A tabela de sinônimos existe para juntar as
+     grafias que vieram da planilha; ela NÃO pode engolir um cargo que a pessoa
+     criou de propósito no catálogo — senão ele some da lista de funções
+     (foi o que aconteceu com "Coordenador de projetos", listado como sinônimo
+     de "Analista de compras"). */
+  const proprio = (DB.cargos||[]).find(c => norm(c.funcao) === n && !c.importado);
+  if(proprio) return proprio.funcao;
   const canon = sinonimoIdx()[n];
   if(canon){
     const c = (DB.cargos||[]).find(x => norm(x.funcao) === norm(canon));
     if(c) return c.funcao;
   }
-  const oficial = (DB.cargos||[]).find(c => norm(c.funcao) === n && !c.importado);
-  if(oficial) return oficial.funcao;
   const qualquer = (DB.cargos||[]).find(c => norm(c.funcao) === n);
   return qualquer ? qualquer.funcao : funcao;
 }
@@ -3477,6 +3489,28 @@ function migrarDataAso(d){
       });
   });
   d.dataAsoVersao = 2;
+}
+
+/* "Mudança de risco" era um segundo nome para "Troca de função" — os registros
+   que ficaram com a chave antiga passam para a única que sobrou */
+function migrarMudancaRisco(d){
+  if(d.mudancaRiscoVersao === 1) return;
+  (d.emissoes||[]).forEach(e => { if(e.tipoExame === 'MUDANCA_RISCO') e.tipoExame = 'TROCA_FUNCAO'; });
+  (d.asos||[]).forEach(a => {
+    if(a.tipo === 'MUDANCA_RISCO') a.tipo = 'TROCA_FUNCAO';
+    (a.historico||[]).forEach(h => { if(h.tipo === 'MUDANCA_RISCO') h.tipo = 'TROCA_FUNCAO'; });
+  });
+  /* nenhuma matriz usava a chave antiga (TIPOS_MTZ nunca a listou), mas se uma
+     base antiga trouxer a coluna, o conteúdo é somado sem duplicar exame */
+  (d.matriz||[]).forEach(m => {
+    if(!Array.isArray(m.MUDANCA_RISCO)) return;
+    const atual = Array.isArray(m.TROCA_FUNCAO) ? m.TROCA_FUNCAO : [];
+    const vistos = new Set(atual.map(norm));
+    m.MUDANCA_RISCO.forEach(x => { if(!vistos.has(norm(x))){ atual.push(x); vistos.add(norm(x)); } });
+    m.TROCA_FUNCAO = atual;
+    delete m.MUDANCA_RISCO;
+  });
+  d.mudancaRiscoVersao = 1;
 }
 
 /* "não irá comparecer" deixou de ser coluna e virou situação no fluxo */
@@ -4693,13 +4727,29 @@ function editarCargo(id){
       { name:'descricao', label:'Descrição das atividades', type:'textarea', rows:4, col:'sm:col-span-2' }
     ],
     values: c || {},
-    onSave: v => {
+    afterRender: () => {
+      /* atalho: grava o cargo e já abre a matriz de exames dele, sem passar pela grade */
+      const foot = document.getElementById('modalFoot');
+      if(!foot || document.getElementById('btnMatrizCargo')) return;
+      const jaTem = c && matrizDaFuncao(c.funcao).matriz;
+      foot.insertAdjacentHTML('afterbegin', `
+        <button id="btnMatrizCargo" onclick="salvarEDefinirMatriz()"
+          class="px-4 py-2 rounded-lg text-sm bg-accent text-white hover:bg-blue-700 mr-auto"
+          title="Grava o cargo e abre em seguida a matriz de exames obrigatórios">
+          <i class="fa-solid fa-table-list mr-1"></i>${jaTem ? 'Salvar e editar matriz' : 'Salvar e definir matriz'}</button>`);
+    },
+    onSave: (v, extra) => {
       v.carteirinha = !!v.carteirinha;
-      if(c) Object.assign(c, v); else DB.cargos.push(Object.assign({ id: uid('cg') }, v));
-      save(); closeModal(); viewCadastros(); toast('Cargo salvo.');
+      let alvo;
+      if(c){ Object.assign(c, v); alvo = c; }
+      else { alvo = Object.assign({ id: uid('cg') }, v); DB.cargos.push(alvo); }
+      save(); closeModal();
+      if(extra === 'matriz'){ editarMatriz(alvo.id); return; }
+      viewCadastros(); toast('Cargo salvo.');
     }
   });
 }
+function salvarEDefinirMatriz(){ if(modalSave) modalSave('matriz'); }
 function excluirCargo(id){
   if(!confirm('Excluir este cargo?')) return;
   DB.cargos = DB.cargos.filter(x => x.id !== id);
@@ -4764,7 +4814,7 @@ function abaMatriz(){
           <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
             <tr><th class="px-4 py-3">Cargo / CBO</th><th class="px-4 py-3">Situação</th>
                 <th class="px-4 py-3">Admissional</th><th class="px-4 py-3">Periódico</th>
-                <th class="px-4 py-3">Troca de função</th><th class="px-4 py-3">Retorno</th><th class="px-4 py-3">Demissional</th>
+                <th class="px-4 py-3">Mudança de risco</th><th class="px-4 py-3">Retorno</th><th class="px-4 py-3">Demissional</th>
                 <th class="px-4 py-3 text-right no-print">Ações</th></tr></thead>
           <tbody class="divide-y divide-slate-100">
             ${lista.length ? lista.map(({cargo, st}) => `
@@ -4853,7 +4903,7 @@ function editarMatriz(cargoId){
 
 function exportarMatriz(){
   exportCSV('matriz-pcmso',
-    ['Cargo','CBO','Situação','Herda de','Colaboradores','Admissional','Periódico','Troca de função','Retorno','Demissional'],
+    ['Cargo','CBO','Situação','Herda de','Colaboradores','Admissional','Periódico','Mudança de risco','Retorno','Demissional'],
     cargosOrdenados().map(c => {
       const st = statusMatriz(c), m = st.matriz || {};
       return [c.funcao, c.cbo, st.label, st.via || '',
@@ -5107,10 +5157,10 @@ function camposEmissao(){
       ph:'digite para buscar no cadastro', hint:'ao escolher alguém do cadastro, a matriz do cargo é carregada abaixo' },
     { name:'unidadeId', label:'Empresa / unidade', type:'select', options:opcoesUnidades().map(o=>({v:o.v,l:o.l})), req:true },
     { name:'tipoExame', label:'Tipo de exame', type:'select', options:Object.keys(TIPOS).map(k=>({v:k,l:TIPOS[k]})) },
-    /* na troca de função este campo grava o cargo novo no cadastro do colaborador */
+    /* na mudança de risco este campo grava o cargo novo no cadastro do colaborador */
     { name:'funcao', label:'Função / cargo', type:'select',
       options: [{v:'',l:'— manter a do cadastro —'}].concat(funcoesCanonicasCadastradas().map(f => ({v:f,l:f}))),
-      col:'sm:col-span-2', hint:'em Troca de Função, escolha o cargo novo — ele passa a valer no cadastro' },
+      col:'sm:col-span-2', hint:'em Mudança de Risco, escolha o cargo novo — ele passa a valer no cadastro' },
     { type:'painel', name:'painelMatrizEx' },
     { type:'sep', label:'Exames laboratoriais' },
     { name:'exameLab', label:'Exames solicitados', type:'textarea', rows:2, col:'sm:col-span-2',
@@ -5876,7 +5926,7 @@ function abaEsocial(){
 }
 
 /* ═══════════════════════════ 7. FATURAMENTO ═══════════════════════════ */
-const UIFat = { unidade:'', mes:'', valorPadrao:'' };
+const UIFat = { unidade:'', mes:'', valorPadrao:'', aba:'fechamento' };
 
 /* ═══════════ FECHAMENTO DE MÊS (competência cobrada) ═══════════
    Fechar o mês declara que aquilo já foi cobrado do cliente. A partir daí o
@@ -5969,29 +6019,32 @@ async function fecharRetroativo(limite){
   toast(alvos.length + ' competência(s) fechada(s) até ' + mesLabel(lim) + '.', 'ok');
 }
 
-function fechamentoDados(){
-  const mes = UIFat.mes || mesFaturamentoPadrao();
+/* Sem argumentos usa o filtro da tela; a aba de notas passa mês e unidade
+   explicitamente para apurar cada unidade sem mexer no estado da tela. */
+function fechamentoDados(mesArg, unidadeArg){
+  const mes = mesArg || UIFat.mes || mesFaturamentoPadrao();
+  const uFiltro = unidadeArg !== undefined ? unidadeArg : UIFat.unidade;
   /* a coluna Fechamento é a ÚNICA referência do mês de faturamento —
      exame realizado sem fechamento fica pendente e não entra em mês nenhum */
   const ems = DB.emissoes.filter(e => {
     if(!exameEncerrado(e)) return false;
-    return (e.fechamento||'').slice(0,7) === mes && (!UIFat.unidade || e.unidadeId === UIFat.unidade);
+    return (e.fechamento||'').slice(0,7) === mes && (!uFiltro || e.unidadeId === uFiltro);
   });
   /* realizados ainda sem mês de fechamento (no escopo do filtro de unidade) */
   const pendentesFech = DB.emissoes.filter(e =>
     exameEncerrado(e) && !e.fechamento &&
-    (!UIFat.unidade || e.unidadeId === UIFat.unidade));
+    (!uFiltro || e.unidadeId === uFiltro));
   /* o valor do laudo vem da matriz de preço por unidade, não de um campo aberto */
-  const lds = entregasLaudos(mes, UIFat.unidade).map(x => Object.assign({}, x.v, {
+  const lds = entregasLaudos(mes, uFiltro).map(x => Object.assign({}, x.v, {
     unidadeId: x.laudo.unidadeId, laudoId: x.laudo.id, valor: precoLaudo(x.laudo.unidadeId)
   }));
   /* só visitas REALIZADAS entram no faturamento */
   const vis = (DB.visitas||[]).filter(v =>
     v.status === 'REALIZADO' &&
-    (v.fechamento || v.mes || (v.data||'').slice(0,7)) === mes && (!UIFat.unidade || v.unidadeId === UIFat.unidade));
+    (v.fechamento || v.mes || (v.data||'').slice(0,7)) === mes && (!uFiltro || v.unidadeId === uFiltro));
 
   /* mensalidades das unidades no escopo (fixas, independem de exame) */
-  const unidadesEscopo = UIFat.unidade ? [uni(UIFat.unidade)].filter(Boolean) : DB.unidades;
+  const unidadesEscopo = uFiltro ? [uni(uFiltro)].filter(Boolean) : DB.unidades;
   const mensais = unidadesEscopo.map(u => ({ unidadeId:u.id, valor: precoMensal(u.id) })).filter(m => m.valor > 0);
   const recMensal = mensais.reduce((s,m) => s + m.valor, 0);
 
@@ -6014,12 +6067,12 @@ function fechamentoDados(){
   const custo = custoEx + custoCart;
 
   /* informado o total cobrado, ele passa a ser o valor efetivo e manda na margem */
-  const cobrado = totalCobrado(mes, UIFat.unidade);
+  const cobrado = totalCobrado(mes, uFiltro);
   const efetivo = cobrado || receita;
   const margem = efetivo - custo;
 
   return {
-    mes, ems, lds, vis, mensais, exValidos, pendentesFech, carts,
+    mes, unidadeId: uFiltro, ems, lds, vis, mensais, exValidos, pendentesFech, carts,
     recEx, recLd, recVi, recMensal, recCart, receita, cobrado, efetivo,
     custoEx, custoCart, custo, margem,
     /* aliases mantidos por compatibilidade */
@@ -6090,8 +6143,25 @@ function quadroResumoFat(d){
 }
 
 function viewFaturamento(){
-  const d = fechamentoDados();
+  const abas = [
+    { id:'fechamento', label:'Fechamento do mês', icon:'fa-file-invoice-dollar' },
+    { id:'notas',      label:'Emissão de notas e boletos', icon:'fa-receipt' }
+  ];
   $('#view').innerHTML = `
+    <div class="space-y-4">
+      <div class="flex gap-1 bg-white rounded-xl border border-slate-200 p-1 overflow-x-auto no-print">
+        ${abas.map(a => `<button onclick="UIFat.aba='${a.id}';viewFaturamento()"
+          class="px-4 py-2 rounded-lg text-sm whitespace-nowrap flex items-center gap-2 ${UIFat.aba===a.id?'bg-accent text-white':'text-slate-600 hover:bg-slate-100'}">
+          <i class="fa-solid ${a.icon}"></i>${a.label}</button>`).join('')}
+      </div>
+      <div id="abaFat"></div>
+    </div>`;
+  ({ fechamento:abaFechamentoMes, notas:abaNotasBoletos })[UIFat.aba || 'fechamento']();
+}
+
+function abaFechamentoMes(){
+  const d = fechamentoDados();
+  $('#abaFat').innerHTML = `
   <div class="space-y-5">
     <div class="bg-white rounded-xl border border-slate-200 p-4 flex flex-wrap gap-3 items-end no-print">
       <div><label class="block text-xs font-medium text-slate-600 mb-1">Empresa / unidade</label>
@@ -6296,6 +6366,267 @@ function viewFaturamento(){
   /* a seleção guardada volta marcada — os cartões já abrem com o subtotal dela */
   recalcularSelecaoFat();
 }
+
+/* ═══════ Emissão de notas e boletos ═══════
+   Uma linha por unidade com movimento na competência. O que a tela apura fica
+   ao lado dos dados cadastrais necessários para emitir a nota (razão social,
+   CNPJ, endereço), para não precisar abrir o cadastro em outra aba.
+   O registro de NF/boleto NÃO é travado por mês fechado: a nota é justamente
+   o que se emite depois de fechar, e sem isso não haveria onde registrá-la. */
+function chaveNota(mes, unidadeId){ return mes + '|' + unidadeId; }
+function notasMapa(){
+  if(!DB.notas || typeof DB.notas !== 'object' || Array.isArray(DB.notas)) DB.notas = {};
+  return DB.notas;
+}
+function notaVazia(){
+  return { nfGerada:false, nfNumero:'', nfValor:0, nfData:'',
+           boletoGerado:false, boletoValor:0, boletoVenc:'', obs:'' };
+}
+/* leitura para desenhar a tela — não cria registro vazio na base */
+function lerNota(mes, unidadeId){ return notasMapa()[chaveNota(mes, unidadeId)] || notaVazia(); }
+/* leitura para gravar — aí sim o registro passa a existir */
+function notaDe(mes, unidadeId){
+  const m = notasMapa(), k = chaveNota(mes, unidadeId);
+  if(!m[k]) m[k] = notaVazia();
+  return m[k];
+}
+function setNota(mes, unidadeId, campo, valor){
+  const n = notaDe(mes, unidadeId);
+  if(campo === 'nfValor' || campo === 'boletoValor') n[campo] = Number(valor) || 0;
+  else if(campo === 'nfGerada' || campo === 'boletoGerado'){
+    n[campo] = !!valor;
+    /* ao marcar como gerada sem valor digitado, assume o total apurado */
+    if(n[campo]){
+      const d = fechamentoDados(mes, unidadeId);
+      const alvo = campo === 'nfGerada' ? 'nfValor' : 'boletoValor';
+      if(!n[alvo]) n[alvo] = d.efetivo;
+      if(campo === 'nfGerada' && !n.nfData) n.nfData = isoToday();
+    }
+  }
+  else n[campo] = valor;
+  save(); abaNotasBoletos();
+}
+
+/* unidades com algo a cobrar no mês (ou com NF/boleto já lançado) */
+function unidadesParaNota(mes){
+  return DB.unidades
+    .map(u => ({ u, d: fechamentoDados(mes, u.id), n: (notasMapa()[chaveNota(mes,u.id)] || null) }))
+    .filter(x => x.d.receita > 0 || x.d.cobrado > 0 || (x.n && (x.n.nfGerada || x.n.boletoGerado)))
+    .sort((a,b) => a.u.nome.localeCompare(b.u.nome,'pt-BR'));
+}
+
+function abaNotasBoletos(){
+  const mes = UIFat.mes || mesFaturamentoPadrao();
+  const linhas = unidadesParaNota(mes).filter(x => !UIFat.unidade || x.u.id === UIFat.unidade);
+
+  const totApurado = linhas.reduce((s,x) => s + x.d.efetivo, 0);
+  const totNF      = linhas.reduce((s,x) => s + (x.n && x.n.nfGerada ? Number(x.n.nfValor)||0 : 0), 0);
+  const totBol     = linhas.reduce((s,x) => s + (x.n && x.n.boletoGerado ? Number(x.n.boletoValor)||0 : 0), 0);
+  const semNF      = linhas.filter(x => !(x.n && x.n.nfGerada)).length;
+  const semBoleto  = linhas.filter(x => !(x.n && x.n.boletoGerado)).length;
+
+  const comp = d => {
+    const p = [];
+    if(d.exValidos.length) p.push(`${d.exValidos.length} exame(s) ${fmtMoney(d.recEx)}`);
+    if(d.carts.length)     p.push(`${d.carts.length} carteirinha(s) ${fmtMoney(d.recCart)}`);
+    if(d.lds.length)       p.push(`${d.lds.length} laudo(s) ${fmtMoney(d.recLd)}`);
+    if(d.vis.length)       p.push(`${d.vis.length} visita(s) ${fmtMoney(d.recVi)}`);
+    if(d.recMensal)        p.push(`mensalidade ${fmtMoney(d.recMensal)}`);
+    return p.length ? p.join(' · ') : 'sem composição';
+  };
+
+  $('#abaFat').innerHTML = `
+  <div class="space-y-5">
+    <div class="bg-white rounded-xl border border-slate-200 p-4 flex flex-wrap gap-3 items-end no-print">
+      <div><label class="block text-xs font-medium text-slate-600 mb-1">Empresa / unidade</label>
+        ${selectFiltro('fNotaU','Todas as unidades', opcoesUnidades(), 'UIFat.unidade=this.value;viewFaturamento()', UIFat.unidade)}</div>
+      <div><label class="block text-xs font-medium text-slate-600 mb-1">Competência</label>
+        <input type="month" value="${mes}" onchange="UIFat.mes=this.value;viewFaturamento()"
+          class="px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-accent/40"></div>
+      <div class="flex-1"></div>
+      ${botao('Exportar CSV','fa-file-csv','exportarNotas()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
+    </div>
+
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+      ${card({titulo:'A faturar na competência', valor:fmtMoney(totApurado),
+              sub:`${linhas.length} unidade(s) · ${mesLabel(mes)}`, icon:'fa-calculator', cor:'bg-slate-100 text-slate-700'})}
+      ${card({titulo:'Em nota fiscal', valor:fmtMoney(totNF),
+              sub: semNF ? `${semNF} unidade(s) sem NF` : 'todas com NF emitida',
+              icon:'fa-receipt', cor: semNF ? 'bg-amber-50 text-warning' : 'bg-emerald-50 text-success'})}
+      ${card({titulo:'Em boleto', valor:fmtMoney(totBol),
+              sub: semBoleto ? `${semBoleto} unidade(s) sem boleto` : 'todos os boletos gerados',
+              icon:'fa-barcode', cor: semBoleto ? 'bg-amber-50 text-warning' : 'bg-emerald-50 text-success'})}
+      ${(() => { const dif = totApurado - totNF;
+         return card({titulo:'Diferença apurado × NF', valor:fmtMoney(dif),
+           sub: Math.abs(dif) < 0.01 ? 'bate com o apurado' : 'confira antes de fechar a competência',
+           icon:'fa-scale-unbalanced', cor: Math.abs(dif) < 0.01 ? 'bg-emerald-50 text-success' : 'bg-red-50 text-danger'}); })()}
+    </div>
+
+    ${linhas.map(({u,d,n}) => { const nt = n || notaVazia(); const e = emp(u.empresaId) || {};
+      const conferido = Math.abs(d.efetivo - (Number(nt.nfValor)||0)) < 0.01;
+      return `
+      <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
+        <div class="px-5 py-4 border-b border-slate-200 flex flex-wrap items-center gap-2">
+          <div class="min-w-0">
+            <h3 class="font-semibold text-sm text-slate-700">${esc(u.nome)}
+              <span class="text-xs font-normal text-slate-400">· ${esc(u.sigla||'')}</span></h3>
+            <p class="text-[11px] text-slate-500">${esc(comp(d))}</p>
+          </div>
+          <div class="ml-auto flex items-center gap-2">
+            ${nt.nfGerada ? badge('NF '+(nt.nfNumero||'emitida'),'bg-emerald-100 text-emerald-700') : badge('sem NF','bg-amber-100 text-amber-800')}
+            ${nt.boletoGerado ? badge('boleto gerado','bg-emerald-100 text-emerald-700') : badge('sem boleto','bg-amber-100 text-amber-800')}
+            <span class="text-base font-semibold text-slate-800">${fmtMoney(d.efetivo)}</span>
+          </div>
+        </div>
+
+        <div class="grid lg:grid-cols-3 gap-0 divide-y lg:divide-y-0 lg:divide-x divide-slate-100">
+          <!-- dados para emitir a nota -->
+          <div class="p-5 space-y-1.5">
+            <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-400 mb-2">Dados para a nota</p>
+            ${[['Razão social', e.razaoSocial || e.nome], ['CNPJ da empresa', e.cnpj],
+               ['Unidade', u.nome], ['CNPJ da unidade', u.cnpj],
+               ['Cidade / UF', [u.cidade, u.uf].filter(Boolean).join(' / ')],
+               ['E-mail de cobrança', e.emailNotificacao], ['Em cópia', e.emailsCopia]]
+              .map(([k,v]) => `<div class="flex gap-2 text-xs items-start">
+                <span class="text-slate-500 w-32 shrink-0">${k}</span>
+                <span class="text-slate-800 min-w-0 break-words flex-1">${esc(v || '—')}</span>
+                ${v ? `<button onclick="copiarTexto(this.previousElementSibling.textContent)"
+                  class="text-slate-300 hover:text-accent shrink-0" title="Copiar"><i class="fa-regular fa-copy"></i></button>` : ''}
+              </div>`).join('')}
+            <p class="text-[11px] text-slate-400 pt-2">Discriminação sugerida: <i>${esc(comp(d))}</i> — competência ${mesLabel(mes)}.</p>
+          </div>
+
+          <!-- nota fiscal -->
+          <div class="p-5 space-y-3">
+            <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Nota fiscal</p>
+            <label class="flex items-center gap-2 text-sm cursor-pointer">
+              <input type="checkbox" class="w-4 h-4 rounded border-slate-300 accent-emerald-600" ${nt.nfGerada?'checked':''}
+                onchange="setNota('${mes}','${u.id}','nfGerada',this.checked)">
+              <span>Nota fiscal gerada</span></label>
+            <div class="grid grid-cols-2 gap-2">
+              <div><label class="block text-[11px] text-slate-500 mb-1">Número</label>
+                <input type="text" value="${esc(nt.nfNumero||'')}" onchange="setNota('${mes}','${u.id}','nfNumero',this.value)"
+                  class="w-full px-2 py-1.5 text-sm border border-slate-300 rounded focus:outline-none focus:ring-2 focus:ring-accent/40"></div>
+              <div><label class="block text-[11px] text-slate-500 mb-1">Emissão</label>
+                <input type="date" value="${esc(nt.nfData||'')}" onchange="setNota('${mes}','${u.id}','nfData',this.value)"
+                  class="w-full px-2 py-1.5 text-sm border border-slate-300 rounded focus:outline-none focus:ring-2 focus:ring-accent/40"></div>
+            </div>
+            <div><label class="block text-[11px] text-slate-500 mb-1">Valor da nota</label>
+              <input type="number" step="0.01" value="${Number(nt.nfValor)||''}" placeholder="${d.efetivo.toFixed(2)}"
+                onchange="setNota('${mes}','${u.id}','nfValor',this.value)"
+                class="w-full px-2 py-1.5 text-sm text-right border rounded focus:outline-none focus:ring-2 focus:ring-accent/40
+                  ${nt.nfGerada && !conferido ? 'border-danger bg-red-50' : 'border-slate-300'}"></div>
+            ${nt.nfGerada && !conferido
+              ? `<p class="text-[11px] text-danger"><i class="fa-solid fa-triangle-exclamation mr-1"></i>Difere do apurado (${fmtMoney(d.efetivo)}).</p>`
+              : ''}
+          </div>
+
+          <!-- boleto -->
+          <div class="p-5 space-y-3">
+            <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Boleto</p>
+            <label class="flex items-center gap-2 text-sm cursor-pointer">
+              <input type="checkbox" class="w-4 h-4 rounded border-slate-300 accent-emerald-600" ${nt.boletoGerado?'checked':''}
+                onchange="setNota('${mes}','${u.id}','boletoGerado',this.checked)">
+              <span>Boleto gerado</span></label>
+            <div class="grid grid-cols-2 gap-2">
+              <div><label class="block text-[11px] text-slate-500 mb-1">Vencimento</label>
+                <input type="date" value="${esc(nt.boletoVenc||'')}" onchange="setNota('${mes}','${u.id}','boletoVenc',this.value)"
+                  class="w-full px-2 py-1.5 text-sm border border-slate-300 rounded focus:outline-none focus:ring-2 focus:ring-accent/40"></div>
+              <div><label class="block text-[11px] text-slate-500 mb-1">Valor</label>
+                <input type="number" step="0.01" value="${Number(nt.boletoValor)||''}" placeholder="${d.efetivo.toFixed(2)}"
+                  onchange="setNota('${mes}','${u.id}','boletoValor',this.value)"
+                  class="w-full px-2 py-1.5 text-sm text-right border border-slate-300 rounded focus:outline-none focus:ring-2 focus:ring-accent/40"></div>
+            </div>
+            <div><label class="block text-[11px] text-slate-500 mb-1">Observação</label>
+              <input type="text" value="${esc(nt.obs||'')}" onchange="setNota('${mes}','${u.id}','obs',this.value)"
+                placeholder="ex.: enviado ao financeiro"
+                class="w-full px-2 py-1.5 text-sm border border-slate-300 rounded focus:outline-none focus:ring-2 focus:ring-accent/40"></div>
+            <button onclick="textoEmailNota('${mes}','${u.id}')"
+              class="w-full px-3 py-2 rounded-lg text-sm bg-accent text-white hover:bg-blue-700 no-print">
+              <i class="fa-regular fa-envelope mr-1"></i>Sugestão de texto para e-mail</button>
+          </div>
+        </div>
+      </div>`; }).join('') || `
+      <div class="bg-white rounded-xl border border-slate-200 p-10 text-center">
+        <i class="fa-solid fa-receipt text-3xl text-slate-200 mb-3"></i>
+        <p class="text-sm text-slate-500">Nenhuma unidade com valor a faturar em ${mesLabel(mes)}.</p>
+        <button onclick="UIFat.aba='fechamento';viewFaturamento()" class="mt-2 text-sm text-accent underline">Ver o fechamento do mês</button>
+      </div>`}
+  </div>`;
+}
+
+function copiarTexto(t){
+  const ok = () => toast('Copiado.');
+  if(navigator.clipboard) navigator.clipboard.writeText(t).then(ok).catch(()=>toast('Não foi possível copiar.','erro'));
+  else toast('Não foi possível copiar.','erro');
+}
+
+/* Diferente do e-mail de fechamento (que é relato e não leva valores), este é o
+   e-mail de cobrança: NF e boleto só fazem sentido com o valor. */
+function textoEmailNota(mes, unidadeId){
+  const u = uni(unidadeId); if(!u) return;
+  const e = emp(u.empresaId) || {};
+  const d = fechamentoDados(mes, unidadeId);
+  const nt = lerNota(mes, unidadeId);
+  const itens = [];
+  if(d.exValidos.length) itens.push(`${d.exValidos.length} exame(s) ocupacional(is)`);
+  if(d.carts.length)     itens.push(`${d.carts.length} carteirinha(s) sanitária(s)`);
+  if(d.lds.length)       itens.push(`${d.lds.length} laudo(s) técnico(s)`);
+  if(d.vis.length)       itens.push(`${d.vis.length} visita(s) técnica(s)`);
+  if(d.recMensal)        itens.push('mensalidade do contrato');
+  const lista = itens.length > 1 ? itens.slice(0,-1).join(', ') + ' e ' + itens[itens.length-1] : (itens[0] || '');
+
+  const assunto = `Nota fiscal e boleto — ${u.nome} — competência ${mesLabel(mes)}`;
+  const corpo =
+`Prezados,
+
+Segue a nota fiscal referente aos serviços de medicina ocupacional e SST prestados${
+  lista ? ' à unidade ' + u.nome + ' na competência ' + mesLabel(mes) + ', contemplando ' + lista
+        : ' à unidade ' + u.nome + ' na competência ' + mesLabel(mes)}.
+
+Nota fiscal${nt.nfNumero ? ' nº ' + nt.nfNumero : ''}${nt.nfData ? ' — emitida em ' + fmtDate(nt.nfData) : ''}
+Valor: ${fmtMoney(Number(nt.nfValor) || d.efetivo)}
+${nt.boletoGerado
+  ? 'Boleto no valor de ' + fmtMoney(Number(nt.boletoValor) || d.efetivo) +
+    (nt.boletoVenc ? ', com vencimento em ' + fmtDate(nt.boletoVenc) : '') + ', segue em anexo.'
+  : 'O boleto será encaminhado na sequência.'}
+
+Qualquer divergência, por favor nos avise para que possamos ajustar antes do vencimento.
+
+Atenciosamente,
+Gestão Atlas — Medicina Ocupacional e SST`;
+
+  openInfo('Texto para e-mail — ' + u.nome, `
+    <div class="space-y-3">
+      <div class="border border-slate-200 rounded-lg p-3 bg-slate-50">
+        <p class="text-xs text-slate-500 mb-1">Assunto</p>
+        <p id="ntAssunto" class="text-sm font-medium">${esc(assunto)}</p>
+      </div>
+      <div class="flex flex-wrap gap-2 no-print">
+        <button onclick="copiarTexto(document.getElementById('ntCorpo').value)"
+          class="px-3 py-2 rounded-lg text-sm bg-accent text-white hover:bg-blue-700"><i class="fa-regular fa-copy mr-1"></i>Copiar texto</button>
+        <button onclick="copiarTexto(document.getElementById('ntAssunto').textContent)"
+          class="px-3 py-2 rounded-lg text-sm bg-slate-100 hover:bg-slate-200"><i class="fa-regular fa-copy mr-1"></i>Copiar assunto</button>
+      </div>
+      <textarea id="ntCorpo" rows="16"
+        class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg font-mono leading-relaxed
+               focus:outline-none focus:ring-2 focus:ring-accent/40">${esc(corpo)}</textarea>
+      <p class="text-[11px] text-slate-400">Edite à vontade antes de copiar — o texto não é gravado.</p>
+    </div>`, 'max-w-2xl');
+}
+
+function exportarNotas(){
+  const mes = UIFat.mes || mesFaturamentoPadrao();
+  exportCSV('notas-e-boletos-' + mes,
+    ['Competência','Unidade','Empresa','CNPJ','Apurado','NF gerada','NF número','NF emissão','NF valor',
+     'Boleto gerado','Boleto vencimento','Boleto valor','Observação'],
+    unidadesParaNota(mes).map(({u,d}) => { const n = lerNota(mes, u.id);
+      return [mesLabel(mes), u.nome, (emp(u.empresaId)||{}).nome||'', u.cnpj||'', d.efetivo,
+        n.nfGerada?'Sim':'Não', n.nfNumero||'', n.nfData||'', n.nfGerada?(Number(n.nfValor)||0):'',
+        n.boletoGerado?'Sim':'Não', n.boletoVenc||'', n.boletoGerado?(Number(n.boletoValor)||0):'', n.obs||''];
+    }));
+}
+
 /* ═══════ Seleção auxiliar da grade "Exames a cobrar" ═══════
    Marcação de trabalho: soma quantidade, custo, cobrança e margem dos marcados.
    A marca pertence AO EXAME, não à tela: é uma lista simples de ids na base.
