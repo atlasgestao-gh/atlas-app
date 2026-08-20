@@ -594,6 +594,7 @@ function seedFresh(){
   migrarDemissionais(d);
   migrarDataAso(d);
   migrarMudancaRisco(d);
+  migrarTabelaFechamento(d);
   migrarSelecaoFat(d);
   return d;
 }
@@ -691,6 +692,7 @@ async function bootStorage(){
   migrarDemissionais(DB);
   migrarDataAso(DB);
   migrarMudancaRisco(DB);
+  migrarTabelaFechamento(DB);
   migrarSelecaoFat(DB);
 
   /* nuvem ligada mas a cópia mais recente veio de outra camada → sobe p/ nuvem */
@@ -3250,23 +3252,55 @@ function carteirinhaPendente(e){
 function carteirinhaOk(e){
   return !!e.carteirinha && e.status === 'REALIZADO';
 }
-function precoCarteirinha(unidadeId){
-  const o = (DB.precosUnidade||{})[unidadeId] || {};
-  return o.carteirinha != null ? o.carteirinha : (DB.precos.carteirinha || 0);
+/* ═══════ PREÇO DA COMPETÊNCIA ═══════
+   Fechar um mês CONGELA a tabela de preços praticada nele. A partir daí aquela
+   competência nunca mais acompanha a tabela vigente — nem se for reaberta para
+   incluir algo. Um lançamento novo num mês reaberto é precificado pela época.
+   Mês sem fechamento (ou com o fechamento descartado) usa a tabela de hoje.
+   Todas as funções abaixo recebem o mês; sem ele, valem os preços de hoje. */
+function snapshotPrecosDe(d){
+  const custos = {};
+  (d.exames||[]).forEach(e => { custos[norm(e.nome)] = Number(e.custo) || 0; });
+  return {
+    precos: JSON.parse(JSON.stringify(d.precos || {})),
+    precosUnidade: JSON.parse(JSON.stringify(d.precosUnidade || {})),
+    custosExame: custos,
+    congeladoEm: new Date().toISOString()
+  };
 }
-function custoCarteirinha(){ return Number(DB.precos.carteirinhaCusto) || 0; }
-function custoExame(nome){ const e = exameCatalogo(nome); return e ? Number(e.custo)||0 : 0; }
+function snapshotPrecos(){ return snapshotPrecosDe(DB); }
+/* tabela que vale para a competência: a congelada, se houver; senão a de hoje */
+function tabelaDoMes(mes){
+  const r = registroDoMes(mes);
+  if(r && r.tabela) return r.tabela;
+  return { precos: DB.precos || {}, precosUnidade: DB.precosUnidade || {}, custosExame: null };
+}
+/* preço de um campo respeitando o override por unidade, dentro da competência */
+function precoNoMes(mes, unidadeId, campo){
+  const t = tabelaDoMes(mes);
+  const o = (t.precosUnidade || {})[unidadeId] || {};
+  return o[campo] != null ? Number(o[campo]) || 0 : (Number((t.precos || {})[campo]) || 0);
+}
+
+function precoCarteirinha(unidadeId, mes){ return precoNoMes(mes, unidadeId, 'carteirinha'); }
+function custoCarteirinha(mes){ return Number((tabelaDoMes(mes).precos || {}).carteirinhaCusto) || 0; }
+function custoExame(nome, mes){
+  const t = tabelaDoMes(mes);
+  /* competência congelada guarda o custo que o exame tinha à época */
+  if(t.custosExame){
+    const v = t.custosExame[norm(nome)];
+    return v != null ? Number(v) || 0 : 0;
+  }
+  const e = exameCatalogo(nome);
+  return e ? Number(e.custo)||0 : 0;
+}
 
 /* preço cobrado da unidade, respeitando override por unidade */
 function temLaboratorial(e){ return !!(e.exameLab||'').trim(); }
-function precoAso(unidadeId, comLab){
-  const o = (DB.precosUnidade||{})[unidadeId] || {};
-  if(comLab) return o.asoLab != null ? o.asoLab : DB.precos.asoLab;
-  return o.asoClinico != null ? o.asoClinico : DB.precos.asoClinico;
-}
-function precoLaudo(unidadeId){ const o=(DB.precosUnidade||{})[unidadeId]||{}; return o.laudo!=null?o.laudo:DB.precos.laudo; }
-function precoVisita(unidadeId){ const o=(DB.precosUnidade||{})[unidadeId]||{}; return o.visita!=null?o.visita:DB.precos.visita; }
-function precoMensal(unidadeId){ const o=(DB.precosUnidade||{})[unidadeId]||{}; return o.mensal!=null?o.mensal:(DB.precos.mensal||0); }
+function precoAso(unidadeId, comLab, mes){ return precoNoMes(mes, unidadeId, comLab ? 'asoLab' : 'asoClinico'); }
+function precoLaudo(unidadeId, mes){ return precoNoMes(mes, unidadeId, 'laudo'); }
+function precoVisita(unidadeId, mes){ return precoNoMes(mes, unidadeId, 'visita'); }
+function precoMensal(unidadeId, mes){ return precoNoMes(mes, unidadeId, 'mensal'); }
 
 /* valor efetivamente cobrado, por mês + unidade (unidade vazia = consolidado) */
 function chaveCobrado(mes, unidade){ return mes + '|' + (unidade || 'TODAS'); }
@@ -3278,15 +3312,17 @@ function setTotalCobrado(mes, unidade, valor){
   save();
 }
 
-function precoEmissao(e){ return precoAso(e.unidadeId, temLaboratorial(e)); }
+/* a competência da emissão é o mês de fechamento dela */
+function precoEmissao(e){ return precoAso(e.unidadeId, temLaboratorial(e), e.fechamento); }
 /* custo que a Atlas paga à Arys por uma emissão: clínico + exames laboratoriais listados */
-function custoEmissao(e){
+function custoEmissao(e, mes){
   if(naoCompareceu(e)) return 0;
+  const m = mes !== undefined ? mes : e.fechamento;
   let total = 0;
   const clin = DB.exames.find(x => norm(x.nome).includes('EXAMECLINICO') || norm(x.nome).includes('AVALIACAOCLINICA'));
-  if(clin) total += Number(clin.custo)||0;
+  if(clin) total += custoExame(clin.nome, m);
   (e.exameLab||'').split(/[\/;+]/).map(s => s.trim()).filter(Boolean).forEach(nome => {
-    total += custoExame(nome);
+    total += custoExame(nome, m);
   });
   return total;
 }
@@ -3513,6 +3549,19 @@ function migrarDataAso(d){
   d.dataAsoVersao = 2;
 }
 
+/* Competências fechadas antes do congelamento de preços existir não têm tabela
+   guardada. A tabela vigente HOJE é a que foi praticada nelas (confirmado com a
+   Jessica), então é ela que fica carimbada — precisa rodar ANTES de qualquer
+   alteração de preço, senão o passado é reescrito. */
+function migrarTabelaFechamento(d){
+  if(d.tabelaFechVersao === 1) return;
+  const snap = snapshotPrecosDe(d);
+  (d.mesesFechados || []).forEach(r => {
+    if(!r.tabela) r.tabela = JSON.parse(JSON.stringify(snap));
+  });
+  d.tabelaFechVersao = 1;
+}
+
 /* "Mudança de risco" era um segundo nome para "Troca de função" — os registros
    que ficaram com a chave antiga passam para a única que sobrou */
 function migrarMudancaRisco(d){
@@ -3664,7 +3713,7 @@ function painelMatriz(funcao, opcoes){
   const avisoCart = cart.exige ? `
     <div class="bg-teal-50 border border-teal-200 rounded-lg p-2.5 text-xs text-teal-800 mt-2">
       <p><i class="fa-solid fa-id-card mr-1"></i><b>Exige carteirinha sanitária</b>
-        <span class="text-teal-700">— por ${esc(cart.motivo)} · ${fmtMoney(precoCarteirinha(o.unidadeId))} por emissão</span></p>
+        <span class="text-teal-700">— por ${esc(cart.motivo)} · ${fmtMoney(precoCarteirinha(o.unidadeId, o.mesFech))} por emissão</span></p>
       ${cartNoTipo
         ? `<p class="mt-1 text-teal-700">Exames obrigatórios da carteirinha:
              <b>${EXAMES_CARTEIRINHA.join(' · ')}</b></p>`
@@ -5710,7 +5759,7 @@ function toggleCarteirinha(id){
   save(); viewExames();
   if(!e.carteirinha){ toast('Carteirinha removida deste atendimento.'); return; }
   toast(e.status === 'REALIZADO'
-    ? 'Carteirinha registrada — ' + fmtMoney(precoCarteirinha(e.unidadeId)) + ' entram no fechamento.'
+    ? 'Carteirinha registrada — ' + fmtMoney(precoCarteirinha(e.unidadeId, e.fechamento)) + ' entram no fechamento.'
     : 'Carteirinha marcada como pendente — entra no fechamento quando o exame for realizado.');
 }
 /* mês de referência do fechamento financeiro (AAAA-MM) — independente do fluxo.
@@ -6033,13 +6082,24 @@ function mesesFechados(){
   if(!Array.isArray(DB.mesesFechados)) DB.mesesFechados = [];
   return DB.mesesFechados;
 }
-function mesFechado(mes){
+/* o registro sobrevive à reabertura: é ele que guarda a tabela de preços da
+   época. Reabrir só desliga a trava; a época em si é imutável. */
+function registroDoMes(mes){
   const m = (mes || '').slice(0,7);
-  return !!m && mesesFechados().some(x => x.mes === m);
+  if(!m) return null;
+  return mesesFechados().find(x => x.mes === m) || null;
+}
+function mesFechado(mes){
+  const r = registroDoMes(mes);
+  return !!r && !r.reaberto;
+}
+function mesReaberto(mes){
+  const r = registroDoMes(mes);
+  return !!r && !!r.reaberto;
 }
 function infoMesFechado(mes){
-  const m = (mes || '').slice(0,7);
-  return mesesFechados().find(x => x.mes === m) || null;
+  const r = registroDoMes(mes);
+  return r && !r.reaberto ? r : null;
 }
 /* um exame está travado quando o mês de fechamento dele já foi cobrado */
 function emissaoTravada(e){ return !!e && mesFechado(e.fechamento); }
@@ -6055,8 +6115,15 @@ function barradoPorFechamento(mes, oQue){
 async function fecharMes(mes, silencioso){
   const m = (mes || '').slice(0,7);
   if(!m || mesFechado(m)) return false;
-  const d = { mes:m, em:new Date().toISOString(), por:(SESSAO && SESSAO.email) || '' };
-  mesesFechados().push(d);
+  const r = registroDoMes(m);
+  if(r){
+    /* fechando de novo um mês que estava reaberto: a tabela da época FICA como está */
+    delete r.reaberto; delete r.reabertoEm;
+    r.refechadoEm = new Date().toISOString();
+  }else{
+    mesesFechados().push({ mes:m, em:new Date().toISOString(),
+      por:(SESSAO && SESSAO.email) || '', tabela: snapshotPrecos() });
+  }
   if(!silencioso){ save(); }
   return true;
 }
@@ -6080,13 +6147,33 @@ async function fecharMesAtual(){
 }
 async function reabrirMes(mes){
   const m = (mes || '').slice(0,7);
-  if(!mesFechado(m)) return;
+  const r = registroDoMes(m);
+  if(!r || r.reaberto) return;
   if(!confirm(`Reabrir ${mesLabel(m)}?\n\nO mês volta a aceitar alterações de valores, situação e fechamento, ` +
-              `e os exames reaparecem na grade de Agendamento. Use quando precisar corrigir algo já cobrado.`)) return;
+              `e os exames reaparecem na grade de Agendamento.\n\n` +
+              `IMPORTANTE: os preços continuam sendo os praticados na época do fechamento. ` +
+              `Qualquer lançamento novo nesta competência será calculado por eles, não pela tabela de hoje.`)) return;
   await guardarSnapshotLocal('antes de reabrir o mês ' + m);
+  r.reaberto = true;
+  r.reabertoEm = new Date().toISOString();
+  save(); viewFaturamento();
+  toast(mesLabel(m) + ' reaberto — os preços da época continuam valendo.', 'alerta');
+}
+/* única forma de a competência voltar a seguir a tabela vigente: descartar o
+   fechamento por inteiro. Some a trava E os preços congelados. */
+async function descartarFechamento(mes){
+  const m = (mes || '').slice(0,7);
+  const r = registroDoMes(m); if(!r) return;
+  const q = (r.tabela && r.tabela.congeladoEm)
+    ? '\n\nA tabela de preços congelada em ' + new Date(r.tabela.congeladoEm).toLocaleDateString('pt-BR') + ' será perdida.'
+    : '';
+  if(!confirm(`Descartar o fechamento de ${mesLabel(m)}?\n\n` +
+              `A competência volta a ser calculada pelos PREÇOS DE HOJE, e os valores exibidos podem mudar.` + q +
+              `\n\nUse apenas para refazer um fechamento errado. Um ponto de retorno será guardado.`)) return;
+  await guardarSnapshotLocal('antes de descartar o fechamento de ' + m);
   DB.mesesFechados = mesesFechados().filter(x => x.mes !== m);
   save(); viewFaturamento();
-  toast(mesLabel(m) + ' reaberto para edição.', 'alerta');
+  toast('Fechamento de ' + mesLabel(m) + ' descartado — a competência voltou à tabela vigente.', 'alerta');
 }
 /* fecha de uma vez todas as competências até um limite (pedido: retroativo até 06/2026) */
 const LIMITE_FECHAMENTO_RETROATIVO = '2026-06';
@@ -6132,7 +6219,7 @@ function fechamentoDados(mesArg, unidadeArg){
     (!uFiltro || e.unidadeId === uFiltro));
   /* o valor do laudo vem da matriz de preço por unidade, não de um campo aberto */
   const lds = entregasLaudos(mes, uFiltro).map(x => Object.assign({}, x.v, {
-    unidadeId: x.laudo.unidadeId, laudoId: x.laudo.id, valor: precoLaudo(x.laudo.unidadeId)
+    unidadeId: x.laudo.unidadeId, laudoId: x.laudo.id, valor: precoLaudo(x.laudo.unidadeId, mes)
   }));
   /* só visitas REALIZADAS entram no faturamento */
   const vis = (DB.visitas||[]).filter(v =>
@@ -6141,7 +6228,7 @@ function fechamentoDados(mesArg, unidadeArg){
 
   /* mensalidades das unidades no escopo (fixas, independem de exame) */
   const unidadesEscopo = uFiltro ? [uni(uFiltro)].filter(Boolean) : DB.unidades;
-  const mensais = unidadesEscopo.map(u => ({ unidadeId:u.id, valor: precoMensal(u.id) })).filter(m => m.valor > 0);
+  const mensais = unidadesEscopo.map(u => ({ unidadeId:u.id, valor: precoMensal(u.id, mes) })).filter(m => m.valor > 0);
   const recMensal = mensais.reduce((s,m) => s + m.valor, 0);
 
   const exValidos = ems.filter(e => e.status === 'REALIZADO');   /* falta não fatura nem custa */
@@ -6149,8 +6236,8 @@ function fechamentoDados(mesArg, unidadeArg){
   /* carteirinhas sanitárias emitidas no mês (cobradas à parte do exame).
      Só entram as de exame realizado e de tipo que aceita carteirinha. */
   const carts = exValidos.filter(e => e.carteirinha && tipoAceitaCarteirinha(e.tipoExame));
-  const recCart = carts.reduce((s,e) => s + precoCarteirinha(e.unidadeId), 0);
-  const custoCart = carts.length * custoCarteirinha();
+  const recCart = carts.reduce((s,e) => s + precoCarteirinha(e.unidadeId, mes), 0);
+  const custoCart = carts.length * custoCarteirinha(mes);
 
   /* RECEITA — o que as unidades pagam à Atlas */
   const recEx = exValidos.reduce((s,e) => s + (Number(e.valor)||0), 0);
@@ -6159,7 +6246,7 @@ function fechamentoDados(mesArg, unidadeArg){
   const receita = recEx + recLd + recVi + recMensal + recCart;
 
   /* CUSTO — o que a Atlas paga à Arys pelos exames e carteirinhas */
-  const custoEx = exValidos.reduce((s,e) => s + custoEmissao(e), 0);
+  const custoEx = exValidos.reduce((s,e) => s + custoEmissao(e, mes), 0);
   const custo = custoEx + custoCart;
 
   /* informado o total cobrado, ele passa a ser o valor efetivo e manda na margem */
@@ -6273,17 +6360,36 @@ function abaFechamentoMes(){
       ${mesFechado(d.mes)
         ? botao('Reabrir mês','fa-lock-open',`reabrirMes('${d.mes}')`,'bg-white border border-amber-400 text-amber-700 hover:bg-amber-50')
         : botao('Fechar mês (cobrado)','fa-lock','fecharMesAtual()','bg-slate-700 text-white hover:bg-slate-800')}
+      ${registroDoMes(d.mes)
+        ? botao('Descartar fechamento','fa-trash-can',`descartarFechamento('${d.mes}')`,'bg-white border border-red-300 text-red-700 hover:bg-red-50')
+        : ''}
     </div>
 
     ${(() => { const f = infoMesFechado(d.mes);
+      const congelado = (r) => r && r.tabela && r.tabela.congeladoEm
+        ? ` Preços da competência congelados em ${new Date(r.tabela.congeladoEm).toLocaleDateString('pt-BR')} — mudar a tabela hoje não altera este mês.`
+        : '';
       if(f) return `
         <div class="rounded-xl border border-slate-300 bg-slate-100 px-5 py-4 flex flex-wrap items-center gap-3">
           <i class="fa-solid fa-lock text-slate-500"></i>
           <div class="flex-1 min-w-[240px]">
             <p class="text-sm font-semibold text-slate-700">${mesLabel(d.mes)} está fechado — já cobrado</p>
             <p class="text-xs text-slate-500">Fechado em ${new Date(f.em).toLocaleDateString('pt-BR')}${f.por?' por '+esc(f.por):''}.
-              Valores, situação e competência estão travados, e estes exames saíram da grade de Agendamento.</p>
+              Valores, situação e competência estão travados, e estes exames saíram da grade de Agendamento.${congelado(f)}</p>
           </div>
+        </div>`;
+      const rb = mesReaberto(d.mes) ? registroDoMes(d.mes) : null;
+      if(rb) return `
+        <div class="rounded-xl border border-amber-300 bg-amber-50 px-5 py-4 flex flex-wrap items-center gap-3">
+          <i class="fa-solid fa-lock-open text-amber-500"></i>
+          <div class="flex-1 min-w-[240px]">
+            <p class="text-sm font-semibold text-amber-800">${mesLabel(d.mes)} está reaberto para correção</p>
+            <p class="text-xs text-amber-700">Aceita alterações de novo, mas continua usando os
+              <b>preços praticados na época</b>${rb.tabela && rb.tabela.congeladoEm ? ' (congelados em ' + new Date(rb.tabela.congeladoEm).toLocaleDateString('pt-BR') + ')' : ''}.
+              Qualquer lançamento novo nesta competência é calculado por eles.</p>
+          </div>
+          <button onclick="fecharMesAtual()" class="px-3 py-2 rounded-lg text-xs bg-slate-700 text-white hover:bg-slate-800 whitespace-nowrap">
+            <i class="fa-solid fa-lock mr-1"></i>Fechar de novo</button>
         </div>`;
       const pend = mesesComMovimento().filter(m => m <= LIMITE_FECHAMENTO_RETROATIVO && !mesFechado(m));
       if(pend.length) return `
@@ -6330,7 +6436,7 @@ function abaFechamentoMes(){
       ${card({titulo:'Exames', valor:fmtMoney(d.recEx),
               sub:d.exValidos.length+' · R$'+DB.precos.asoLab+' c/lab · R$'+DB.precos.asoClinico+' clín', icon:'fa-stethoscope', cor:'bg-stone-100 text-accent'})}
       ${card({titulo:'Carteirinhas', valor:fmtMoney(d.recCart),
-              sub:d.carts.length+' · R$'+(DB.precos.carteirinha||0)+' cada · custo R$'+custoCarteirinha(),
+              sub:d.carts.length+' · R$'+precoNoMes(d.mes,'','carteirinha')+' cada · custo R$'+custoCarteirinha(d.mes),
               icon:'fa-id-card', cor:'bg-teal-50 text-teal-600'})}
       ${card({titulo:'Laudos', valor:fmtMoney(d.recLd), sub:d.lds.length+' entregas', icon:'fa-file-shield', cor:'bg-stone-100 text-stone-500'})}
       ${card({titulo:'Visitas técnicas', valor:fmtMoney(d.recVi), sub:d.vis.length+' realizadas', icon:'fa-user-gear', cor:'bg-stone-200 text-stone-600'})}
@@ -6360,15 +6466,15 @@ function abaFechamentoMes(){
             <tbody class="divide-y divide-slate-100">
               ${d.ems.length ? d.ems.map(e => {
                 const temCart = !naoCompareceu(e) && e.carteirinha && tipoAceitaCarteirinha(e.tipoExame);
-                const vCart = temCart ? precoCarteirinha(e.unidadeId) : 0;
-                const cCart = temCart ? custoCarteirinha() : 0;
+                const vCart = temCart ? precoCarteirinha(e.unidadeId, d.mes) : 0;
+                const cCart = temCart ? custoCarteirinha(d.mes) : 0;
                 const vExame = naoCompareceu(e) ? 0 : (Number(e.valor)||0);
                 return `
                 <tr class="hover:bg-slate-50 ${naoCompareceu(e)?'bg-red-50/40':''}">
                   <td class="px-4 py-3 text-center">
                     <input type="checkbox" class="selFat align-middle accent-emerald-600" onchange="recalcularSelecaoFat()"
                       data-id="${e.id}" ${selecionadoFat(e.id)?'checked':''}
-                      data-custo="${naoCompareceu(e)?0:(custoEmissao(e)+cCart)}" data-receita="${vExame + vCart}"></td>
+                      data-custo="${naoCompareceu(e)?0:(custoEmissao(e,d.mes)+cCart)}" data-receita="${vExame + vCart}"></td>
                   <td class="px-4 py-3 font-medium text-slate-700">${esc(e.colaborador)}
                     ${naoCompareceu(e)?`<br>${badge('Não compareceu','bg-red-100 text-red-700')}`:''}</td>
                   <td class="px-4 py-3 text-xs text-slate-600">${esc(uniNome(e.unidadeId))}</td>
@@ -6380,8 +6486,8 @@ function abaFechamentoMes(){
                           ? fmtDate(e.dataAso)
                           : '<span class="text-amber-600" title="Exame realizado sem data de emissão do ASO — preencha em Agendamento de exames">sem data do ASO</span>')}</td>
                   <td class="px-4 py-3 text-right text-xs ${naoCompareceu(e)?'text-slate-300':'text-red-600'}">
-                    ${naoCompareceu(e)?'—':fmtMoney(custoEmissao(e)+cCart)}
-                    ${cCart?`<p class="text-[10px] text-slate-400">${fmtMoney(custoEmissao(e))} + ${fmtMoney(cCart)}</p>`:''}</td>
+                    ${naoCompareceu(e)?'—':fmtMoney(custoEmissao(e,d.mes)+cCart)}
+                    ${cCart?`<p class="text-[10px] text-slate-400">${fmtMoney(custoEmissao(e,d.mes))} + ${fmtMoney(cCart)}</p>`:''}</td>
                   <td class="px-4 py-3 text-right">
                     <input type="number" step="0.01" value="${Number(e.valor)||0}" onchange="setValorEmissao('${e.id}',this.value)"
                       class="w-24 px-2 py-1 text-xs text-right border border-slate-300 rounded focus:outline-none focus:ring-2 focus:ring-accent/40">
@@ -6804,6 +6910,16 @@ function setValorEmissao(id, v){
 }
 
 /* ---- tabela de preços (Atlas → unidades) ---- */
+/* deixa explícito, na hora de mexer no preço, o que NÃO vai ser afetado */
+function avisoCompetenciasCongeladas(){
+  const l = mesesFechados().filter(r => r.tabela).map(r => r.mes).sort();
+  if(!l.length) return '';
+  const mostra = l.slice(-6).map(mesLabel).join(', ');
+  return `<div class="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-[11px] text-emerald-900">
+    <p><i class="fa-solid fa-lock mr-1"></i><b>${l.length} competência(s) com preço congelado</b> — alterar aqui não muda o que já foi apurado nelas.</p>
+    <p class="mt-0.5 text-emerald-800">${esc(mostra)}${l.length > 6 ? ' e outras' : ''}. A mudança vale para as competências em aberto.</p>
+  </div>`;
+}
 function editarPrecos(){
   openForm({
     title: 'Tabela de preços padrão — o que as unidades pagam à Atlas',
@@ -6816,8 +6932,12 @@ function editarPrecos(){
       { type:'sep', label:'Carteirinha sanitária' },
       { name:'carteirinha', label:'Cobrado da unidade (R$)', type:'number', step:'0.01', hint:'por carteirinha emitida' },
       { name:'carteirinhaCusto', label:'Custo pago à Arys (R$)', type:'number', step:'0.01', hint:'entra no custo do mês' },
-      { type:'html', name:'nota', html:`<p class="sm:col-span-2 text-[11px] text-slate-500">Estes são os valores <b>padrão</b>. Para cobrar diferente de uma unidade específica,
-        use <b>Preços por unidade</b>. O custo dos exames que a Atlas paga à Arys fica no <b>Catálogo de exames</b>.</p>` }
+      { type:'html', name:'nota', html:`
+        <div class="sm:col-span-2 space-y-2">
+          <p class="text-[11px] text-slate-500">Estes são os valores <b>padrão</b>. Para cobrar diferente de uma unidade específica,
+            use <b>Preços por unidade</b>. O custo dos exames que a Atlas paga à Arys fica no <b>Catálogo de exames</b>.</p>
+          ${avisoCompetenciasCongeladas()}
+        </div>` }
     ],
     values: Object.assign({}, DB.precos),
     onSave: v => {
@@ -6847,6 +6967,7 @@ function editarPrecosUnidade(){
   openInfo('Preços por unidade', `
     <div class="space-y-3">
       <p class="text-xs text-slate-500">Deixe em branco para usar o preço padrão (mostrado em cinza). Preencha só o que essa unidade paga diferente.</p>
+      ${avisoCompetenciasCongeladas()}
       <div class="overflow-x-auto border border-slate-200 rounded-lg max-h-[60vh] overflow-y-auto">
         <table class="w-full text-sm">
           <thead class="bg-slate-50 sticky top-0 text-[11px] uppercase tracking-wide text-slate-500">
@@ -7094,14 +7215,14 @@ function exportarFaturamento(){
   const linhas = d.ems.map(e => ['Exame', e.colaborador, uniNome(e.unidadeId), tipoLabel(e.tipoExame),
       e.exameLab || '', fmtDate(e.dataAso||e.dataClinico||e.dataLab) || mesLabel(e.fechamento),
       FLUXO_LABEL[e.status]||e.status,
-      naoCompareceu(e) ? 0 : custoEmissao(e), naoCompareceu(e) ? 0 : (Number(e.valor)||0)])
+      naoCompareceu(e) ? 0 : custoEmissao(e, d.mes), naoCompareceu(e) ? 0 : (Number(e.valor)||0)])
     .concat(d.lds.map(l => ['Laudo', docsLabel(l.documentos), uniNome(l.unidadeId), '', '',
       fmtDate(l.dataFaturamento), l.pagamento||'Solicitado', 0, Number(l.valor)||0]))
     .concat(d.vis.map(v => ['Visita técnica', v.obs||'', uniNome(v.unidadeId), '', '',
       fmtDate(v.data), '', 0, Number(v.valor)||0]))
     .concat(d.carts.map(e => ['Carteirinha sanitária', e.colaborador, uniNome(e.unidadeId), '', '',
       fmtDate(e.dataClinico||e.dataLab) || mesLabel(e.fechamento), 'Emitida',
-      custoCarteirinha(), precoCarteirinha(e.unidadeId)]))
+      custoCarteirinha(d.mes), precoCarteirinha(e.unidadeId, d.mes)]))
     .concat(d.mensais.map(m => ['Mensalidade', '', uniNome(m.unidadeId), '', '',
       mesLabel(d.mes), '', 0, Number(m.valor)||0]));
   linhas.push(['TOTAIS','','','','','','', d.custo, d.receita]);
@@ -7206,7 +7327,13 @@ function editarVisita(id){
     values: v || { data: isoToday(), status:'SOLICITADO', valor: precoVisita(UIVis.uni||''), unidadeId: UIVis.uni || '' },
     afterRender: form => {
       const selUni = form.elements['unidadeId'], inpVal = form.elements['valor'];
-      selUni.addEventListener('change', () => { if(!Number(inpVal.value)) inpVal.value = precoVisita(selUni.value); });
+      /* a competência da visita manda no preço: visita lançada numa competência
+         já fechada é sugerida pelo valor praticado à época, não pelo de hoje */
+      const compet = () => (form.elements['fechamento'].value || (form.elements['data'].value||'').slice(0,7));
+      const sugerir = () => { if(!Number(inpVal.value)) inpVal.value = precoVisita(selUni.value, compet()); };
+      selUni.addEventListener('change', sugerir);
+      form.elements['data'].addEventListener('change', sugerir);
+      form.elements['fechamento'].addEventListener('change', sugerir);
     },
     onSave: dados => {
       const reg = { unidadeId:dados.unidadeId, status:dados.status||'SOLICITADO', data:dados.data,
