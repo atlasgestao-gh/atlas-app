@@ -1384,15 +1384,15 @@ function campoHTML(f, v){
       }).join('')}
     </div>`;
   } else if(f.type === 'checkbox'){
-    return `<label class="flex items-center gap-2 text-sm ${f.col||'sm:col-span-2'} py-2">
+    return `<label class="flex items-center gap-2 text-sm ${f.col||'sm:col-span-2'} py-2" data-campo="${esc(f.name||'')}">
       <input type="checkbox" name="${f.name}" ${val?'checked':''} class="w-4 h-4 rounded border-slate-300 text-accent focus:ring-accent">
-      <span>${esc(f.label)}</span></label>`;
+      <span>${esc(f.label)}<span class="req-mark text-danger${f.req?'':' hidden'}"> *</span></span></label>`;
   } else {
     const colar = (f.type === 'date' || f.type === 'month') ? ' onpaste="colarData(event)"' : '';
     inner = `<input type="${f.type||'text'}" name="${f.name}" value="${esc(val)}" ${f.step?`step="${f.step}"`:''} placeholder="${esc(f.ph||'')}" class="${base}"${colar}>`;
   }
-  return `<div class="${f.col||''}">
-    <label class="block text-xs font-medium text-slate-600 mb-1">${esc(f.label)}${f.req?' <span class="text-danger">*</span>':''}</label>
+  return `<div class="${f.col||''}" data-campo="${esc(f.name||'')}">
+    <label class="block text-xs font-medium text-slate-600 mb-1">${esc(f.label)}<span class="req-mark text-danger${f.req?'':' hidden'}"> *</span></label>
     ${inner}${f.hint?`<p class="text-[11px] text-slate-400 mt-1">${esc(f.hint)}</p>`:''}</div>`;
 }
 
@@ -1599,14 +1599,20 @@ function alertasCriticos(){
 }
 
 /* grid de alertas de um tipo (ASO ou Laudo) */
-function gridAlertas(tipo, titulo, lista){
+/* `chaveBusca` só é passada pelo Acompanhamentos; no painel a grade segue sem busca */
+function gridAlertas(tipo, titulo, bruta, chaveBusca){
   const cor = tipo === 'ASO' ? 'text-accent' : 'text-stone-500';
+  const termo = chaveBusca ? norm(UIAcomp[chaveBusca]) : '';
+  const lista = termo
+    ? bruta.filter(a => norm([a.nome, uniNome(a.unidadeId), a.detalhe].filter(Boolean).join(' ')).includes(termo))
+    : bruta;
   return `
     <div class="bg-white rounded-xl border border-slate-200 overflow-hidden print-block">
-      <div class="px-5 py-4 border-b border-slate-200 flex items-center gap-2">
+      <div class="px-5 py-4 border-b border-slate-200 flex items-center gap-2 flex-wrap">
         <i class="fa-solid fa-bell ${cor}"></i>
         <h3 class="font-semibold text-sm text-slate-700">${esc(titulo)}</h3>
-        <span class="ml-auto text-xs text-slate-500">${lista.length} item(ns)</span>
+        <span class="text-xs text-slate-500">${lista.length} item(ns)${termo ? ` <span class="text-accent">de ${bruta.length}</span>` : ''}</span>
+        ${chaveBusca ? `<div class="ml-auto flex gap-2 no-print">${buscaGrade(chaveBusca)}</div>` : ''}
       </div>
       <div class="overflow-x-auto max-h-[420px] overflow-y-auto">
         <table class="w-full text-sm data">
@@ -1627,7 +1633,7 @@ function gridAlertas(tipo, titulo, lista){
                 <td class="px-4 py-3 text-right no-print">
                   <button onclick="${a.acao}" class="px-2.5 py-1.5 rounded-lg text-xs bg-accent text-white hover:bg-blue-700 whitespace-nowrap">
                     <i class="fa-solid ${a.acaoIcon} mr-1"></i>${a.acaoLabel}</button></td>
-              </tr>`).join('') : vazio(tipo==='ASO'?'Nenhum ASO crítico. Tudo em dia!':'Nenhum laudo crítico.')}
+              </tr>`).join('') : vazio(termo ? 'Nenhum resultado para essa busca.' : (tipo==='ASO'?'Nenhum ASO crítico. Tudo em dia!':'Nenhum laudo crítico.'))}
           </tbody>
         </table>
       </div>
@@ -1754,8 +1760,20 @@ function agendarDeAlerta(colaboradorId){
 /* ═══════════════════════ 1b. ACOMPANHAMENTOS ═══════════════════════
    junta os exames parados no fornecedor com os alertas de ASO num só painel,
    pesquisável por nome — separado do painel geral a pedido da Jessica */
-const UIAcomp = { q:'' };
+/* cada grade da tela tem a sua própria busca — filtrar uma não mexe nas outras */
+const UIAcomp = { fazer:'', acompanhar:'', afastados:'', laudos:'' };
 const chaveAcomp = (nome, uni) => norm(nome) + '|' + (uni||'');
+/* busca ampla: nome, unidade, função, tipo e status entram no mesmo saco */
+function filtrarAcomp(lista, termo){
+  const q = norm(termo);
+  if(!q) return lista;
+  return lista.filter(x => norm([x.colaborador, uniNome(x.unidadeId), x.funcao, x.tipo, x.quando, x.statusLabel]
+    .filter(Boolean).join(' ')).includes(q));
+}
+function buscaGrade(chave, ph){
+  return inputBusca('bAc_' + chave, ph || 'Buscar nesta grade...',
+    `UIAcomp.${chave}=this.value;viewAcompanhamentos();focarBusca(&quot;bAc_${chave}&quot;)`, UIAcomp[chave]);
+}
 /* coluna "Dias": contagem a vencer (âmbar) ou vencido (vermelho); nulo = travessão */
 function fmtDiasAcomp(d){
   if(d == null) return '<span class="text-slate-300">—</span>';
@@ -1797,14 +1815,10 @@ function itensAcompanhamento(){
     if(f){ if(f.dias == null) f.dias = a.dias; }   /* já solicitado: some com o ASO redundante */
     else { asoFinal.push(a); }
   });
-  const q = norm(UIAcomp.q);
-  const filtro = x => !q || norm(x.colaborador).includes(q);
   /* A FAZER: ASOs vencidos/vencendo ainda sem exame pedido (ação = agendar).
-     ACOMPANHAR: exames já solicitados/agendados no fornecedor + laudos solicitados. */
-  return {
-    aFazer: asoFinal.filter(filtro),
-    acompanhar: fornItens.concat(laudoItens).filter(filtro)
-  };
+     ACOMPANHAR: exames já solicitados/agendados no fornecedor + laudos solicitados.
+     Sai sem filtro — cada grade aplica a busca dela. */
+  return { aFazer: asoFinal, acompanhar: fornItens.concat(laudoItens) };
 }
 /* junta numa linha só tudo do mesmo colaborador (mesma pessoa + unidade):
    quem está com ASO atrasado e o exame já solicitado aparece uma vez, não duas */
@@ -1817,7 +1831,8 @@ function agruparAcompanhamento(lista){
   });
   return ordem.map(k => grupos[k]);
 }
-function gridAcompanhamento(lista, titulo, icon, comBusca, vazioMsg){
+function gridAcompanhamento(bruta, titulo, icon, chave, vazioMsg, comCsv){
+  const lista = filtrarAcomp(bruta, UIAcomp[chave]);
   const grupos = agruparAcompanhamento(lista);
   const linhas = grupos.map(g => g.itens.map((x, idx) => `
     <tr class="hover:bg-slate-50 align-top">
@@ -1839,11 +1854,12 @@ function gridAcompanhamento(lista, titulo, icon, comBusca, vazioMsg){
       <div class="px-5 py-4 border-b border-slate-200 flex items-center gap-2 flex-wrap">
         <i class="fa-solid ${icon} text-accent"></i>
         <h3 class="font-semibold text-sm text-slate-700">${titulo}</h3>
-        <span class="text-xs text-slate-500">${grupos.length} colaborador(es) · ${lista.length} pendência(s)</span>
-        ${comBusca ? `<div class="ml-auto flex gap-2 no-print">
-          ${inputBusca('bAcomp','Buscar por nome...','UIAcomp.q=this.value;viewAcompanhamentos();focarBusca(&quot;bAcomp&quot;)', UIAcomp.q)}
-          ${botao('CSV','fa-file-csv','exportarAcompanhamento()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
-        </div>` : ''}
+        <span class="text-xs text-slate-500">${grupos.length} colaborador(es) · ${lista.length} pendência(s)${
+          UIAcomp[chave] ? ` <span class="text-accent">de ${bruta.length}</span>` : ''}</span>
+        <div class="ml-auto flex gap-2 no-print">
+          ${buscaGrade(chave)}
+          ${comCsv ? botao('CSV','fa-file-csv','exportarAcompanhamento()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50') : ''}
+        </div>
       </div>
       <div class="overflow-x-auto max-h-[520px] overflow-y-auto">
         <table class="w-full text-sm data">
@@ -1853,7 +1869,7 @@ function gridAcompanhamento(lista, titulo, icon, comBusca, vazioMsg){
                 <th class="px-4 py-3">Status</th><th class="px-4 py-3 text-right no-print">Ação</th></tr>
           </thead>
           <tbody class="divide-y divide-slate-100">
-            ${grupos.length ? linhas : vazio(UIAcomp.q ? 'Nenhum resultado para essa busca.' : (vazioMsg || 'Nada em aberto — tudo em dia!'))}
+            ${grupos.length ? linhas : vazio(UIAcomp[chave] ? 'Nenhum resultado para essa busca.' : (vazioMsg || 'Nada em aberto — tudo em dia!'))}
           </tbody>
         </table>
       </div>
@@ -1861,10 +1877,12 @@ function gridAcompanhamento(lista, titulo, icon, comBusca, vazioMsg){
 }
 function exportarAcompanhamento(){
   const it = itensAcompanhamento();
-  const l = it.aFazer.concat(it.acompanhar);
+  /* exporta o que está na tela: cada bloco já com a busca da grade dele aplicada */
+  const fazer = filtrarAcomp(it.aFazer, UIAcomp.fazer);
+  const l = fazer.concat(filtrarAcomp(it.acompanhar, UIAcomp.acompanhar));
   exportCSV('acompanhamentos',
     ['Situação','Colaborador / documento','Unidade','Função','Tipo','Quando','Dias','Status'],
-    l.map(x => [it.aFazer.indexOf(x)>=0?'A fazer':'Acompanhar', x.colaborador, uniNome(x.unidadeId), x.funcao||'', x.tipo, x.quando,
+    l.map(x => [fazer.indexOf(x)>=0?'A fazer':'Acompanhar', x.colaborador, uniNome(x.unidadeId), x.funcao||'', x.tipo, x.quando,
       x.dias==null ? '' : (x.dias<0 ? Math.abs(x.dias)+' d vencido' : 'em '+x.dias+' d'), x.statusLabel]));
 }
 /* uma emissão é "órfã" quando o nome dela não existe no cadastro de colaboradores
@@ -1912,8 +1930,11 @@ function colabsAfastados(){
     .sort((a,b) => (a.nome||'').localeCompare(b.nome||'','pt-BR'));
 }
 function gridAfastados(){
-  const lista = colabsAfastados();
-  if(!lista.length) return '';
+  const todos = colabsAfastados();
+  if(!todos.length) return '';
+  const q = norm(UIAcomp.afastados);
+  const lista = q ? todos.filter(c => norm([c.nome, uniNome(c.unidadeId), c.funcao, c.afastamento]
+    .filter(Boolean).join(' ')).includes(q)) : todos;
   const linhas = lista.map(c => {
     const a = asoVigente(c.id), s = a ? semaforo(a.vencimento) : null;
     const temRetorno = DB.emissoes.some(e => norm(e.colaborador) === norm(c.nome)
@@ -1940,7 +1961,8 @@ function gridAfastados(){
       <div class="px-5 py-4 border-b border-slate-200 flex items-center gap-2 flex-wrap">
         <i class="fa-solid fa-user-clock text-amber-500"></i>
         <h3 class="font-semibold text-sm text-slate-700">Colaboradores afastados</h3>
-        <span class="text-xs text-slate-500">${lista.length} pessoa(s) · precisam de ASO de retorno ao trabalho</span>
+        <span class="text-xs text-slate-500">${lista.length} pessoa(s)${q ? ` <span class="text-accent">de ${todos.length}</span>` : ''} · precisam de ASO de retorno ao trabalho</span>
+        <div class="ml-auto flex gap-2 no-print">${buscaGrade('afastados')}</div>
       </div>
       <div class="overflow-x-auto max-h-[420px] overflow-y-auto">
         <table class="w-full text-sm data">
@@ -1949,7 +1971,7 @@ function gridAfastados(){
                 <th class="px-4 py-3">Observação do afastamento</th><th class="px-4 py-3">ASO vence</th>
                 <th class="px-4 py-3">Status</th><th class="px-4 py-3 text-right no-print">Ação</th></tr>
           </thead>
-          <tbody class="divide-y divide-slate-100">${linhas}</tbody>
+          <tbody class="divide-y divide-slate-100">${lista.length ? linhas : vazio('Nenhum resultado para essa busca.')}</tbody>
         </table>
       </div>
     </div>`;
@@ -2046,10 +2068,10 @@ function viewAcompanhamentos(){
           <i class="fa-solid fa-wand-magic-sparkles mr-1 text-amber-500"></i>Conciliar exames sem cadastro${nSem ? ` <span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700">${nSem}</span>` : ''}</button>
       </div>
       ${alertaSemCadastro()}
-      ${gridAcompanhamento(it.aFazer, 'Agendamentos a fazer', 'fa-calendar-plus', true, 'Nenhum exame a agendar — tudo em dia!')}
-      ${gridAcompanhamento(it.acompanhar, 'Acompanhar agendamentos', 'fa-truck-medical', false, 'Nada solicitado ou agendado no momento.')}
+      ${gridAcompanhamento(it.aFazer, 'Agendamentos a fazer', 'fa-calendar-plus', 'fazer', 'Nenhum exame a agendar — tudo em dia!', true)}
+      ${gridAcompanhamento(it.acompanhar, 'Acompanhar agendamentos', 'fa-truck-medical', 'acompanhar', 'Nada solicitado ou agendado no momento.')}
       ${gridAfastados()}
-      ${gridAlertas('Laudo', 'Alertas de laudos SST — atrasos e próximos vencimentos', alertasLaudo)}
+      ${gridAlertas('Laudo', 'Alertas de laudos SST — atrasos e próximos vencimentos', alertasLaudo, 'laudos')}
     </div>`;
 }
 
@@ -5107,14 +5129,25 @@ function viewExames(){
                 <td class="px-4 py-3 text-xs">${esc(tipoLabel(e.tipoExame))}
                   ${e.resultado ? '<br>'+badge(e.resultado, e.resultado==='Apto'?'bg-emerald-100 text-emerald-700':(e.resultado==='Inapto'?'bg-red-100 text-red-700':'bg-amber-100 text-amber-700')) : ''}</td>
                 <td class="px-4 py-3 text-center">
-                  ${tipoAceitaCarteirinha(e.tipoExame) ? `
-                    <input type="checkbox" ${e.carteirinha?'checked':''} onchange="toggleCarteirinha('${e.id}')" ${ro}
-                      class="w-4 h-4 rounded border-slate-300 text-teal-600 focus:ring-teal-500 cursor-pointer disabled:opacity-50"
-                      title="${e.carteirinha?'Carteirinha incluída neste atendimento':'Marcar carteirinha sanitária'}">
+                  ${(() => {
+                    if(!tipoAceitaCarteirinha(e.tipoExame))
+                      return '<span class="text-slate-300" title="Demissional não gera carteirinha">—</span>';
+                    /* unidade/função que não exigem carteirinha ficam com a caixa inativa.
+                       Se já estiver marcada (lançamento antigo), continua clicável para poder desmarcar. */
+                    const exigida = emissaoExigeCarteirinha(e);
+                    const inativa = !exigida && !e.carteirinha;
+                    const tit = inativa
+                      ? 'Esta unidade / função não exige carteirinha sanitária'
+                      : (e.carteirinha ? 'Carteirinha incluída neste atendimento' : 'Marcar carteirinha sanitária');
+                    return `
+                    <input type="checkbox" ${e.carteirinha?'checked':''} onchange="toggleCarteirinha('${e.id}')"
+                      ${ro || (inativa ? 'disabled' : '')}
+                      class="w-4 h-4 rounded border-slate-300 text-teal-600 focus:ring-teal-500 disabled:opacity-40 disabled:cursor-not-allowed ${inativa?'':'cursor-pointer'}"
+                      title="${esc(tit)}">
                     ${e.carteirinha ? (e.status === 'REALIZADO'
                         ? '<p class="text-[10px] text-teal-600 mt-0.5">ok</p>'
-                        : '<p class="text-[10px] text-amber-600 mt-0.5">pendente</p>') : ''}`
-                  : '<span class="text-slate-300" title="Demissional não gera carteirinha">—</span>'}</td>
+                        : '<p class="text-[10px] text-amber-600 mt-0.5">pendente</p>') : ''}`;
+                  })()}</td>
                 <td class="px-4 py-3">
                   <input type="date" value="${esc(e.dataAso||'')}" onchange="setDataAso('${e.id}',this.value)" onpaste="colarData(event)" ${ro}
                     class="w-32 px-2 py-1 text-xs border border-slate-300 rounded focus:outline-none focus:ring-2 focus:ring-accent/40 disabled:bg-slate-100 disabled:text-slate-500"
@@ -5168,21 +5201,52 @@ function camposEmissao(){
     { type:'sep', label:'Remarcação' },
     { name:'remarcTipo', label:'Tipo remarcado', type:'select', options:[{v:'',l:'—'}].concat(Object.keys(TIPOS).map(k=>({v:k,l:TIPOS[k]}))) },
     { name:'remarcData', label:'Data da remarcação', type:'date' },
+    /* A seção Encerramento acompanha a situação no fluxo:
+       `quando`    = situações em que o campo aparece;
+       `reqQuando` = situações em que ele passa a ser obrigatório.
+       Campo escondido NÃO é apagado — voltar de Realizado para Agendado
+       preserva o que já tinha sido preenchido. */
     { type:'sep', label:'Encerramento' },
     { name:'status', label:'Situação no fluxo', type:'select', options:FLUXO.map(f=>({v:f,l:FLUXO_LABEL[f]})) },
     { name:'dataClinico', label:'Data do exame', type:'date',
-      hint:'data em que o exame foi realizado' },
+      hint:'data em que o exame foi realizado',
+      quando:['AGENDADO','REALIZADO','NAO_COMPARECEU'], reqQuando:['AGENDADO'] },
     { name:'dataAso', label:'Data de emissão do ASO', type:'date',
-      hint:'atualiza a data do último exame no cadastro' },
+      hint:'atualiza a data do último exame no cadastro',
+      quando:['REALIZADO'], reqQuando:['REALIZADO'] },
     { name:'resultado', label:'Resultado (ASO)', type:'select',
       options:[{v:'',l:'—'},{v:'Apto',l:'Apto'},{v:'Inapto',l:'Inapto'},{v:'Apto com restrições',l:'Apto com restrições'}],
-      hint:'preenchido no ASO quando o exame for registrado como Realizado' },
+      hint:'preenchido no ASO quando o exame for registrado como Realizado',
+      quando:['REALIZADO'], reqQuando:['REALIZADO'] },
     { name:'fechamento', label:'Mês de fechamento', type:'month',
-      hint:'mês de referência para entrar no fechamento financeiro' },
+      hint:'mês de referência para entrar no fechamento financeiro',
+      quando:['REALIZADO','NAO_COMPARECEU'], reqQuando:['REALIZADO'] },
     { name:'carteirinha', label:'Carteirinha sanitária emitida', type:'checkbox',
-      hint:'cobrada à parte no fechamento do mês' },
-    { name:'drive', label:'Enviado ao Drive / SOCGED', type:'checkbox' }
+      hint:'cobrada à parte no fechamento do mês', quando:['REALIZADO'] },
+    { name:'drive', label:'Enviado ao Drive / SOCGED', type:'checkbox',
+      quando:['REALIZADO'], reqQuando:['REALIZADO'] }
   ];
+}
+/* mostra/esconde os campos do Encerramento e liga a obrigatoriedade conforme a
+   situação escolhida. Mexe no MESMO array que o openForm usa para validar, então
+   o "Preencha: ..." passa a refletir a regra da situação atual. */
+function ligarRegrasEncerramento(form, campos){
+  const sel = form.elements['status'];
+  if(!sel) return;
+  const aplicar = () => {
+    const st = sel.value;
+    campos.forEach(f => {
+      if(!f.quando) return;
+      const visivel = f.quando.indexOf(st) >= 0;
+      const box = form.querySelector('[data-campo="' + f.name + '"]');
+      if(box) box.classList.toggle('hidden', !visivel);
+      f.req = visivel && !!f.reqQuando && f.reqQuando.indexOf(st) >= 0;
+      const marca = box && box.querySelector('.req-mark');
+      if(marca) marca.classList.toggle('hidden', !f.req);
+    });
+  };
+  sel.addEventListener('change', aplicar);
+  aplicar();
 }
 /* liga colaborador + tipo de exame → matriz do cargo, com botão para aplicar */
 function ligarMatrizEmissao(form, preencherAuto, autoUnidade){
@@ -5293,12 +5357,14 @@ function criarCadastroDaEmissao(){
 
 function novaEmissao(pre, opts){
   opts = opts || {};
+  const campos = camposEmissao();
   openForm({
     title: opts.titulo || 'Nova emissão de exame',
-    fields: camposEmissao(),
+    fields: campos,
     values: Object.assign({ status:'SOLICITADO', tipoExame:'PERIODICO', valor:0 }, pre || {}),
     afterRender: form => {
       ligarMatrizEmissao(form, true, true);
+      ligarRegrasEncerramento(form, campos);
       /* quadro com todos os dados para copiar no site da Arys, no topo da modal */
       if(!document.getElementById('painelArys')){
         form.insertAdjacentHTML('afterbegin', `
@@ -5563,12 +5629,17 @@ function editarEmissao(id){
       </div>`, 'max-w-lg');
     return;
   }
+  const campos = camposEmissao();
   openForm({
     title:'Editar emissão — ' + e.colaborador,
-    fields: camposEmissao(),
+    fields: campos,
     values: e,
     /* mostra o resumo do colaborador no topo e liga a matriz do cargo */
-    afterRender: form => { form.insertAdjacentHTML('beforebegin', resumoColabParaEmissao(e.colaborador)); ligarMatrizEmissao(form, true); },
+    afterRender: form => {
+      form.insertAdjacentHTML('beforebegin', resumoColabParaEmissao(e.colaborador));
+      ligarMatrizEmissao(form, true);
+      ligarRegrasEncerramento(form, campos);
+    },
     onSave: v => {
       if(v.colaborador) v.colaborador = maiusc(v.colaborador);
       Object.assign(e, v);
