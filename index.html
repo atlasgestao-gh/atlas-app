@@ -5221,12 +5221,28 @@ function camposEmissao(){
     { name:'fechamento', label:'Mês de fechamento', type:'month',
       hint:'mês de referência para entrar no fechamento financeiro',
       quando:['REALIZADO','NAO_COMPARECEU'], reqQuando:['REALIZADO'] },
+    /* além de depender da situação, só aparece onde a carteirinha é exigida
+       (unidade + função escolhidas na própria modal) — ver exigeCartNaModal */
     { name:'carteirinha', label:'Carteirinha sanitária emitida', type:'checkbox',
-      hint:'cobrada à parte no fechamento do mês', quando:['REALIZADO'] },
+      hint:'cobrada à parte no fechamento do mês', quando:['REALIZADO'], visivelSe:exigeCartNaModal },
     { name:'drive', label:'Enviado ao Drive / SOCGED', type:'checkbox',
       quando:['REALIZADO'], reqQuando:['REALIZADO'] }
   ];
 }
+/* a carteirinha é exigida pela unidade e/ou pela função — lê o que está
+   selecionado AGORA na modal, não o que está gravado na emissão.
+   Já marcada continua à mostra: senão não haveria como desmarcar. */
+function exigeCartNaModal(form){
+  const v = n => (form.elements[n] && form.elements[n].value) || '';
+  const chk = form.elements['carteirinha'];
+  if(chk && chk.checked) return true;
+  if(!tipoAceitaCarteirinha(v('tipoExame'))) return false;
+  const c = DB.colaboradores.find(x => norm(x.nome) === norm(v('colaborador')));
+  const funcao = v('funcao') || (c ? c.funcao : '');
+  const unidadeId = v('unidadeId') || (c ? c.unidadeId : '');
+  return exigeCarteirinha(unidadeId, funcao).exige;
+}
+
 /* mostra/esconde os campos do Encerramento e liga a obrigatoriedade conforme a
    situação escolhida. Mexe no MESMO array que o openForm usa para validar, então
    o "Preencha: ..." passa a refletir a regra da situação atual. */
@@ -5237,7 +5253,7 @@ function ligarRegrasEncerramento(form, campos){
     const st = sel.value;
     campos.forEach(f => {
       if(!f.quando) return;
-      const visivel = f.quando.indexOf(st) >= 0;
+      const visivel = f.quando.indexOf(st) >= 0 && (!f.visivelSe || f.visivelSe(form));
       const box = form.querySelector('[data-campo="' + f.name + '"]');
       if(box) box.classList.toggle('hidden', !visivel);
       f.req = visivel && !!f.reqQuando && f.reqQuando.indexOf(st) >= 0;
@@ -5246,6 +5262,13 @@ function ligarRegrasEncerramento(form, campos){
     });
   };
   sel.addEventListener('change', aplicar);
+  /* trocar colaborador, unidade, cargo ou tipo muda a exigência de carteirinha */
+  ['colaborador','unidadeId','funcao','tipoExame','carteirinha'].forEach(n => {
+    const el = form.elements[n];
+    if(!el) return;
+    el.addEventListener('change', aplicar);
+    if(el.tagName === 'INPUT' && el.type !== 'checkbox') el.addEventListener('input', aplicar);
+  });
   aplicar();
 }
 /* liga colaborador + tipo de exame → matriz do cargo, com botão para aplicar */
@@ -5325,13 +5348,15 @@ function ligarMatrizEmissao(form, preencherAuto, autoUnidade){
       const canon = funcaoCanonica(cReal.funcao);
       if([...selFunRef.options].some(o => o.value === canon)) selFunRef.value = canon;
     }
-    /* a carteirinha acompanha a função: marca sozinha na 1ª vez, some no demissional */
+    /* a carteirinha acompanha a função e a unidade: marca sozinha quando passa a
+       ser exigida e DESmarca quando deixa de ser — mas só se tiver sido ela mesma
+       a marcar. Marcação feita à mão pela pessoa não é desfeita. */
     const chk = form.elements['carteirinha'];
     if(chk){
-      if(!tipoAceitaCarteirinha(tipo)) chk.checked = false;
-      else if(!marcouCart && exigeCarteirinha(selUni ? selUni.value : c.unidadeId, c.funcao).exige){
-        chk.checked = true; marcouCart = true;
-      }
+      const exigeAgora = exigeCarteirinha(selUni ? selUni.value : c.unidadeId, c.funcao).exige;
+      if(!tipoAceitaCarteirinha(tipo)){ chk.checked = false; marcouCart = false; }
+      else if(!marcouCart && exigeAgora){ chk.checked = true; marcouCart = true; }
+      else if(marcouCart && !exigeAgora){ chk.checked = false; marcouCart = false; }
     }
   };
   inpCol.addEventListener('change', pintar);
