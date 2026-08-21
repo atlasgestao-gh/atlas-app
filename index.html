@@ -2700,7 +2700,8 @@ function viewLaudos(){
                        <button onclick="cancelarRenovacao('${l.id}')" class="text-slate-400 hover:text-danger px-1.5" title="Cancelar renovação"><i class="fa-solid fa-xmark"></i></button>`
                     : `<button onclick="solicitarRenovacao('${l.id}')" class="text-slate-400 hover:text-accent px-1.5" title="Solicitar renovação"><i class="fa-solid fa-rotate"></i></button>`}
                   <button onclick="historicoLaudo('${l.id}')" class="text-slate-400 hover:text-accent px-1.5" title="Histórico"><i class="fa-solid fa-clock-rotate-left"></i></button>
-                  <button onclick="editarLaudo('${l.id}')" class="text-slate-400 hover:text-accent px-1.5" title="Editar"><i class="fa-solid fa-pen"></i></button>
+                  <button onclick="editarLaudo('${l.id}')" class="text-slate-400 hover:text-accent px-1.5"
+                    title="${r ? 'Editar os dados da renovação em andamento' : 'Editar'}"><i class="fa-solid fa-pen"></i></button>
                   <button onclick="excluirLaudo('${l.id}')" class="text-slate-400 hover:text-danger px-1.5" title="Excluir"><i class="fa-solid fa-trash"></i></button>
                 </td></tr>`;
             }).join('') : vazio('Nenhum laudo encontrado com esses filtros.')}
@@ -2718,8 +2719,12 @@ const campoDocs = (req) => ({ name:'documentos', label:'Tipos de documento', typ
   hint:'marque todos os documentos que fazem parte desta entrega' });
 
 /* cadastro da unidade + versão vigente */
-function editarLaudo(id){
+function editarLaudo(id, forcarVigente){
   const l = id ? DB.laudos.find(x => x.id === id) : null;
+  /* Com renovação em andamento, o que se edita é ELA: a versão vigente já foi
+     entregue e está a caminho do histórico. Para mexer na vigente mesmo assim,
+     existe o atalho dentro da modal de renovação (forcarVigente). */
+  if(l && l.renovacao && !forcarVigente){ editarRenovacao(id); return; }
   const a = (l && l.atual) || {};
   /* mesma regra dos exames: laudo já cobrado num mês fechado não se altera */
   if(a.dataFaturamento && barradoPorFechamento(a.dataFaturamento, 'Edição do laudo')) return;
@@ -2774,26 +2779,50 @@ function ligarCamposLaudo(form){
   sincronizar();
 }
 
+function camposRenovacao(){
+  return [
+    { name:'solicitadoEm', label:'Data da solicitação', type:'date', req:true },
+    { name:'previsao', label:'Previsão de entrega', type:'date' },
+    { name:'clinica', label:'Clínica responsável', col:'sm:col-span-2' },
+    campoDocs(true),
+    { name:'observacao', label:'Observação', type:'textarea', rows:2, col:'sm:col-span-2' }
+  ];
+}
 /* passo 1 — abre a renovação (fica "Em elaboração") */
 function solicitarRenovacao(id){
   const l = DB.laudos.find(x => x.id === id); if(!l) return;
   const a = l.atual || {};
-  const u = uni(l.unidadeId);
   openForm({
     title: 'Solicitar renovação — ' + uniNome(l.unidadeId),
-    fields: [
-      { name:'solicitadoEm', label:'Data da solicitação', type:'date', req:true },
-      { name:'previsao', label:'Previsão de entrega', type:'date' },
-      { name:'clinica', label:'Clínica responsável', col:'sm:col-span-2' },
-      campoDocs(true),
-      { name:'observacao', label:'Observação', type:'textarea', rows:2, col:'sm:col-span-2' }
-    ],
+    fields: camposRenovacao(),
     values: { solicitadoEm: isoToday(), clinica: a.clinica || '',
               documentos: a.documentos || ['PCMSO','PGR','LTCAT'] },
     onSave: v => {
       l.renovacao = v;
       save(); closeModal(); voltarParaTelaAtual();
       toast('Renovação aberta. O laudo fica "Em elaboração" até a entrega.');
+    }
+  });
+}
+/* edição da renovação em andamento — é o que o lápis da grade abre enquanto ela existe */
+function editarRenovacao(id){
+  const l = DB.laudos.find(x => x.id === id); if(!l || !l.renovacao) return;
+  const a = l.atual || {};
+  const contexto = `
+    <div class="sm:col-span-2 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+      <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-1">Laudo vigente — vai para o histórico na entrega</p>
+      <p class="text-xs text-slate-600">${a.emissao ? esc(docsLabel(a.documentos)) + ' · entregue ' + fmtDate(a.emissao) + ' · vence ' + fmtDate(a.vencimento) : 'Nenhuma versão entregue ainda.'}</p>
+      <button type="button" onclick="editarLaudo('${l.id}', true)" class="mt-1 text-[11px] text-accent underline">
+        Preciso corrigir o laudo vigente</button>
+    </div>`;
+  openForm({
+    title: 'Editar renovação — ' + uniNome(l.unidadeId),
+    fields: [{ type:'html', name:'ctx', html: contexto }].concat(camposRenovacao()),
+    values: Object.assign({}, l.renovacao),
+    onSave: v => {
+      Object.assign(l.renovacao, v);
+      save(); closeModal(); voltarParaTelaAtual();
+      toast('Dados da renovação atualizados.');
     }
   });
 }
