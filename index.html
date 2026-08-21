@@ -3793,7 +3793,7 @@ function temExameRestrito(matriz, tipos){
 
 /* ═══════════════════════════ 4. CADASTROS ═══════════════════════════ */
 const UICad = { aba:'colaboradores' };
-const UIColab = { q:'', emp:'', uni:'', status:'Ativo', sexo:'', page:1, revisar:false };
+const UIColab = { q:'', emp:'', uni:'', cargo:'', status:'Ativo', sexo:'', page:1, revisar:false };
 
 function viewCadastros(){
   const abas = [
@@ -3815,12 +3815,13 @@ function viewCadastros(){
 }
 
 /* ---- 4a. colaboradores ---- */
-function colabsFiltrados(){
+function colabsFiltrados(ignorarCargo){
   const q = norm(UIColab.q);
   return DB.colaboradores.filter(c => {
     const u = uni(c.unidadeId);
     return (!UIColab.emp || (u && u.empresaId === UIColab.emp)) &&
            (!UIColab.uni || c.unidadeId === UIColab.uni) &&
+           (ignorarCargo || !UIColab.cargo || cargoDaLista(c) === UIColab.cargo) &&
            (!UIColab.revisar || !!c.revisar) &&
            (!UIColab.status || c.status === UIColab.status) &&
            (!UIColab.sexo || (UIColab.sexo === 'SEM' ? !c.sexo : c.sexo === UIColab.sexo)) &&
@@ -3828,6 +3829,40 @@ function colabsFiltrados(){
   })
   /* mais recentes primeiro, pela data do último exame realizado */
   .sort((a,b) => (ultimoExameDe(b)||'').localeCompare(ultimoExameDe(a)||''));
+}
+/* Chave de agrupamento do filtro por cargo. Agrupa pelo cargo CANÔNICO — quem
+   está cadastrado com uma grafia sinônima cai junto com o cargo do catálogo,
+   que é o mesmo critério da matriz de exames. Quem não tem função vira um
+   grupo próprio (o hífen nunca sai de norm(), então não colide com cargo real). */
+const CARGO_SEM = 'sem-funcao';
+function cargoDaLista(c){
+  return c.funcao ? norm(funcaoCanonica(c.funcao)) : CARGO_SEM;
+}
+/* Só os cargos que sobrevivem aos OUTROS filtros já ativos, cada um com quantos
+   colaboradores traria. O número na frente é literal: é o tamanho da lista se
+   você escolher aquele cargo — nada de oferecer opção que volta vazia. */
+function opcoesCargosColabs(){
+  const mapa = new Map();
+  colabsFiltrados(true).forEach(c => {
+    const v = cargoDaLista(c);
+    const l = v === CARGO_SEM ? 'Sem função informada' : funcaoCanonica(c.funcao);
+    const o = mapa.get(v);
+    if(o) o.n++; else mapa.set(v, { v, l, n:1 });
+  });
+  /* mantém o cargo selecionado na lista mesmo que o recorte atual o esvazie,
+     senão o select ficaria em branco escondendo o filtro que está ativo */
+  if(UIColab.cargo && !mapa.has(UIColab.cargo))
+    mapa.set(UIColab.cargo, { v:UIColab.cargo, l:rotuloCargoFiltro(UIColab.cargo), n:0 });
+  return [...mapa.values()]
+    .sort((a,b) => a.v === CARGO_SEM ? 1 : b.v === CARGO_SEM ? -1 : a.l.localeCompare(b.l, 'pt-BR'))
+    .map(o => ({ v:o.v, l:`${o.l} (${o.n})` }));
+}
+function rotuloCargoFiltro(chave){
+  if(chave === CARGO_SEM) return 'Sem função informada';
+  const c = (DB.cargos||[]).find(x => norm(x.funcao) === chave);
+  if(c) return c.funcao;
+  const colab = DB.colaboradores.find(x => cargoDaLista(x) === chave);
+  return colab ? funcaoCanonica(colab.funcao) : chave;
 }
 /* data do exame mais recente do colaborador (ASO vigente + histórico) */
 function ultimoExameDe(c){
@@ -3867,7 +3902,7 @@ function mensagemVazioColabs(){
   return 'Nenhum colaborador encontrado.';
 }
 function limparFiltrosColabs(){
-  UIColab.emp=''; UIColab.uni=''; UIColab.status=''; UIColab.sexo=''; UIColab.revisar=false; UIColab.page=1;
+  UIColab.emp=''; UIColab.uni=''; UIColab.cargo=''; UIColab.status=''; UIColab.sexo=''; UIColab.revisar=false; UIColab.page=1;
   viewCadastros();
 }
 function paginaColabs(p){ UIColab.page = p; viewCadastros(); }
@@ -4001,6 +4036,7 @@ function abaColaboradores(){
       ${inputBusca('bCol','Buscar por nome, CPF, função ou e-mail...','UIColab.q=this.value;UIColab.page=1;viewCadastros();focarBusca(&quot;bCol&quot;)', UIColab.q)}
       ${selectFiltro('fColE','Todas as empresas', opcoesEmpresas(), 'UIColab.emp=this.value;UIColab.uni="";UIColab.page=1;viewCadastros()', UIColab.emp)}
       ${selectFiltro('fColU','Todas as unidades', opcoesUnidades().filter(o => !UIColab.emp || (uni(o.v)||{}).empresaId===UIColab.emp), 'UIColab.uni=this.value;UIColab.page=1;viewCadastros()', UIColab.uni)}
+      ${selectFiltro('fColC','Todos os cargos', opcoesCargosColabs(), 'UIColab.cargo=this.value;UIColab.page=1;viewCadastros()', UIColab.cargo)}
       ${selectFiltro('fColS','Todos os status', ['Ativo','Afastado','Desligado','Inativo'].map(s=>({v:s,l:s})), 'UIColab.status=this.value;UIColab.page=1;viewCadastros()', UIColab.status)}
       ${selectFiltro('fColX','Todos os sexos', [{v:'F',l:'Feminino'},{v:'M',l:'Masculino'},{v:'SEM',l:'Sexo não informado'}], 'UIColab.sexo=this.value;UIColab.page=1;viewCadastros()', UIColab.sexo)}
       ${botao('Novo colaborador','fa-user-plus','editarColab()')}
@@ -4008,7 +4044,7 @@ function abaColaboradores(){
         ? botao('Definir sexo pelo nome ('+DB.colaboradores.filter(c=>!c.sexo).length+')','fa-venus-mars','preencherSexoPorNome()',
                 'bg-white border border-amber-300 text-amber-700 hover:bg-amber-50')
         : ''}
-      ${(UIColab.emp||UIColab.uni||UIColab.status||UIColab.sexo||UIColab.revisar)
+      ${(UIColab.emp||UIColab.uni||UIColab.cargo||UIColab.status||UIColab.sexo||UIColab.revisar)
         ? botao('Limpar filtros','fa-filter-circle-xmark','limparFiltrosColabs()','bg-white border border-amber-300 text-amber-700 hover:bg-amber-50')
         : ''}
       ${botao('CSV','fa-file-csv','exportarColabs()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
@@ -5600,7 +5636,7 @@ async function confirmarCriarCadastrosFaltantes(){
   });
   save(); closeModal();
   toast(n + ' cadastro(s) criado(s) — revise os dados em Colaboradores.', 'alerta');
-  UICad.aba = 'colaboradores'; UIColab.revisar = true; UIColab.status = ''; UIColab.page = 1;
+  UICad.aba = 'colaboradores'; UIColab.revisar = true; UIColab.status = ''; UIColab.cargo = ''; UIColab.page = 1;
   go('cadastros');
 }
 
