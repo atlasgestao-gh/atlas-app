@@ -1474,6 +1474,55 @@ function focarBusca(id){
   const n = e.value.length;
   try{ e.setSelectionRange(n, n); }catch(_){}
 }
+/* Filtro de múltipla escolha: um botão que abre um painel de checkboxes.
+   A view inteira é redesenhada a cada clique, então o estado "aberto" e a busca
+   interna moram no objeto de UI da tela (mesmo truque do focarBusca) e o painel
+   volta aberto depois do redesenho. O fundo transparente fecha ao clicar fora —
+   é recriado junto com o painel, então sobrevive ao redesenho sem listener solto.
+   opcoes: [{ v, l, n }] — n é quantos registros aquela opção traria. */
+function filtroMulti(cfg){
+  const sel = cfg.selecionados || [];
+  const marcado = v => sel.indexOf(v) >= 0;
+  const rotulo = !sel.length ? cfg.label
+    : sel.length === 1 ? ((cfg.opcoes.find(o => o.v === sel[0]) || {}).l || cfg.label)
+    : sel.length + ' ' + (cfg.plural || 'selecionados');
+  const q = norm(cfg.busca || '');
+  /* o que a busca achou de fato; os já marcados continuam à vista mesmo fora da
+     busca, para não sumir da tela um filtro que está valendo */
+  const achou = q ? cfg.opcoes.filter(o => norm(o.l).includes(q)) : cfg.opcoes;
+  const visiveis = q ? cfg.opcoes.filter(o => norm(o.l).includes(q) || marcado(o.v)) : cfg.opcoes;
+  return `<div class="relative">
+    <button type="button" onclick="${cfg.onAbrir}"
+      class="px-3 py-2 text-sm border rounded-lg bg-white flex items-center gap-2 whitespace-nowrap
+             ${sel.length ? 'border-accent text-accent font-medium' : 'border-slate-300 text-slate-600'}">
+      ${cfg.icon ? `<i class="fa-solid ${cfg.icon} text-xs"></i>` : ''}
+      <span class="max-w-[190px] truncate">${esc(rotulo)}</span>
+      <i class="fa-solid fa-chevron-down text-[10px] text-slate-400"></i>
+    </button>
+    ${cfg.aberto ? `<div class="fixed inset-0 z-20" onclick="${cfg.onFechar}"></div>
+    <div class="absolute left-0 mt-1 z-30 w-72 bg-white border border-slate-200 rounded-lg shadow-lg">
+      <div class="p-2 border-b border-slate-100 space-y-2">
+        <input id="${cfg.id}_q" oninput="${cfg.onBuscar}" value="${esc(cfg.busca||'')}"
+          placeholder="${esc(cfg.phBusca || 'Filtrar...')}"
+          class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-accent/40">
+        <div class="flex items-center justify-between text-xs">
+          <span class="text-slate-500">${sel.length ? sel.length + ' marcado(s)' : 'Nenhum marcado'}</span>
+          ${sel.length ? `<button type="button" onclick="${cfg.onLimpar}" class="text-accent hover:underline">Desmarcar todos</button>` : ''}
+        </div>
+      </div>
+      <div class="max-h-64 overflow-y-auto p-1">
+        ${!achou.length ? `<p class="px-2 py-3 text-xs text-slate-400 text-center">Nada encontrado${visiveis.length?' — abaixo, só o que está marcado.':'.'}</p>` : ''}
+        ${visiveis.length ? visiveis.map(o => `
+          <label class="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-slate-50 cursor-pointer text-sm">
+            <input type="checkbox" ${marcado(o.v)?'checked':''} onchange="${cfg.onMarcar}('${esc(o.v)}')"
+              class="rounded border-slate-300 text-accent focus:ring-accent/40">
+            <span class="flex-1 truncate ${marcado(o.v)?'font-medium text-slate-800':'text-slate-700'}">${esc(o.l)}</span>
+            <span class="text-xs ${o.n?'text-slate-400':'text-slate-300'}">${o.n}</span>
+          </label>`).join('') : ''}
+      </div>
+    </div>` : ''}
+  </div>`;
+}
 function selectFiltro(id, label, opcoes, onchange, valor){
   return `<select id="${id}" onchange="${onchange}"
     class="px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-accent/40">
@@ -3793,7 +3842,8 @@ function temExameRestrito(matriz, tipos){
 
 /* ═══════════════════════════ 4. CADASTROS ═══════════════════════════ */
 const UICad = { aba:'colaboradores' };
-const UIColab = { q:'', emp:'', uni:'', cargo:'', status:'Ativo', sexo:'', page:1, revisar:false };
+const UIColab = { q:'', emp:'', uni:'', cargos:[], cargoAberto:false, cargoBusca:'',
+                  status:'Ativo', sexo:'', page:1, revisar:false };
 
 function viewCadastros(){
   const abas = [
@@ -3821,7 +3871,7 @@ function colabsFiltrados(ignorarCargo){
     const u = uni(c.unidadeId);
     return (!UIColab.emp || (u && u.empresaId === UIColab.emp)) &&
            (!UIColab.uni || c.unidadeId === UIColab.uni) &&
-           (ignorarCargo || !UIColab.cargo || cargoDaLista(c) === UIColab.cargo) &&
+           (ignorarCargo || !UIColab.cargos.length || UIColab.cargos.indexOf(cargoDaLista(c)) >= 0) &&
            (!UIColab.revisar || !!c.revisar) &&
            (!UIColab.status || c.status === UIColab.status) &&
            (!UIColab.sexo || (UIColab.sexo === 'SEM' ? !c.sexo : c.sexo === UIColab.sexo)) &&
@@ -3849,14 +3899,27 @@ function opcoesCargosColabs(){
     const o = mapa.get(v);
     if(o) o.n++; else mapa.set(v, { v, l, n:1 });
   });
-  /* mantém o cargo selecionado na lista mesmo que o recorte atual o esvazie,
-     senão o select ficaria em branco escondendo o filtro que está ativo */
-  if(UIColab.cargo && !mapa.has(UIColab.cargo))
-    mapa.set(UIColab.cargo, { v:UIColab.cargo, l:rotuloCargoFiltro(UIColab.cargo), n:0 });
+  /* mantém marcado na lista o cargo que o recorte atual esvaziou — some da lista
+     seria esconder um filtro que continua valendo */
+  UIColab.cargos.forEach(v => {
+    if(!mapa.has(v)) mapa.set(v, { v, l:rotuloCargoFiltro(v), n:0 });
+  });
   return [...mapa.values()]
-    .sort((a,b) => a.v === CARGO_SEM ? 1 : b.v === CARGO_SEM ? -1 : a.l.localeCompare(b.l, 'pt-BR'))
-    .map(o => ({ v:o.v, l:`${o.l} (${o.n})` }));
+    .sort((a,b) => a.v === CARGO_SEM ? 1 : b.v === CARGO_SEM ? -1 : a.l.localeCompare(b.l, 'pt-BR'));
 }
+function marcarCargoFiltro(v){
+  const a = UIColab.cargos, i = a.indexOf(v);
+  if(i < 0) a.push(v); else a.splice(i,1);
+  UIColab.page = 1;
+  viewCadastros();
+}
+function limparCargosFiltro(){ UIColab.cargos = []; UIColab.page = 1; viewCadastros(); }
+function abrirCargosFiltro(abrir){
+  UIColab.cargoAberto = abrir;
+  if(!abrir) UIColab.cargoBusca = '';
+  viewCadastros();
+}
+function buscarCargoFiltro(v){ UIColab.cargoBusca = v; viewCadastros(); focarBusca('fColC_q'); }
 function rotuloCargoFiltro(chave){
   if(chave === CARGO_SEM) return 'Sem função informada';
   const c = (DB.cargos||[]).find(x => norm(x.funcao) === chave);
@@ -3902,7 +3965,8 @@ function mensagemVazioColabs(){
   return 'Nenhum colaborador encontrado.';
 }
 function limparFiltrosColabs(){
-  UIColab.emp=''; UIColab.uni=''; UIColab.cargo=''; UIColab.status=''; UIColab.sexo=''; UIColab.revisar=false; UIColab.page=1;
+  UIColab.emp=''; UIColab.uni=''; UIColab.cargos=[]; UIColab.cargoAberto=false; UIColab.cargoBusca='';
+  UIColab.status=''; UIColab.sexo=''; UIColab.revisar=false; UIColab.page=1;
   viewCadastros();
 }
 function paginaColabs(p){ UIColab.page = p; viewCadastros(); }
@@ -4036,7 +4100,12 @@ function abaColaboradores(){
       ${inputBusca('bCol','Buscar por nome, CPF, função ou e-mail...','UIColab.q=this.value;UIColab.page=1;viewCadastros();focarBusca(&quot;bCol&quot;)', UIColab.q)}
       ${selectFiltro('fColE','Todas as empresas', opcoesEmpresas(), 'UIColab.emp=this.value;UIColab.uni="";UIColab.page=1;viewCadastros()', UIColab.emp)}
       ${selectFiltro('fColU','Todas as unidades', opcoesUnidades().filter(o => !UIColab.emp || (uni(o.v)||{}).empresaId===UIColab.emp), 'UIColab.uni=this.value;UIColab.page=1;viewCadastros()', UIColab.uni)}
-      ${selectFiltro('fColC','Todos os cargos', opcoesCargosColabs(), 'UIColab.cargo=this.value;UIColab.page=1;viewCadastros()', UIColab.cargo)}
+      ${filtroMulti({ id:'fColC', label:'Todos os cargos', plural:'cargos', icon:'fa-id-badge',
+        opcoes:opcoesCargosColabs(), selecionados:UIColab.cargos,
+        aberto:UIColab.cargoAberto, busca:UIColab.cargoBusca, phBusca:'Filtrar cargos...',
+        onAbrir:'abrirCargosFiltro(' + (UIColab.cargoAberto?'false':'true') + ')',
+        onFechar:'abrirCargosFiltro(false)', onMarcar:'marcarCargoFiltro',
+        onLimpar:'limparCargosFiltro()', onBuscar:'buscarCargoFiltro(this.value)' })}
       ${selectFiltro('fColS','Todos os status', ['Ativo','Afastado','Desligado','Inativo'].map(s=>({v:s,l:s})), 'UIColab.status=this.value;UIColab.page=1;viewCadastros()', UIColab.status)}
       ${selectFiltro('fColX','Todos os sexos', [{v:'F',l:'Feminino'},{v:'M',l:'Masculino'},{v:'SEM',l:'Sexo não informado'}], 'UIColab.sexo=this.value;UIColab.page=1;viewCadastros()', UIColab.sexo)}
       ${botao('Novo colaborador','fa-user-plus','editarColab()')}
@@ -4044,7 +4113,7 @@ function abaColaboradores(){
         ? botao('Definir sexo pelo nome ('+DB.colaboradores.filter(c=>!c.sexo).length+')','fa-venus-mars','preencherSexoPorNome()',
                 'bg-white border border-amber-300 text-amber-700 hover:bg-amber-50')
         : ''}
-      ${(UIColab.emp||UIColab.uni||UIColab.cargo||UIColab.status||UIColab.sexo||UIColab.revisar)
+      ${(UIColab.emp||UIColab.uni||UIColab.cargos.length||UIColab.status||UIColab.sexo||UIColab.revisar)
         ? botao('Limpar filtros','fa-filter-circle-xmark','limparFiltrosColabs()','bg-white border border-amber-300 text-amber-700 hover:bg-amber-50')
         : ''}
       ${botao('CSV','fa-file-csv','exportarColabs()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
@@ -5636,7 +5705,7 @@ async function confirmarCriarCadastrosFaltantes(){
   });
   save(); closeModal();
   toast(n + ' cadastro(s) criado(s) — revise os dados em Colaboradores.', 'alerta');
-  UICad.aba = 'colaboradores'; UIColab.revisar = true; UIColab.status = ''; UIColab.cargo = ''; UIColab.page = 1;
+  UICad.aba = 'colaboradores'; UIColab.revisar = true; UIColab.status = ''; UIColab.cargos = []; UIColab.page = 1;
   go('cadastros');
 }
 
