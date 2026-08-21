@@ -1460,8 +1460,12 @@ function card({ titulo, valor, sub, icon, cor, onClick }){
       <div class="w-9 h-9 rounded-lg ${cor} flex items-center justify-center shrink-0"><i class="fa-solid ${icon}"></i></div>
     </div></div>`;
 }
-function inputBusca(id, ph, oninput, valor){
-  return `<div class="relative flex-1 min-w-[180px]">
+/* Célula de 4 colunas na barra de filtros em grid de 12 — três por linha no
+   desktop, empilhadas no celular. */
+const COL4 = 'col-span-12 md:col-span-4';
+/* cls sobrescreve a largura padrão (flex) quando a barra é montada em grid */
+function inputBusca(id, ph, oninput, valor, cls){
+  return `<div class="relative ${cls || 'flex-1 min-w-[180px]'}">
     <i class="fa-solid fa-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
     <input id="${id}" oninput="${oninput}" placeholder="${esc(ph)}" value="${esc(valor||'')}"
       class="w-full pl-9 pr-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent">
@@ -1491,16 +1495,16 @@ function filtroMulti(cfg){
      busca, para não sumir da tela um filtro que está valendo */
   const achou = q ? cfg.opcoes.filter(o => norm(o.l).includes(q)) : cfg.opcoes;
   const visiveis = q ? cfg.opcoes.filter(o => norm(o.l).includes(q) || marcado(o.v)) : cfg.opcoes;
-  return `<div class="relative">
+  return `<div class="relative ${cfg.cls || ''}">
     <button type="button" onclick="${cfg.onAbrir}"
-      class="px-3 py-2 text-sm border rounded-lg bg-white flex items-center gap-2 whitespace-nowrap
+      class="w-full px-3 py-2 text-sm border rounded-lg bg-white flex items-center gap-2 whitespace-nowrap
              ${sel.length ? 'border-accent text-accent font-medium' : 'border-slate-300 text-slate-600'}">
-      ${cfg.icon ? `<i class="fa-solid ${cfg.icon} text-xs"></i>` : ''}
-      <span class="max-w-[190px] truncate">${esc(rotulo)}</span>
-      <i class="fa-solid fa-chevron-down text-[10px] text-slate-400"></i>
+      ${cfg.icon ? `<i class="fa-solid ${cfg.icon} text-xs shrink-0"></i>` : ''}
+      <span class="flex-1 text-left truncate">${esc(rotulo)}</span>
+      <i class="fa-solid fa-chevron-down text-[10px] text-slate-400 shrink-0"></i>
     </button>
     ${cfg.aberto ? `<div class="fixed inset-0 z-20" onclick="${cfg.onFechar}"></div>
-    <div class="absolute left-0 mt-1 z-30 w-72 bg-white border border-slate-200 rounded-lg shadow-lg">
+    <div class="absolute left-0 mt-1 z-30 w-full min-w-[16rem] bg-white border border-slate-200 rounded-lg shadow-lg">
       <div class="p-2 border-b border-slate-100 space-y-2">
         <input id="${cfg.id}_q" oninput="${cfg.onBuscar}" value="${esc(cfg.busca||'')}"
           placeholder="${esc(cfg.phBusca || 'Filtrar...')}"
@@ -1523,9 +1527,9 @@ function filtroMulti(cfg){
     </div>` : ''}
   </div>`;
 }
-function selectFiltro(id, label, opcoes, onchange, valor){
+function selectFiltro(id, label, opcoes, onchange, valor, cls){
   return `<select id="${id}" onchange="${onchange}"
-    class="px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-accent/40">
+    class="px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-accent/40 ${cls||''}">
     <option value="">${esc(label)}</option>
     ${opcoes.map(o => `<option value="${esc(o.v)}" ${o.v===valor?'selected':''}>${esc(o.l)}</option>`).join('')}
   </select>`;
@@ -3907,6 +3911,14 @@ function opcoesCargosColabs(){
   return [...mapa.values()]
     .sort((a,b) => a.v === CARGO_SEM ? 1 : b.v === CARGO_SEM ? -1 : a.l.localeCompare(b.l, 'pt-BR'));
 }
+/* Trocar de empresa zera a unidade (ela pertence a outra empresa). Estava
+   escrito direto no atributo onchange com aspas duplas dentro de atributo de
+   aspas duplas — o HTML cortava o handler no meio e o filtro de empresa não
+   fazia nada, só lançava SyntaxError. */
+function setEmpresaColab(v){
+  UIColab.emp = v; UIColab.uni = ''; UIColab.page = 1;
+  viewCadastros();
+}
 function marcarCargoFiltro(v){
   const a = UIColab.cargos, i = a.indexOf(v);
   if(i < 0) a.push(v); else a.splice(i,1);
@@ -4095,19 +4107,23 @@ function abaColaboradores(){
         class="px-3 py-1.5 rounded-lg text-xs ${UIColab.revisar?'bg-slate-600':'bg-red-500'} text-white hover:opacity-90 whitespace-nowrap shrink-0">
         <i class="fa-solid fa-filter mr-1"></i>${UIColab.revisar?'Mostrar todos':'Ver só os pendentes'}</button>
     </div>` : ''}
-  <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
-    <div class="px-4 py-3 border-b border-slate-200 flex flex-wrap gap-2 items-center no-print">
-      ${inputBusca('bCol','Buscar por nome, CPF, função ou e-mail...','UIColab.q=this.value;UIColab.page=1;viewCadastros();focarBusca(&quot;bCol&quot;)', UIColab.q)}
-      ${selectFiltro('fColE','Todas as empresas', opcoesEmpresas(), 'UIColab.emp=this.value;UIColab.uni="";UIColab.page=1;viewCadastros()', UIColab.emp)}
-      ${selectFiltro('fColU','Todas as unidades', opcoesUnidades().filter(o => !UIColab.emp || (uni(o.v)||{}).empresaId===UIColab.emp), 'UIColab.uni=this.value;UIColab.page=1;viewCadastros()', UIColab.uni)}
-      ${filtroMulti({ id:'fColC', label:'Todos os cargos', plural:'cargos', icon:'fa-id-badge',
+  <div class="bg-white rounded-xl border border-slate-200">
+    <div class="px-4 py-3 border-b border-slate-200 space-y-2 no-print">
+      <!-- filtros em duas linhas de três colunas (4/12 cada); no celular empilham -->
+      <div class="grid grid-cols-12 gap-2">
+      ${inputBusca('bCol','Buscar por nome, CPF, função ou e-mail...','UIColab.q=this.value;UIColab.page=1;viewCadastros();focarBusca(&quot;bCol&quot;)', UIColab.q, COL4)}
+      ${selectFiltro('fColE','Todas as empresas', opcoesEmpresas(), 'setEmpresaColab(this.value)', UIColab.emp, COL4)}
+      ${selectFiltro('fColU','Todas as unidades', opcoesUnidades().filter(o => !UIColab.emp || (uni(o.v)||{}).empresaId===UIColab.emp), 'UIColab.uni=this.value;UIColab.page=1;viewCadastros()', UIColab.uni, COL4)}
+      ${filtroMulti({ id:'fColC', label:'Todos os cargos', plural:'cargos', icon:'fa-id-badge', cls:COL4,
         opcoes:opcoesCargosColabs(), selecionados:UIColab.cargos,
         aberto:UIColab.cargoAberto, busca:UIColab.cargoBusca, phBusca:'Filtrar cargos...',
         onAbrir:'abrirCargosFiltro(' + (UIColab.cargoAberto?'false':'true') + ')',
         onFechar:'abrirCargosFiltro(false)', onMarcar:'marcarCargoFiltro',
         onLimpar:'limparCargosFiltro()', onBuscar:'buscarCargoFiltro(this.value)' })}
-      ${selectFiltro('fColS','Todos os status', ['Ativo','Afastado','Desligado','Inativo'].map(s=>({v:s,l:s})), 'UIColab.status=this.value;UIColab.page=1;viewCadastros()', UIColab.status)}
-      ${selectFiltro('fColX','Todos os sexos', [{v:'F',l:'Feminino'},{v:'M',l:'Masculino'},{v:'SEM',l:'Sexo não informado'}], 'UIColab.sexo=this.value;UIColab.page=1;viewCadastros()', UIColab.sexo)}
+      ${selectFiltro('fColS','Todos os status', ['Ativo','Afastado','Desligado','Inativo'].map(s=>({v:s,l:s})), 'UIColab.status=this.value;UIColab.page=1;viewCadastros()', UIColab.status, COL4)}
+      ${selectFiltro('fColX','Todos os sexos', [{v:'F',l:'Feminino'},{v:'M',l:'Masculino'},{v:'SEM',l:'Sexo não informado'}], 'UIColab.sexo=this.value;UIColab.page=1;viewCadastros()', UIColab.sexo, COL4)}
+      </div>
+      <div class="flex flex-wrap gap-2 items-center">
       ${botao('Novo colaborador','fa-user-plus','editarColab()')}
       ${DB.colaboradores.some(c => !c.sexo)
         ? botao('Definir sexo pelo nome ('+DB.colaboradores.filter(c=>!c.sexo).length+')','fa-venus-mars','preencherSexoPorNome()',
@@ -4117,8 +4133,9 @@ function abaColaboradores(){
         ? botao('Limpar filtros','fa-filter-circle-xmark','limparFiltrosColabs()','bg-white border border-amber-300 text-amber-700 hover:bg-amber-50')
         : ''}
       ${botao('CSV','fa-file-csv','exportarColabs()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
+      </div>
     </div>
-    <div class="overflow-x-auto">
+    <div class="overflow-x-auto rounded-b-xl">
       <table class="w-full text-sm data">
         <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
           <tr><th class="px-4 py-3">Colaborador</th><th class="px-4 py-3">CPF</th><th class="px-4 py-3">Unidade</th>
