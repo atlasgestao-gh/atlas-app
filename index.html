@@ -2779,6 +2779,19 @@ function ligarCamposLaudo(form){
   sincronizar();
 }
 
+/* resumo da renovação em andamento — reaproveitado no histórico e na edição dela */
+function painelRenovacao(l, rodape){
+  const r = l && l.renovacao;
+  if(!r) return '';
+  return `<div class="bg-blue-50 border border-blue-200 rounded-lg p-4">
+    <p class="font-semibold text-sm text-blue-900"><i class="fa-solid fa-hourglass-half mr-1"></i>Renovação em elaboração</p>
+    <p class="text-xs text-blue-800 mt-1">Solicitada em <b>${fmtDate(r.solicitadoEm)}</b>
+      (há ${diasDesde(r.solicitadoEm)} dia(s))${r.previsao?' · previsão de entrega '+fmtDate(r.previsao):''}</p>
+    <p class="text-xs text-blue-800">Documentos: ${esc(docsLabel(r.documentos))} · Clínica: ${esc(r.clinica||'—')}</p>
+    ${r.observacao?`<p class="text-xs text-blue-700 mt-1 italic">${esc(r.observacao)}</p>`:''}
+    ${rodape || ''}
+  </div>`;
+}
 function camposRenovacao(){
   return [
     { name:'solicitadoEm', label:'Data da solicitação', type:'date', req:true },
@@ -2807,14 +2820,9 @@ function solicitarRenovacao(id){
 /* edição da renovação em andamento — é o que o lápis da grade abre enquanto ela existe */
 function editarRenovacao(id){
   const l = DB.laudos.find(x => x.id === id); if(!l || !l.renovacao) return;
-  const a = l.atual || {};
-  const contexto = `
-    <div class="sm:col-span-2 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
-      <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-1">Laudo vigente — vai para o histórico na entrega</p>
-      <p class="text-xs text-slate-600">${a.emissao ? esc(docsLabel(a.documentos)) + ' · entregue ' + fmtDate(a.emissao) + ' · vence ' + fmtDate(a.vencimento) : 'Nenhuma versão entregue ainda.'}</p>
-      <button type="button" onclick="editarLaudo('${l.id}', true)" class="mt-1 text-[11px] text-accent underline">
-        Preciso corrigir o laudo vigente</button>
-    </div>`;
+  const contexto = `<div class="sm:col-span-2">${painelRenovacao(l,
+    `<button type="button" onclick="editarLaudo('${l.id}', true)" class="mt-2 text-[11px] text-blue-700 underline">
+       Preciso corrigir o laudo vigente</button>`)}</div>`;
   openForm({
     title: 'Editar renovação — ' + uniNome(l.unidadeId),
     fields: [{ type:'html', name:'ctx', html: contexto }].concat(camposRenovacao()),
@@ -2883,15 +2891,8 @@ function historicoLaudo(id){
 
   openInfo('Histórico de laudos — ' + uniNome(l.unidadeId), `
     <div class="space-y-4">
-      ${l.renovacao ? `<div class="bg-blue-50 border border-blue-200 rounded-lg p-4">
-        <p class="font-semibold text-sm text-blue-900"><i class="fa-solid fa-hourglass-half mr-1"></i>Renovação em elaboração</p>
-        <p class="text-xs text-blue-800 mt-1">Solicitada em <b>${fmtDate(l.renovacao.solicitadoEm)}</b>
-          (há ${diasDesde(l.renovacao.solicitadoEm)} dia(s))${l.renovacao.previsao?' · previsão de entrega '+fmtDate(l.renovacao.previsao):''}</p>
-        <p class="text-xs text-blue-800">Documentos: ${esc(docsLabel(l.renovacao.documentos))} · Clínica: ${esc(l.renovacao.clinica||'—')}</p>
-        ${l.renovacao.observacao?`<p class="text-xs text-blue-700 mt-1 italic">${esc(l.renovacao.observacao)}</p>`:''}
-        <button onclick="closeModal();concluirRenovacao('${l.id}')" class="mt-3 px-3 py-2 rounded-lg text-xs bg-success text-white hover:bg-emerald-600">
-          <i class="fa-solid fa-check mr-1"></i>Registrar entrega</button>
-      </div>` : ''}
+      ${painelRenovacao(l, `<button onclick="closeModal();concluirRenovacao('${l.id}')" class="mt-3 px-3 py-2 rounded-lg text-xs bg-success text-white hover:bg-emerald-600">
+          <i class="fa-solid fa-check mr-1"></i>Registrar entrega</button>`)}
       <div class="overflow-x-auto border border-slate-200 rounded-lg">
         <table class="w-full text-sm">
           <thead class="bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500 text-left">
