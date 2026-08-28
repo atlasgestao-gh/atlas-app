@@ -159,8 +159,11 @@ let ACESSO = { master:true, irrestrito:true, email:'', empresas:[], unidades:[],
 const SUPA_URL  = 'https://bdqkxcadnxsjvtpwerxn.supabase.co';
 const SUPA_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJkcWt4Y2FkbnhzanZ0cHdlcnhuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODYwMjE0OTksImV4cCI6MjEwMTU5NzQ5OX0.rm696waIVYKyhBrrFI9QorXjOI60E9TuCol_nt5oED8';
 const CLOUD_ON  = /^https?:\/\//.test(SUPA_URL) && (SUPA_ANON||'').length > 20;
-const sb = CLOUD_ON ? window.supabase.createClient(SUPA_URL, SUPA_ANON,
+/* `let` e não `const` de propósito: a sonda headless troca por um simulador
+   das tabelas para poder exercitar a camada de nuvem de verdade */
+let sb = CLOUD_ON ? window.supabase.createClient(SUPA_URL, SUPA_ANON,
              { auth:{ persistSession:true, autoRefreshToken:true } }) : null;
+function nuvemLigada(){ return !!sb; }
 
 async function nuvemSessao(){ try{ return (await sb.auth.getSession()).data.session; }catch(e){ return null; } }
 async function nuvemUsuario(){ try{ return (await sb.auth.getUser()).data.user; }catch(e){ return null; } }
@@ -195,7 +198,11 @@ function armarFimDeSessao(){
 }
 
 async function nuvemLer(){
-  if(!CLOUD_ON) return null;
+  if(!nuvemLigada()) return null;
+  /* formato novo manda quando já existe; senão cai na atlas_estado de sempre */
+  const partida = await nuvemLerPartida();
+  if(partida){ NUVEM_PARTIDA = true; return partida.base; }
+  NUVEM_PARTIDA = false;
   try{
     const { data, error } = await sb.from('atlas_estado').select('dados').eq('id',1).single();
     if(error){ console.warn('nuvemLer', error.message); return null; }
@@ -205,11 +212,18 @@ async function nuvemLer(){
 
 let _nuvemTimer = null, _nuvemGravando = false, _nuvemPend = false;
 async function nuvemGravarJa(){
-  if(!CLOUD_ON) return;
+  if(!nuvemLigada()) return;
   if(!podeGravar()) return;   /* trava final: nada de restrito escrever na nuvem */
   if(_nuvemGravando){ _nuvemPend = true; return; }
   _nuvemGravando = true;
   try{
+    /* formato novo: grava o comum + as linhas de unidade */
+    if(NUVEM_PARTIDA){
+      const r = await nuvemGravarPartida();
+      if(!r.ok) console.warn('nuvemGravarPartida', r.motivo);
+      else FS.ultimoNuvem = new Date().toISOString();
+      return;
+    }
     const u = await nuvemUsuario();
     const { error } = await sb.from('atlas_estado')
       .update({ dados: DB, salvo_em: (DB.meta&&DB.meta.salvoEm)||new Date().toISOString(),
@@ -227,6 +241,250 @@ function nuvemGravar(jaJa){
   if(!CLOUD_ON) return;
   clearTimeout(_nuvemTimer);
   _nuvemTimer = setTimeout(nuvemGravarJa, jaJa ? 0 : 4000);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   PARTIR E JUNTAR A BASE POR UNIDADE (isolamento B1)
+
+   A base vira: 1 documento comum (catálogo, preços, fechamentos — nada de
+   pessoa) + 1 documento por unidade (colaboradores, exames, ASOs, atestados).
+   Cada linha de unidade carrega a própria unidade e a empresa dela, para
+   quem não tem acesso não descobrir nem o nome dos outros clientes.
+
+   A regra de ouro aqui é: NADA pode sumir e NADA de pessoa pode cair no
+   comum, que todo login lê. Por isso a classificação é explícita e
+   `partirBase` PARA quando encontra coleção que não conhece com cara de dado
+   pessoal, em vez de adivinhar.
+   ═══════════════════════════════════════════════════════════════ */
+const UNI_ORFAOS = '__sem_unidade__';   /* casa dos registros sem unidade: só o master alcança */
+
+/* coleções que pertencem a uma unidade */
+const COLECOES_UNIDADE = ['colaboradores','emissoes','laudos','visitas','atestados',
+                          'documentos','docsOficiais','relatorios','asos','esocial2220','esocial2240'];
+/* estas não moram nem no comum nem na unidade: têm tratamento próprio */
+const COLECOES_A_PARTE = ['empresas','unidades','acessos'];
+
+/* de qual unidade é este registro? asos seguem o colaborador; eventos do
+   eSocial seguem o CPF; o resto tem unidadeId próprio */
+function unidadeDoRegistro(colecao, r, idx){
+  if(colecao === 'asos') return idx.porColab[r.colaboradorId] || '';
+  if(colecao === 'esocial2220' || colecao === 'esocial2240') return idx.porCpf[cpfDigitos(r.cpf)] || '';
+  return r.unidadeId || '';
+}
+
+function partirBase(base){
+  const d = base || DB;
+  const idx = { porColab:{}, porCpf:{} };
+  (d.colaboradores||[]).forEach(c => {
+    idx.porColab[c.id] = c.unidadeId || '';
+    const cp = cpfDigitos(c.cpf);
+    if(cp) idx.porCpf[cp] = c.unidadeId || '';
+  });
+
+  /* ── a trava ──
+     Qualquer chave que eu não tenha classificado e que seja uma lista com
+     cara de dado de pessoa (unidadeId, colaboradorId ou cpf) é motivo para
+     parar. Melhor a migração falhar barulhenta do que vazar ou perder. */
+  const naoClassificadas = Object.keys(d).filter(k => {
+    if(COLECOES_UNIDADE.indexOf(k) >= 0 || COLECOES_A_PARTE.indexOf(k) >= 0) return false;
+    const v = d[k];
+    return Array.isArray(v) && v.some(r => r && typeof r === 'object' &&
+      (r.unidadeId !== undefined || r.colaboradorId !== undefined || r.cpf !== undefined));
+  });
+
+  /* comum = tudo que sobra depois de tirar as de unidade e as de tratamento próprio */
+  const comum = {};
+  Object.keys(d).forEach(k => {
+    if(COLECOES_UNIDADE.indexOf(k) >= 0 || COLECOES_A_PARTE.indexOf(k) >= 0) return;
+    comum[k] = d[k];
+  });
+
+  const empPorId = {};
+  (d.empresas||[]).forEach(e => { empPorId[e.id] = e; });
+
+  const linhas = new Map();
+  const novaLinha = (unidadeId, unidade, empresa) => {
+    const l = { unidade_id: unidadeId, empresa_id: (empresa && empresa.id) || '',
+                dados: { unidade: unidade || null, empresa: empresa || null } };
+    COLECOES_UNIDADE.forEach(k => { l.dados[k] = []; });
+    linhas.set(unidadeId, l);
+    return l;
+  };
+  (d.unidades||[]).forEach(u => novaLinha(u.id, u, empPorId[u.empresaId] || null));
+
+  let orfaos = 0;
+  COLECOES_UNIDADE.forEach(k => {
+    (d[k] || []).forEach(r => {
+      const uid2 = unidadeDoRegistro(k, r, idx);
+      let l = uid2 ? linhas.get(uid2) : null;
+      /* unidade que não existe mais no cadastro também cai nos órfãos */
+      if(!l){
+        l = linhas.get(UNI_ORFAOS) || novaLinha(UNI_ORFAOS, null, null);
+        orfaos++;
+      }
+      l.dados[k].push(r);
+    });
+  });
+
+  return { comum, linhas: [...linhas.values()], orfaos, naoClassificadas };
+}
+
+/* caminho inverso: devolve a base no MESMO formato que o app sempre usou,
+   para nenhuma tela precisar saber que existe partição */
+function juntarBase(comum, linhas){
+  const d = Object.assign({}, comum || {});
+  COLECOES_UNIDADE.forEach(k => { d[k] = []; });
+  d.empresas = []; d.unidades = [];
+  const vistasEmp = new Set(), vistasUni = new Set();
+  (linhas || []).forEach(l => {
+    const dd = (l && l.dados) || {};
+    if(dd.unidade && !vistasUni.has(dd.unidade.id)){ vistasUni.add(dd.unidade.id); d.unidades.push(dd.unidade); }
+    if(dd.empresa && !vistasEmp.has(dd.empresa.id)){ vistasEmp.add(dd.empresa.id); d.empresas.push(dd.empresa); }
+    COLECOES_UNIDADE.forEach(k => { (dd[k] || []).forEach(r => d[k].push(r)); });
+  });
+  return d;
+}
+
+/* conferência da migração: conta registro a registro os dois lados.
+   Devolve [] quando bate tudo; senão, a lista do que divergiu. */
+function conferirParticao(base, comum, linhas){
+  const junta = juntarBase(comum, linhas);
+  const fora = [];
+  COLECOES_UNIDADE.concat(['empresas','unidades']).forEach(k => {
+    const a = ((base || DB)[k] || []).length, b = (junta[k] || []).length;
+    if(a !== b) fora.push(k + ': ' + a + ' antes, ' + b + ' depois');
+  });
+  return fora;
+}
+
+/* ═══════════ Camada de nuvem no formato partido ═══════════
+   Liga sozinha quando existe ao menos uma linha em atlas_unidade. Enquanto não
+   existir, tudo continua na atlas_estado — é o que torna a virada reversível:
+   basta apagar as linhas novas para o sistema voltar ao formato antigo. */
+let NUVEM_PARTIDA = false;
+
+const agoraISO = () => new Date().toISOString();
+
+/* permissões vindas da tabela: o master recebe todas as linhas, os demais
+   recebem só a própria (quem filtra é a política, não o app) */
+async function nuvemLerAcessos(){
+  if(!nuvemLigada()) return null;
+  try{
+    const { data, error } = await sb.from('atlas_acesso').select('*');
+    if(error){ console.warn('nuvemLerAcessos', error.message); return null; }
+    return data || [];
+  }catch(e){ console.warn('nuvemLerAcessos', e); return null; }
+}
+
+/* devolve { base, linhas } ou null quando ainda não há nada partido */
+async function nuvemLerPartida(){
+  if(!nuvemLigada()) return null;
+  try{
+    const r1 = await sb.from('atlas_unidade').select('unidade_id, empresa_id, dados');
+    if(r1.error){ console.warn('nuvemLerPartida/unidade', r1.error.message); return null; }
+    const linhas = r1.data || [];
+    if(!linhas.length) return null;            /* ainda não migrado */
+    const r2 = await sb.from('atlas_comum').select('dados').eq('id', 1).single();
+    if(r2.error){ console.warn('nuvemLerPartida/comum', r2.error.message); return null; }
+    return { base: juntarBase((r2.data && r2.data.dados) || {}, linhas), linhas };
+  }catch(e){ console.warn('nuvemLerPartida', e); return null; }
+}
+
+/* grava de volta. O comum só o master escreve; as linhas de unidade, quem tem
+   direito a elas — e a própria política do banco recusa o resto. */
+async function nuvemGravarPartida(){
+  if(!nuvemLigada() || !NUVEM_PARTIDA) return { ok:false, motivo:'não está no formato partido' };
+  const p = partirBase(DB);
+  if(p.naoClassificadas.length){
+    /* nunca adivinhar onde enfiar dado que eu não classifiquei */
+    toast('Gravação interrompida: coleção nova não classificada (' +
+          p.naoClassificadas.join(', ') + '). Avise o suporte.', 'erro');
+    return { ok:false, motivo:'coleção não classificada: ' + p.naoClassificadas.join(', ') };
+  }
+  const quem = SESSAO.email || '';
+  try{
+    if(ACESSO.master){
+      const e1 = (await sb.from('atlas_comum')
+        .update({ dados:p.comum, salvo_em:agoraISO(), atualizado_por:quem }).eq('id',1)).error;
+      if(e1) return { ok:false, motivo:'comum: ' + e1.message };
+    }
+    const linhas = p.linhas.map(l => ({ unidade_id:l.unidade_id, empresa_id:l.empresa_id,
+                                        dados:l.dados, salvo_em:agoraISO(), atualizado_por:quem }));
+    const e2 = (await sb.from('atlas_unidade').upsert(linhas, { onConflict:'unidade_id' })).error;
+    if(e2) return { ok:false, motivo:'unidades: ' + e2.message };
+    /* unidade apagada no app tem de sumir do banco — só o master apaga linha */
+    if(ACESSO.master){
+      const vivas = p.linhas.map(l => l.unidade_id);
+      const r = await sb.from('atlas_unidade').select('unidade_id');
+      const sobrando = ((r.data)||[]).map(x => x.unidade_id).filter(id => vivas.indexOf(id) < 0);
+      if(sobrando.length) await sb.from('atlas_unidade').delete().in('unidade_id', sobrando);
+    }
+    return { ok:true, unidades:p.linhas.length };
+  }catch(e){ return { ok:false, motivo:e.message }; }
+}
+
+/* ─── migração: da atlas_estado para o formato partido ───
+   Refazível quantas vezes quiser. Não apaga a atlas_estado. */
+async function migrarParaUnidades(){
+  if(!ACESSO.master){ toast('Só o administrador pode migrar.', 'erro'); return; }
+  if(!nuvemLigada()){ toast('Sem nuvem configurada neste arquivo.', 'erro'); return; }
+  const p = partirBase(DB);
+  if(p.naoClassificadas.length){
+    openInfo('Migração interrompida', `
+      <p class="text-sm text-slate-700">Encontrei coleção que não sei onde guardar:
+        <b>${esc(p.naoClassificadas.join(', '))}</b>.</p>
+      <p class="text-xs text-slate-500 mt-2">Parei de propósito. Classificar errado significaria
+        mandar dado de pessoa para o documento comum, que todo login lê, ou deixar a coleção de
+        fora e ela parar de ser gravada sem ninguém perceber.</p>`);
+    return;
+  }
+  const fora = conferirParticao(DB, p.comum, p.linhas);
+  if(fora.length){
+    openInfo('Migração interrompida', `<p class="text-sm text-slate-700">A conferência não bateu:</p>
+      <ul class="text-xs text-slate-600 mt-2 list-disc pl-5">${fora.map(f=>`<li>${esc(f)}</li>`).join('')}</ul>`);
+    return;
+  }
+  if(!confirm('Migrar ' + p.linhas.length + ' unidade(s) para o formato novo?\n\n' +
+              'A base atual (atlas_estado) NÃO é apagada — ela continua como rede de segurança. ' +
+              'O app só passa a usar o formato novo depois que você recarregar a página.')) return;
+
+  await guardarSnapshotLocal('antes de migrar para o formato por unidade');
+  const quem = SESSAO.email || '';
+  try{
+    const e1 = (await sb.from('atlas_comum')
+      .update({ dados:p.comum, salvo_em:agoraISO(), atualizado_por:quem }).eq('id',1)).error;
+    if(e1) throw new Error('comum: ' + e1.message);
+    const e2 = (await sb.from('atlas_unidade').upsert(
+      p.linhas.map(l => ({ unidade_id:l.unidade_id, empresa_id:l.empresa_id, dados:l.dados,
+                           salvo_em:agoraISO(), atualizado_por:quem })), { onConflict:'unidade_id' })).error;
+    if(e2) throw new Error('unidades: ' + e2.message);
+  }catch(e){ openInfo('Falha ao migrar', `<p class="text-sm text-danger">${esc(e.message)}</p>`); return; }
+
+  /* confere lendo DE VOLTA do banco, não do que eu acabei de montar */
+  const lido = await nuvemLerPartida();
+  if(!lido){ openInfo('Migração gravada, mas não consegui reler', '<p class="text-sm">Recarregue e confira.</p>'); return; }
+  const conf = conferirParticao(DB, {}, lido.linhas);
+  const linhas = COLECOES_UNIDADE.concat(['empresas','unidades']).map(k =>
+    `<tr><td class="px-3 py-1.5">${k}</td>
+         <td class="px-3 py-1.5 text-right">${(DB[k]||[]).length}</td>
+         <td class="px-3 py-1.5 text-right">${(lido.base[k]||[]).length}</td>
+         <td class="px-3 py-1.5">${(DB[k]||[]).length === (lido.base[k]||[]).length
+            ? '<span class="text-emerald-600">confere</span>' : '<span class="text-danger">DIVERGIU</span>'}</td></tr>`).join('');
+  openInfo(conf.length ? 'Migração com divergência' : 'Migração concluída', `
+    <p class="text-sm ${conf.length?'text-danger':'text-emerald-700'}">
+      ${conf.length ? 'Alguma contagem não bateu — NÃO recarregue, me avise.'
+                    : p.linhas.length + ' unidade(s) gravadas e conferidas lendo de volta do banco.'}</p>
+    <p class="text-xs text-slate-500 mt-1">Comparação entre a base em uso agora e o que voltou do banco:</p>
+    <div class="overflow-x-auto border border-slate-200 rounded-lg mt-2">
+      <table class="w-full text-xs"><thead class="bg-slate-50 text-slate-500">
+        <tr><th class="px-3 py-2 text-left">Coleção</th><th class="px-3 py-2 text-right">Agora</th>
+            <th class="px-3 py-2 text-right">No banco</th><th class="px-3 py-2 text-left">Situação</th></tr></thead>
+        <tbody class="divide-y divide-slate-100">${linhas}</tbody></table>
+    </div>
+    ${p.orfaos ? `<p class="text-xs text-amber-700 mt-2">${p.orfaos} registro(s) sem unidade foram para
+      uma linha reservada, visível só para você.</p>` : ''}
+    <p class="text-xs text-slate-500 mt-2">A <b>atlas_estado</b> continua intacta. Recarregue a página
+      para o app passar a usar o formato novo.</p>`, 'max-w-2xl');
 }
 
 /* logo em base64 — reaproveitado na tela de login e no menu do cabeçalho */
@@ -1363,7 +1621,25 @@ function chaveEmail(v){
 }
 function ehMaster(email){ return EMAILS_MASTER.indexOf(chaveEmail(email)) >= 0; }
 
-function acessos(){ DB.acessos = DB.acessos || []; return DB.acessos; }
+/* quando a tabela atlas_acesso responde, ela manda; senão vale o formato
+   antigo (lista dentro do JSON), que é o que existe antes da migração */
+let ACESSOS_NUVEM = null;
+function acessos(){
+  if(ACESSOS_NUVEM) return ACESSOS_NUVEM;
+  DB.acessos = DB.acessos || []; return DB.acessos;
+}
+/* a tabela usa snake_case; o app fala o dialeto dele */
+function acessoDaLinha(r){
+  return { email:r.email, nome:r.nome || '', master:!!r.master,
+           abas:r.abas || [], unidades:r.unidade_ids || [], empresas:[],
+           podeIncluir:!!r.pode_incluir, podeEditar:!!r.pode_editar, podeExcluir:!!r.pode_excluir };
+}
+function linhaDoAcesso(a){
+  return { email:String(a.email||'').trim().toLowerCase(), nome:a.nome || '',
+           master:!!a.master, abas:a.abas || [], unidade_ids:a.unidades || [],
+           pode_incluir:!!a.podeIncluir, pode_editar:!!a.podeEditar, pode_excluir:!!a.podeExcluir,
+           criado_por: SESSAO.email || '' };
+}
 function acessoDe(email){
   const k = chaveEmail(email);
   return acessos().find(a => chaveEmail(a.email) === k) || null;
@@ -1385,14 +1661,27 @@ function carregarAcesso(){
   const r = acessoDe(email);
   ACESSO = { master:false, irrestrito:false, email, semCadastro: !r,
              empresas: (r && r.empresas) || [], unidades: (r && r.unidades) || [],
-             abas: (r && r.abas) || [] };
+             abas: (r && r.abas) || [],
+             podeIncluir: !!(r && r.podeIncluir), podeEditar: !!(r && r.podeEditar),
+             podeExcluir: !!(r && r.podeExcluir) };
 }
 function podeAba(id){
   const m = MENU.find(x => x.id === id);
   if(m && m.master && !ACESSO.master) return false;
   return ACESSO.irrestrito || ACESSO.abas.indexOf(id) >= 0;
 }
-function podeGravar(){ return !!ACESSO.irrestrito; }
+/* No formato partido, gravar é seguro para quem tem verbo: a política do banco
+   só deixa a pessoa escrever nas linhas dela. No formato antigo (documento
+   único), NÃO é: a cópia recortada iria por cima da base inteira — por isso lá
+   só o master grava. */
+function podeGravar(){
+  if(ACESSO.irrestrito) return true;
+  if(!NUVEM_PARTIDA) return false;
+  return !!(ACESSO.podeIncluir || ACESSO.podeEditar || ACESSO.podeExcluir);
+}
+function podeIncluir(){ return ACESSO.irrestrito || !!(NUVEM_PARTIDA && ACESSO.podeIncluir); }
+function podeEditar(){  return ACESSO.irrestrito || !!(NUVEM_PARTIDA && ACESSO.podeEditar); }
+function podeExcluir(){ return ACESSO.irrestrito || !!(NUVEM_PARTIDA && ACESSO.podeExcluir); }
 function abasPermitidas(){ return MENU.filter(m => podeAba(m.id)); }
 
 /* Recorta a cópia em memória para o que o login enxerga. É isto que dispensa
@@ -1460,8 +1749,17 @@ function viewAcessos(){
       <div class="bg-white rounded-xl border border-slate-200">
         <div class="px-4 py-3 border-b border-slate-200 flex flex-wrap gap-2 items-center no-print">
           ${botao('Novo acesso','fa-user-plus','editarAcesso()')}
-          <span class="text-xs text-slate-500 ml-auto">${lista.length} login(s) liberado(s), além do master</span>
+          ${CLOUD_ON && !NUVEM_PARTIDA
+            ? botao('Migrar para o formato por unidade','fa-database','migrarParaUnidades()',
+                    'bg-white border border-amber-300 text-amber-700 hover:bg-amber-50')
+            : ''}
+          <span class="text-xs text-slate-500 ml-auto">${lista.length} login(s) liberado(s), além do master
+            ${CLOUD_ON ? ' · dados ' + (NUVEM_PARTIDA ? 'separados por unidade' : 'em documento único') : ''}</span>
         </div>
+        ${CLOUD_ON && !NUVEM_PARTIDA ? `<div class="px-4 py-3 border-b border-amber-200 bg-amber-50 text-xs text-amber-900">
+          <b>O isolamento por unidade ainda não está valendo.</b> Hoje a base é um documento só, e o recorte
+          é de tela — quem tem login alcança o documento inteiro pela API. Depois de migrar, quem decide
+          o que sai do banco é a política do Postgres. A migração não apaga nada e pode ser refeita.</div>` : ''}
         <div class="overflow-x-auto rounded-b-xl">
           <table class="w-full text-sm data">
             <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
@@ -1508,7 +1806,12 @@ function editarAcesso(email){
         hint:'marcar a empresa já libera todas as unidades dela' },
       { name:'unidades', label:'Unidades avulsas', type:'multi', col:'sm:col-span-2',
         options: opcoesUnidades().map(o => ({ v:o.v, l:o.l })),
-        hint:'para liberar só parte de uma empresa' }
+        hint:'nada é herdado: unidade criada depois precisa ser liberada aqui de novo' },
+      { type:'sep', label:'O que pode fazer' },
+      { name:'podeIncluir', label:'Pode incluir registros novos', type:'checkbox' },
+      { name:'podeEditar',  label:'Pode editar registros existentes', type:'checkbox' },
+      { name:'podeExcluir', label:'Pode excluir registros', type:'checkbox',
+        hint:'sem nenhum destes, a pessoa só visualiza e imprime' }
     ],
     values: a ? Object.assign({}, a) : { abas:[], empresas:[], unidades:[] },
     onSave: v => {
@@ -1519,7 +1822,8 @@ function editarAcesso(email){
       if(outro && (!a || outro !== a)){ toast('Este e-mail já está na lista.', 'erro'); return; }
       if(a) Object.assign(a, v);
       else acessos().push(Object.assign({ criadoEm:new Date().toISOString(), criadoPor:SESSAO.email||'' }, v));
-      save(); closeModal(); go('acessos');
+      gravarAcessos();
+      closeModal(); go('acessos');
       toast('Permissões de ' + v.email + ' salvas.' +
             (!(v.abas||[]).length ? ' Atenção: nenhuma tela marcada — a pessoa não vai ver nada.' : ''),
             (v.abas||[]).length ? 'ok' : 'alerta');
@@ -1530,9 +1834,23 @@ function removerAcesso(email){
   const a = acessoDe(email); if(!a) return;
   if(!confirm('Remover o acesso de ' + a.email + '?\n\nA conta continua existindo no Supabase, mas ao entrar ' +
               'a pessoa não vai mais enxergar nada.')) return;
-  DB.acessos = acessos().filter(x => x !== a);
-  save(); go('acessos');
+  const resto = acessos().filter(x => x !== a);
+  if(ACESSOS_NUVEM){
+    ACESSOS_NUVEM = resto;
+    if(nuvemLigada()) sb.from('atlas_acesso').delete().eq('email', chaveEmail(a.email));
+  }else{
+    DB.acessos = resto; save();
+  }
+  go('acessos');
   toast('Acesso de ' + a.email + ' removido.');
+}
+/* na tabela quando ela existe; senão dentro do JSON, como era antes */
+function gravarAcessos(){
+  if(!ACESSOS_NUVEM){ save(); return; }
+  if(!nuvemLigada()) return;
+  sb.from('atlas_acesso')
+    .upsert(ACESSOS_NUVEM.map(linhaDoAcesso), { onConflict:'email' })
+    .then(r => { if(r && r.error) toast('Não consegui gravar as permissões: ' + r.error.message, 'erro'); });
 }
 
 function telaSemAcesso(){
@@ -9979,7 +10297,13 @@ $('#hojeLabel').textContent = HOJE.toLocaleDateString('pt-BR', { weekday:'long',
   carimboSalvamento();
 
   /* permissões antes da primeira tela: quem é restrito recebe a base já
-     recortada, então nenhuma view precisa saber que existe controle de acesso */
+     recortada, então nenhuma view precisa saber que existe controle de acesso.
+     A tabela atlas_acesso manda quando responde; a política já entrega só a
+     linha da própria pessoa (ou todas, se for o master). */
+  if(CLOUD_ON){
+    const linhas = await comLimite(nuvemLerAcessos(), 8000);
+    if(linhas) ACESSOS_NUVEM = linhas.map(acessoDaLinha);
+  }
   carregarAcesso();
   aplicarEscopoAcesso();
   armarFimDeSessao();
