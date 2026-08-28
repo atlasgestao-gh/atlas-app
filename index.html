@@ -1504,6 +1504,10 @@ const uni    = id => DB.unidades.find(u => u.id === id);
 const emp    = id => DB.empresas.find(e => e.id === id);
 const colab  = id => DB.colaboradores.find(c => c.id === id);
 const uniNome = id => { const u = uni(id); return u ? u.nome : '—'; };
+/* "sem unidade" cobre os dois casos: campo vazio e ponteiro para unidade que
+   não existe mais. O segundo é o mais traiçoeiro — parece preenchido. */
+function unidadeValida(id){ return !!(id && uni(id)); }
+function colabSemUnidade(c){ return !unidadeValida(c && c.unidadeId); }
 const empDaUnidade = id => { const u = uni(id); return u ? emp(u.empresaId) : null; };
 
 /* há um único ASO (vigente) por colaborador; os anteriores ficam em a.historico */
@@ -4550,7 +4554,7 @@ function colabsFiltrados(ignorarCargo){
   return DB.colaboradores.filter(c => {
     const u = uni(c.unidadeId);
     return (!UIColab.emp || (u && u.empresaId === UIColab.emp)) &&
-           (!UIColab.uni || c.unidadeId === UIColab.uni) &&
+           (!UIColab.uni || (UIColab.uni === 'SEM' ? colabSemUnidade(c) : c.unidadeId === UIColab.uni)) &&
            (ignorarCargo || !UIColab.cargos.length || UIColab.cargos.indexOf(cargoDaLista(c)) >= 0) &&
            (!UIColab.revisar || !!c.revisar) &&
            (!UIColab.semCpf || colabSemCpf(c)) &&
@@ -4595,6 +4599,14 @@ function opcoesCargosColabs(){
    fazia nada, só lançava SyntaxError. */
 function setEmpresaColab(v){
   UIColab.emp = v; UIColab.uni = ''; UIColab.page = 1;
+  viewCadastros();
+}
+/* "Sem unidade" precisa limpar a empresa: quem não tem unidade não tem
+   empresa, e o filtro de empresa esconderia justamente quem se quer ver */
+function setUnidadeColab(v){
+  UIColab.uni = v;
+  if(v === 'SEM'){ UIColab.emp = ''; UIColab.status = ''; }
+  UIColab.page = 1;
   viewCadastros();
 }
 function marcarCargoFiltro(v){
@@ -4843,7 +4855,22 @@ function abaColaboradores(){
   const fora = funcoesForaCatalogo();
   const nFora = fora.reduce((s,f) => s + f.n, 0);
   const foraSemMatriz = fora.filter(f => !f.matriz).length;
+  const semUni = DB.colaboradores.filter(colabSemUnidade);
+  const semUniPtr = semUni.filter(c => !!c.unidadeId).length;   /* aponta para unidade apagada */
   $('#abaCad').innerHTML = `
+  ${semUni.length ? `<div class="mb-4 rounded-xl border border-red-300 bg-red-50 px-5 py-4 flex items-start gap-3">
+      <i class="fa-solid fa-location-dot text-red-500 mt-0.5"></i>
+      <div class="text-sm text-red-800 flex-1">
+        <p class="font-semibold">${semUni.length} colaborador(es) sem unidade${
+          semUniPtr ? ` — ${semUniPtr} apontando para unidade que não existe mais` : ''}</p>
+        <p class="text-xs mt-1">Sem unidade eles ficam fora de qualquer filtro por empresa, fora do faturamento
+          e fora do recorte de acesso — ninguém que enxerga por unidade consegue vê-los. Abra cada ficha e
+          informe a empresa/unidade.</p>
+      </div>
+      <button onclick="setUnidadeColab('SEM')"
+        class="px-3 py-1.5 rounded-lg text-xs bg-red-500 text-white hover:opacity-90 whitespace-nowrap shrink-0">
+        <i class="fa-solid fa-filter mr-1"></i>Ver quem são</button>
+    </div>` : ''}
   ${fora.length ? `<div class="mb-4 rounded-xl border border-orange-300 bg-orange-50 px-5 py-4 flex items-start gap-3">
       <i class="fa-solid fa-briefcase text-orange-500 mt-0.5"></i>
       <div class="text-sm text-orange-900 flex-1">
@@ -4890,7 +4917,10 @@ function abaColaboradores(){
       <div class="grid grid-cols-12 gap-2">
       ${inputBusca('bCol','Buscar por nome, CPF, função ou e-mail...','UIColab.q=this.value;UIColab.page=1;viewCadastros();focarBusca(&quot;bCol&quot;)', UIColab.q, COL4)}
       ${selectFiltro('fColE','Todas as empresas', opcoesEmpresas(), 'setEmpresaColab(this.value)', UIColab.emp, COL4)}
-      ${selectFiltro('fColU','Todas as unidades', opcoesUnidades().filter(o => !UIColab.emp || (uni(o.v)||{}).empresaId===UIColab.emp), 'UIColab.uni=this.value;UIColab.page=1;viewCadastros()', UIColab.uni, COL4)}
+      ${selectFiltro('fColU','Todas as unidades',
+        opcoesUnidades().filter(o => !UIColab.emp || (uni(o.v)||{}).empresaId===UIColab.emp)
+          .concat(semUni.length ? [{ v:'SEM', l:'Sem unidade (' + semUni.length + ')' }] : []),
+        'setUnidadeColab(this.value)', UIColab.uni, COL4)}
       ${filtroMulti({ id:'fColC', label:'Todos os cargos', plural:'cargos', icon:'fa-id-badge', cls:COL4,
         opcoes:opcoesCargosColabs(), selecionados:UIColab.cargos,
         aberto:UIColab.cargoAberto, busca:UIColab.cargoBusca, phBusca:'Filtrar cargos...',
@@ -4931,7 +4961,10 @@ function abaColaboradores(){
               <td class="px-4 py-3 text-xs whitespace-nowrap">${colabSemCpf(c)
                   ? `<span class="px-1.5 py-0.5 rounded bg-amber-100 text-amber-800" title="${esc(criticaCpf(c.cpf))} — abra a ficha e preencha"><i class="fa-solid fa-triangle-exclamation mr-1"></i>${esc(c.cpf || 'sem CPF')}</span>`
                   : `<span class="text-slate-600">${esc(c.cpf)}</span>`}</td>
-              <td class="px-4 py-3 text-xs text-slate-600">${esc(uniNome(c.unidadeId))}</td>
+              <td class="px-4 py-3 text-xs">${colabSemUnidade(c)
+                  ? `<span class="px-1.5 py-0.5 rounded bg-red-100 text-red-800" title="${c.unidadeId
+                      ? 'Aponta para uma unidade que não existe mais' : 'Nenhuma unidade informada'}"><i class="fa-solid fa-location-dot mr-1"></i>sem unidade</span>`
+                  : `<span class="text-slate-600">${esc(uniNome(c.unidadeId))}</span>`}</td>
               <td class="px-4 py-3 text-xs">${!c.funcao
                   ? '<span class="text-slate-400">—</span>'
                   : colabForaCatalogo(c, oficiais)
@@ -5439,7 +5472,11 @@ function editarColab(id, pre){
       { name:'telefone', label:'Telefone fixo / recado' },
       { name:'email', label:'E-mail', type:'email', col:'sm:col-span-2' },
       { type:'sep', label:'Vínculo' },
-      { name:'unidadeId', label:'Empresa / unidade', type:'select', options:opcoesUnidades().map(o=>({v:o.v,l:o.l})), req:true },
+      /* a opção vazia na frente é obrigatória: sem ela, ficha sem unidade abre
+         mostrando a PRIMEIRA da lista e salvar mudava a pessoa de unidade em
+         silêncio. Com ela, o req:true força uma escolha consciente. */
+      { name:'unidadeId', label:'Empresa / unidade', type:'select', req:true,
+        options:[{v:'',l:'— selecione —'}].concat(opcoesUnidades().map(o=>({v:o.v,l:o.l}))) },
       { name:'funcao', label:'Função / cargo', type:'select', options:opcoesCargo },
       { name:'admissao', label:'Data de admissão', type:'date' },
       { name:'status', label:'Status', type:'select', options:['Ativo','Afastado','Desligado','Inativo'].map(s=>({v:s,l:s})) },
