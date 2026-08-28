@@ -184,6 +184,7 @@ function fimSessao(sess){ return inicioSessao(sess) + SESSAO_MAX_MS; }
 async function encerrarPorTempo(){
   clearTimeout(SESSAO.timerFim);
   try{ if(podeGravar()) await nuvemGravarJa(); }catch(e){}
+  try{ await limparCopiasLocais(); }catch(e){}
   try{ await sb.auth.signOut(); }catch(e){}
   location.reload();
 }
@@ -601,8 +602,22 @@ function mostrarLogin(msg){
 async function sairNuvem(){
   if(!confirm('Encerrar a sessão e sair?')) return;
   try{ if(CLOUD_ON) await nuvemGravarJa(); }catch(e){}
+  await limparCopiasLocais();
   try{ if(CLOUD_ON) await sb.auth.signOut(); }catch(e){}
   location.reload();
+}
+
+/* LGPD: sair tem de levar o dado embora do navegador. Sem isto, a base fica
+   no IndexedDB e no localStorage de qualquer máquina onde alguém entrou —
+   inclusive computador compartilhado. Na nuvem os dados continuam intactos;
+   o próximo login baixa tudo de novo. */
+async function limparCopiasLocais(){
+  if(!CLOUD_ON) return;   /* modo local: o navegador É o banco, apagar seria perder tudo */
+  try{ await idbSet('db', null); }catch(e){}
+  try{ localStorage.removeItem(STORE_KEY); }catch(e){}
+  /* pontos de retorno guardam base inteira: só o master mantém o histórico
+     dele na própria máquina; para os demais, nada de resto de cliente */
+  if(!ACESSO.master){ try{ await idbSet('snapshots', []); }catch(e){} }
 }
 
 /* ---------- menu do usuário no cabeçalho (colapsável) ----------
@@ -972,13 +987,23 @@ async function bootStorage(){
     if(raw) doLs = JSON.parse(raw);
   }catch(e){}
 
+  /* Cópia local RECORTADA (gerente com acesso a algumas unidades) não pode
+     competir com a base inteira: o mesmo navegador é usado por gente
+     diferente, e carregar o recorte de outro faria o próximo salvamento
+     publicar uma base truncada por cima da boa. Só vale a cópia parcial de
+     quem está logado agora. */
+  const meuRecorte = d => {
+    const m = (d && d.meta) || {};
+    if(m.escopo !== 'parcial') return true;
+    return chaveEmail(m.salvoPor) === chaveEmail(SESSAO.email);
+  };
   /* vence a cópia com o carimbo de salvamento mais recente */
   const candidatos = [
     { fonte:'nuvem', d:doNuvem },
     { fonte:'arquivo no Drive', d:doArquivo },
     { fonte:'IndexedDB', d:doIdb },
     { fonte:'localStorage', d:doLs }
-  ].filter(x => baseValida(x.d));
+  ].filter(x => baseValida(x.d) && (x.fonte === 'nuvem' || meuRecorte(x.d)));
 
   if(!candidatos.length){
     DB = seedFresh();
@@ -1048,6 +1073,11 @@ function save(opts){
   }
   DB.meta = DB.meta || {};
   DB.meta.salvoEm = new Date().toISOString();
+  /* carimbo de dono e de escopo: as cópias locais são compartilhadas por quem
+     usa o mesmo navegador, e uma base RECORTADA de um gerente não pode ser
+     confundida com a base inteira no arranque seguinte */
+  DB.meta.salvoPor = SESSAO.email || '';
+  DB.meta.escopo   = ACESSO.irrestrito ? 'total' : 'parcial';
 
   idbSet('db', DB);                                   /* camada 2 — imediata */
   try{ localStorage.setItem(STORE_KEY, JSON.stringify(DB)); }   /* camada 3 */
