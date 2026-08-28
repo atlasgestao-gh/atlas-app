@@ -3338,21 +3338,24 @@ function funcaoCanonica(funcao){
 }
 
 /* ══════════ Função fora do catálogo ══════════
-   "Fora do catálogo" = ninguém cadastrou a função em Cargos. Ou ela não existe
-   lá de jeito nenhum, ou existe só como variação de escrita colhida de uma
-   planilha (importado:true) — que é grafia, não cargo. Sem cargo próprio não há
-   CBO, nem descrição de atividades, nem matriz de exames: o agendamento fica
-   sem saber o que pedir para aquela pessoa. */
+   "Fora do catálogo" = a função escrita na ficha não chega a cargo nenhum em
+   Cargos, nem direto nem pelos sinônimos. Aí não há CBO, nem descrição de
+   atividades, nem matriz: o agendamento fica sem saber o que pedir.
+
+   NÃO conta o marcador `importado`. Ele só registra que o cargo nasceu de uma
+   planilha em vez de ter sido digitado — e cargo nascido assim é cargo igual,
+   com CBO e matriz (Auxiliar de Cozinha · 5135-05 é um deles). Duplicata de
+   grafia é problema de arrumação do catálogo, não é o que este aviso procura. */
 function catalogoOficial(){
   const s = new Set();
-  (DB.cargos||[]).forEach(c => { if(!c.importado) s.add(norm(c.funcao)); });
+  (DB.cargos||[]).forEach(c => s.add(norm(c.funcao)));
   return s;
 }
 function funcaoForaCatalogo(funcao, oficiais){
   if(!funcao) return false;
   const of = oficiais || catalogoOficial();
-  /* atalho: se a grafia do cadastro já é a de um cargo oficial, nem precisa
-     resolver o canônico (isso roda para a base inteira a cada render) */
+  /* atalho: se a grafia da ficha já é a de um cargo, nem precisa resolver o
+     canônico (isso roda para a base inteira a cada render) */
   if(of.has(norm(funcao))) return false;
   return !of.has(norm(funcaoCanonica(funcao)));
 }
