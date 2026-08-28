@@ -3892,7 +3892,7 @@ function temExameRestrito(matriz, tipos){
 /* ═══════════════════════════ 4. CADASTROS ═══════════════════════════ */
 const UICad = { aba:'colaboradores' };
 const UIColab = { q:'', emp:'', uni:'', cargos:[], cargoAberto:false, cargoBusca:'',
-                  status:'Ativo', sexo:'', page:1, revisar:false };
+                  status:'Ativo', sexo:'', page:1, revisar:false, semCpf:false };
 
 function viewCadastros(){
   const abas = [
@@ -3922,6 +3922,7 @@ function colabsFiltrados(ignorarCargo){
            (!UIColab.uni || c.unidadeId === UIColab.uni) &&
            (ignorarCargo || !UIColab.cargos.length || UIColab.cargos.indexOf(cargoDaLista(c)) >= 0) &&
            (!UIColab.revisar || !!c.revisar) &&
+           (!UIColab.semCpf || colabSemCpf(c)) &&
            (!UIColab.status || c.status === UIColab.status) &&
            (!UIColab.sexo || (UIColab.sexo === 'SEM' ? !c.sexo : c.sexo === UIColab.sexo)) &&
            (!q || norm(c.nome + c.cpf + c.funcao + c.email).includes(q));
@@ -4023,7 +4024,13 @@ function mensagemVazioColabs(){
 }
 function limparFiltrosColabs(){
   UIColab.emp=''; UIColab.uni=''; UIColab.cargos=[]; UIColab.cargoAberto=false; UIColab.cargoBusca='';
-  UIColab.status=''; UIColab.sexo=''; UIColab.revisar=false; UIColab.page=1;
+  UIColab.status=''; UIColab.sexo=''; UIColab.revisar=false; UIColab.semCpf=false; UIColab.page=1;
+  viewCadastros();
+}
+/* o botão do aviso abre a lista em quem está sem CPF — limpando o status, senão
+   os desligados (metade dos casos) ficariam escondidos pelo filtro padrão */
+function filtrarSemCpf(ligar){
+  UIColab.semCpf = ligar; UIColab.status = ''; UIColab.revisar = false; UIColab.page = 1;
   viewCadastros();
 }
 function paginaColabs(p){ UIColab.page = p; viewCadastros(); }
@@ -4141,7 +4148,20 @@ function abaColaboradores(){
   const { itens:lista, p } = paginar(todos, UIColab.page);
 
   const nRev = colabsParaRevisar().length;
+  const semCpf = DB.colaboradores.filter(colabSemCpf);
+  const semCpfAtivos = semCpf.filter(c => !colabInativo(c)).length;
   $('#abaCad').innerHTML = `
+  ${semCpf.length ? `<div class="mb-4 rounded-xl border border-amber-300 bg-amber-50 px-5 py-4 flex items-start gap-3">
+      <i class="fa-solid fa-id-card text-amber-500 mt-0.5"></i>
+      <div class="text-sm text-amber-900 flex-1">
+        <p class="font-semibold">${semCpf.length} cadastro(s) sem CPF válido${
+          semCpfAtivos !== semCpf.length ? ` — ${semCpfAtivos} ativo(s)` : ''}</p>
+        <p class="text-xs mt-1">O CPF é o que identifica a pessoa no eSocial e o que impede duas fichas para o mesmo funcionário. Abra cada ficha e preencha — o campo passou a ser obrigatório para salvar.</p>
+      </div>
+      <button onclick="filtrarSemCpf(${UIColab.semCpf?'false':'true'})"
+        class="px-3 py-1.5 rounded-lg text-xs ${UIColab.semCpf?'bg-slate-600':'bg-amber-500'} text-white hover:opacity-90 whitespace-nowrap shrink-0">
+        <i class="fa-solid fa-filter mr-1"></i>${UIColab.semCpf?'Mostrar todos':'Ver só quem está sem CPF'}</button>
+    </div>` : ''}
   ${nRev ? `<div class="mb-4 rounded-xl border border-red-300 bg-red-50 px-5 py-4 flex items-start gap-3">
       <i class="fa-solid fa-user-pen text-red-500 mt-0.5"></i>
       <div class="text-sm text-red-800 flex-1">
@@ -4174,7 +4194,7 @@ function abaColaboradores(){
         ? botao('Definir sexo pelo nome ('+DB.colaboradores.filter(c=>!c.sexo).length+')','fa-venus-mars','preencherSexoPorNome()',
                 'bg-white border border-amber-300 text-amber-700 hover:bg-amber-50')
         : ''}
-      ${(UIColab.emp||UIColab.uni||UIColab.cargos.length||UIColab.status||UIColab.sexo||UIColab.revisar)
+      ${(UIColab.emp||UIColab.uni||UIColab.cargos.length||UIColab.status||UIColab.sexo||UIColab.revisar||UIColab.semCpf)
         ? botao('Limpar filtros','fa-filter-circle-xmark','limparFiltrosColabs()','bg-white border border-amber-300 text-amber-700 hover:bg-amber-50')
         : ''}
       ${botao('Definir contato em lote','fa-address-book','definirContatoEmLote()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
@@ -4196,7 +4216,9 @@ function abaColaboradores(){
               <td class="px-4 py-3"><p class="font-medium text-slate-700">${esc(c.nome)}
                   ${c.revisar?`<span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 whitespace-nowrap" title="${esc(c.origemAuto||'cadastro criado automaticamente')} — complete os dados e salve"><i class="fa-solid fa-user-pen mr-0.5"></i>revisar</span>`:''}</p>
                   <p class="text-[11px] text-slate-500">${c.nascimento?'Nasc. '+fmtDate(c.nascimento):''}</p></td>
-              <td class="px-4 py-3 text-xs text-slate-600 whitespace-nowrap">${esc(c.cpf||'—')}</td>
+              <td class="px-4 py-3 text-xs whitespace-nowrap">${colabSemCpf(c)
+                  ? `<span class="px-1.5 py-0.5 rounded bg-amber-100 text-amber-800" title="${esc(criticaCpf(c.cpf))} — abra a ficha e preencha"><i class="fa-solid fa-triangle-exclamation mr-1"></i>${esc(c.cpf || 'sem CPF')}</span>`
+                  : `<span class="text-slate-600">${esc(c.cpf)}</span>`}</td>
               <td class="px-4 py-3 text-xs text-slate-600">${esc(uniNome(c.unidadeId))}</td>
               <td class="px-4 py-3 text-xs text-slate-600">${esc(c.funcao||'—')}</td>
               <td class="px-4 py-3 text-xs text-slate-500">
@@ -4346,7 +4368,10 @@ function analisarImpColabs(){
     novos: itens.filter(x => !x.existente).length,
     atualizados: itens.filter(x => x.existente).length,
     comAso: itens.filter(x => !x.existente && (x.ultimoExame || x.vencimento)).length,
-    foraCatalogo: itens.filter(x => x.funcao && !catalogo[norm(x.funcao)]).length
+    foraCatalogo: itens.filter(x => x.funcao && !catalogo[norm(x.funcao)]).length,
+    /* linha nova sem CPF vira ficha sem CPF — o cadastro manual já não deixa,
+       a planilha ainda deixa, então pelo menos avisa antes de confirmar */
+    semCpf: itens.filter(x => !x.existente && criticaCpf(x.cpf)).length
   };
 }
 
@@ -4357,13 +4382,15 @@ function previaImpColabs(){
   const kpi = (n, l, destaque) => `<div class="bg-slate-50 rounded-lg p-3 text-center">
     <p class="text-xl font-semibold ${destaque||'text-slate-700'}">${n}</p><p class="text-[11px] text-slate-500">${l}</p></div>`;
   alvo.innerHTML = `
-    <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+    <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
       ${kpi(a.novos, 'novos colaboradores', 'text-accent')}
       ${kpi(a.atualizados, 'já cadastrados (atualizar)')}
       ${kpi(a.comAso, 'ASOs a criar')}
+      ${kpi(a.semCpf, 'novos sem CPF válido', a.semCpf?'text-amber-600':'')}
       ${kpi(a.foraCatalogo, 'função fora do catálogo', a.foraCatalogo?'text-amber-600':'')}
     </div>
     <p class="text-[11px] text-slate-400 mt-2">Colunas reconhecidas: ${a.colunas.join(', ') || 'nenhuma'}.
+      ${a.semCpf ? '<b class="text-amber-600">Entram sem CPF e ficam marcados na lista de colaboradores</b> — o ideal é completar a planilha antes. ' : ''}
       ${a.foraCatalogo ? 'Funções fora do catálogo entram mesmo assim e ficam marcadas na matriz de exames como pendentes.' : ''}</p>
     <div class="max-h-40 overflow-y-auto border border-slate-200 rounded-lg mt-2">
       <table class="w-full text-xs"><thead class="bg-slate-50 text-slate-500 sticky top-0">
@@ -4434,6 +4461,26 @@ async function aplicarImpColabs(){
 const STATUS_INATIVOS = ['Desligado','Inativo'];
 function colabInativo(c){ return STATUS_INATIVOS.indexOf(c && c.status) >= 0; }
 function cpfDigitos(v){ return String(v||'').replace(/\D/g,''); }
+/* dígitos verificadores — pega o número trocado antes de ele virar rejeição no
+   eSocial, que devolve o evento inteiro quando o CPF não fecha */
+function cpfValido(v){
+  const d = cpfDigitos(v);
+  if(d.length !== 11 || /^(\d)\1{10}$/.test(d)) return false;
+  for(let casa = 9; casa <= 10; casa++){
+    let soma = 0;
+    for(let i = 0; i < casa; i++) soma += Number(d[i]) * (casa + 1 - i);
+    if((soma * 10) % 11 % 10 !== Number(d[casa])) return false;
+  }
+  return true;
+}
+/* '' quando está tudo certo; senão devolve o motivo já escrito para mostrar */
+function criticaCpf(v){
+  const d = cpfDigitos(v);
+  if(!d) return 'sem CPF';
+  if(d.length !== 11) return 'CPF incompleto (' + d.length + ' de 11 dígitos)';
+  return cpfValido(d) ? '' : 'CPF inválido — os dígitos verificadores não fecham';
+}
+function colabSemCpf(c){ return !!criticaCpf(c && c.cpf); }
 /* só procura com CPF completo: 3 ou 4 dígitos casariam com meio mundo */
 function colabPorCpf(cpf, ignorarId){
   const d = cpfDigitos(cpf);
@@ -4583,7 +4630,7 @@ function editarColab(id, pre){
     fields: [
       { type:'sep', label:'Dados pessoais' },
       { name:'nome', label:'Nome completo', req:true, col:'sm:col-span-2' },
-      { name:'cpf', label:'CPF' },
+      { name:'cpf', label:'CPF', req:true, hint:'identifica a pessoa no eSocial — sem ele não dá para salvar' },
       { type:'painel', name:'avisoCpf', col:'sm:col-span-2' },
       { name:'rg', label:'RG' },
       { name:'nascimento', label:'Data de nascimento', type:'date' },
@@ -4614,7 +4661,22 @@ function editarColab(id, pre){
       pintar();
       /* avisa já na digitação do CPF, antes de a pessoa preencher a ficha inteira */
       const inpCpf = form.elements['cpf'], boxCpf = form.querySelector('#avisoCpf');
-      const olharCpf = () => {
+      let tocouCpf = false;
+      const olharCpf = aoSair => {
+        /* número inválido vem antes de número repetido: o repetido some sozinho
+           quando o CPF certo for digitado */
+        const critica = criticaCpf(inpCpf.value);
+        if(critica){
+          /* enquanto digita, só reclama quando o número já fechou 11 dígitos —
+             senão a ficha acusaria erro a cada tecla. E ficha nova ainda intocada
+             não leva bronca antes de a pessoa começar */
+          const cabe = (tocouCpf || !!c) && (aoSair || cpfDigitos(inpCpf.value).length === 11);
+          boxCpf.innerHTML = cabe
+            ? `<div class="rounded-lg border border-amber-300 bg-amber-50 text-amber-900 px-3 py-2 text-xs">
+                 <i class="fa-solid fa-triangle-exclamation mr-1"></i>${esc(critica.charAt(0).toUpperCase() + critica.slice(1))} — obrigatório para salvar a ficha.</div>`
+            : '';
+          return;
+        }
         const dup = colabPorCpf(inpCpf.value, c ? c.id : null);
         if(!dup){ boxCpf.innerHTML = ''; return; }
         const inativo = colabInativo(dup);
@@ -4625,9 +4687,10 @@ function editarColab(id, pre){
           ${inativo ? 'Ao salvar, o sistema vai oferecer a reativação desta ficha.'
                     : 'Não será possível criar uma segunda ficha com este CPF.'}</div>`;
       };
-      inpCpf.addEventListener('input', olharCpf);
-      inpCpf.addEventListener('change', olharCpf);
-      olharCpf();
+      inpCpf.addEventListener('input', () => { tocouCpf = true; olharCpf(false); });
+      inpCpf.addEventListener('change', () => { tocouCpf = true; olharCpf(true); });
+      inpCpf.addEventListener('blur', () => olharCpf(true));
+      olharCpf(true);
       /* botão extra: salva o cadastro e já abre a solicitação de ASO */
       const foot = document.getElementById('modalFoot');
       if(foot && !document.getElementById('btnSolicitarAso')){
@@ -4641,6 +4704,10 @@ function editarColab(id, pre){
     },
     onSave: (v, extra) => {
       v.nome = maiusc(v.nome);
+      /* CPF errado é pior que CPF em branco: vira rejeição no eSocial e ficha
+         duplicada aqui, porque a busca por duplicado não casa com ele */
+      const critica = criticaCpf(v.cpf);
+      if(critica){ toast(critica.charAt(0).toUpperCase() + critica.slice(1) + '. Corrija para salvar a ficha.', 'erro'); return; }
       /* o mesmo CPF em duas fichas divide exames, ASOs e faturamento — barra antes */
       if(barradoPorCpfDuplicado(v, c ? c.id : null)) return;
       let eco = '';
