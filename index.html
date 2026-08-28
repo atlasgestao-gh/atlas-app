@@ -1816,10 +1816,18 @@ function emissoesPendentesFornecedor(){
       return (a.dataClinico || '9999').localeCompare(b.dataClinico || '9999');
     });
 }
+/* Tipos que não se repetem na renovação: o próximo exame volta a ser Periódico.
+   Demissional porque encerra o vínculo; Monitoramento porque é uma checagem
+   avulsa — quem fez um não deve ter o ASO anual renovado só com o clínico. */
+const TIPOS_NAO_RENOVAM = ['DEMISSIONAL'].concat(TIPOS_SO_CLINICO);
+function proximoTipoExame(aso){
+  const t = aso && aso.tipo;
+  return (!t || TIPOS_NAO_RENOVAM.indexOf(t) >= 0) ? 'PERIODICO' : t;
+}
 function agendarDeAlerta(colaboradorId){
   const c = colab(colaboradorId);
-  const a = asoVigente(colaboradorId);
-  novaEmissao({ colaborador:c.nome, unidadeId:c.unidadeId, tipoExame: a && a.tipo === 'DEMISSIONAL' ? 'PERIODICO' : (a ? a.tipo : 'PERIODICO') });
+  novaEmissao({ colaborador:c.nome, unidadeId:c.unidadeId,
+                tipoExame: proximoTipoExame(asoVigente(colaboradorId)) });
 }
 
 /* ═══════════════════════ 1b. ACOMPANHAMENTOS ═══════════════════════
