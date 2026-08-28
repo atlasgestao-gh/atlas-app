@@ -146,6 +146,9 @@ const PALETA = {
 const STORE_KEY = 'atlas_sst_v1';
 let DB = null;
 let charts = {};
+/* declarado aqui em cima porque save() consulta o acesso e é definido bem antes
+   do módulo de permissões. Padrão = irrestrito: o build local não tem login. */
+let ACESSO = { master:true, irrestrito:true, email:'', empresas:[], unidades:[], abas:[] };
 
 /* ═══════════════════════════════════════════════════════════════
    NUVEM (Supabase) — camada 0 / fonte da verdade quando ligada.
@@ -162,6 +165,35 @@ const sb = CLOUD_ON ? window.supabase.createClient(SUPA_URL, SUPA_ANON,
 async function nuvemSessao(){ try{ return (await sb.auth.getSession()).data.session; }catch(e){ return null; } }
 async function nuvemUsuario(){ try{ return (await sb.auth.getUser()).data.user; }catch(e){ return null; } }
 
+/* ---------- tempo máximo de sessão ----------
+   O token do Supabase se renova sozinho, então `expires_at` anda para a frente
+   e nunca chegaria ao fim. A âncora tem de ser o login de verdade
+   (`last_sign_in_at`), que só muda quando a pessoa digita a senha de novo. */
+const SESSAO_MAX_MS = 6 * 60 * 60 * 1000;   /* 6 horas */
+function inicioSessao(sess){
+  const u = sess && sess.user;
+  const t = Date.parse((u && u.last_sign_in_at) || '');
+  if(!isNaN(t)) return t;
+  return sess && sess.expires_at && sess.expires_in
+    ? (sess.expires_at - sess.expires_in) * 1000 : Date.now();
+}
+function fimSessao(sess){ return inicioSessao(sess) + SESSAO_MAX_MS; }
+async function encerrarPorTempo(){
+  clearTimeout(SESSAO.timerFim);
+  try{ if(podeGravar()) await nuvemGravarJa(); }catch(e){}
+  try{ await sb.auth.signOut(); }catch(e){}
+  location.reload();
+}
+/* dispara no minuto exato do fim; reagenda em fatias porque setTimeout longo
+   não é confiável quando a máquina hiberna */
+function armarFimDeSessao(){
+  if(!CLOUD_ON || !SESSAO.expiraEm) return;
+  clearTimeout(SESSAO.timerFim);
+  const falta = SESSAO.expiraEm - Date.now();
+  if(falta <= 0){ encerrarPorTempo(); return; }
+  SESSAO.timerFim = setTimeout(armarFimDeSessao, Math.min(falta, 60000));
+}
+
 async function nuvemLer(){
   if(!CLOUD_ON) return null;
   try{
@@ -174,6 +206,7 @@ async function nuvemLer(){
 let _nuvemTimer = null, _nuvemGravando = false, _nuvemPend = false;
 async function nuvemGravarJa(){
   if(!CLOUD_ON) return;
+  if(!podeGravar()) return;   /* trava final: nada de restrito escrever na nuvem */
   if(_nuvemGravando){ _nuvemPend = true; return; }
   _nuvemGravando = true;
   try{
@@ -306,7 +339,7 @@ async function sairNuvem(){
 
 /* ---------- menu do usuário no cabeçalho (colapsável) ----------
    Mostra quem está logado, há quanto tempo, quando a sessão expira e o botão Sair. */
-const SESSAO = { inicio:null, expira:null, email:'', timer:null };
+const SESSAO = { inicio:null, expira:null, expiraEm:null, email:'', timer:null, timerFim:null };
 function duracaoHumana(ms){
   if(ms == null || ms < 0) return '—';
   const min = Math.floor(ms/60000), h = Math.floor(min/60), d = Math.floor(h/24);
@@ -330,9 +363,9 @@ function atualizarTempoLogado(){
   const el = document.getElementById('tempoLogado');
   if(el && SESSAO.inicio) el.textContent = duracaoHumana(Date.now() - SESSAO.inicio);
   const ex = document.getElementById('sessaoExpira');
-  if(ex && SESSAO.expira){
-    const falta = SESSAO.expira - Date.now();
-    ex.textContent = falta > 0 ? 'expira em ' + duracaoHumana(falta) : 'sessão expirada — recarregue';
+  if(ex && SESSAO.expiraEm){
+    const falta = SESSAO.expiraEm - Date.now();
+    ex.textContent = falta > 0 ? 'em ' + duracaoHumana(falta) : 'agora — recarregue';
   }
 }
 async function montarMenuUsuario(){
@@ -341,12 +374,12 @@ async function montarMenuUsuario(){
   const sess = await nuvemSessao();
   const u = sess && sess.user;
   if(!u) return;
-  SESSAO.email  = u.email || '';
-  /* início real da sessão: o token guarda quando foi emitido */
-  SESSAO.inicio = sess.expires_at && sess.expires_in
-    ? (sess.expires_at - sess.expires_in) * 1000
-    : Date.parse(u.last_sign_in_at || '') || Date.now();
-  SESSAO.expira = sess.expires_at ? sess.expires_at * 1000 : null;
+  SESSAO.email    = u.email || '';
+  SESSAO.inicio   = inicioSessao(sess);
+  SESSAO.expiraEm = fimSessao(sess);
+  /* o que a pessoa vê é o limite de 6h, não a validade do token (que se renova) */
+  SESSAO.expira   = SESSAO.expiraEm;
+  armarFimDeSessao();
   const inicial = (SESSAO.email[0] || '?').toUpperCase();
   const apelido = SESSAO.email.split('@')[0] || 'usuário';
   box.innerHTML = `
@@ -371,12 +404,17 @@ async function montarMenuUsuario(){
           <span id="tempoLogado" class="font-semibold text-slate-700">—</span>
         </div>
         <div class="flex items-center justify-between gap-2">
-          <span class="text-slate-500"><i class="fa-solid fa-hourglass-half w-4 mr-1"></i>Renovação</span>
+          <span class="text-slate-500"><i class="fa-solid fa-hourglass-half w-4 mr-1"></i>Pede login de novo</span>
           <span id="sessaoExpira" class="text-slate-500">—</span>
         </div>
         <div class="flex items-center justify-between gap-2">
           <span class="text-slate-500"><i class="fa-solid fa-cloud w-4 mr-1"></i>Dados</span>
           <span class="text-emerald-600 font-medium">nuvem privada</span>
+        </div>
+        <div class="flex items-center justify-between gap-2">
+          <span class="text-slate-500"><i class="fa-solid fa-user-shield w-4 mr-1"></i>Acesso</span>
+          <span class="font-medium ${ACESSO.master?'text-slate-700':'text-amber-600'}">${
+            ACESSO.master ? 'total (master)' : 'restrito · somente leitura'}</span>
         </div>
         <div class="flex items-center justify-between gap-2">
           <span class="text-slate-500"><i class="fa-regular fa-floppy-disk w-4 mr-1"></i>Último salvamento</span>
@@ -729,7 +767,17 @@ async function lerArquivoDados(){
 /* ---------- gravação ---------- */
 let timerArquivo = null;
 
+let _avisouLeitura = 0;
 function save(opts){
+  /* acesso restrito trabalha sobre uma cópia recortada da base: gravar
+     publicaria esse recorte por cima dos dados de todo mundo */
+  if(!podeGravar()){
+    if(Date.now() - _avisouLeitura > 3000){
+      _avisouLeitura = Date.now();
+      toast('Seu acesso é somente leitura — nada foi gravado.', 'alerta');
+    }
+    return;
+  }
   DB.meta = DB.meta || {};
   DB.meta.salvoEm = new Date().toISOString();
 
@@ -749,6 +797,8 @@ function save(opts){
 
 /* grava imediatamente — usado antes de ações destrutivas e ao fechar a aba */
 async function gravarTudo(o){
+  /* nem nas camadas locais: a cópia recortada não pode virar a base do navegador */
+  if(!podeGravar()) return;
   await idbSet('db', DB);
   if(FS.permissao && o && o.arquivo) await gravarArquivo();
 }
@@ -1281,9 +1331,213 @@ const MENU = [
   { id:'atestados',   label:'Atestados e NR-01',   icon:'fa-file-medical',      sub:'Absenteísmo, riscos psicossociais e relatório de monitoramento' },
   { id:'faturamento', label:'Faturamento',         icon:'fa-file-invoice-dollar', sub:'Fechamento mensal, cobrança e e-mail' },
   { id:'documentos',  label:'Documentos',          icon:'fa-file-pen',          sub:'Ofícios, orçamentos e comunicados no papel timbrado' },
-  { id:'backup',      label:'Backup e segurança',  icon:'fa-shield-halved',     sub:'Onde os dados estão gravados e como recuperá-los' }
+  { id:'backup',      label:'Backup e segurança',  icon:'fa-shield-halved',     sub:'Onde os dados estão gravados e como recuperá-los' },
+  { id:'acessos',     label:'Acessos e permissões', icon:'fa-user-shield',      sub:'Quem entra no app e o que cada login enxerga', master:true }
 ];
 let rota = 'dashboard';
+
+/* ═══════════════════ Acessos por login ═══════════════════
+   Todo e-mail novo entra SEM permissão nenhuma: não vê aba, empresa nem
+   unidade até o master liberar. O master é fixo no código de propósito —
+   permissão que se concede a si mesma não é permissão.
+
+   LIMITE, para não haver ilusão: isto é recorte de tela. O app roda inteiro no
+   navegador e lê UM documento JSON no Supabase, então quem tem login e
+   conhecimento técnico ainda alcança o documento completo pela API. Isolamento
+   de verdade (o B1 da LGPD) exige separar os dados por cliente no banco, com
+   RLS por usuário. Por isso o restrito entra em SOMENTE LEITURA: ele trabalha
+   sobre uma cópia recortada, e gravar publicaria esse recorte por cima da base
+   de todo mundo. */
+const EMAIL_MASTER = 'gestao@atlasgestao.com.br';
+/* compara sem acento e sem caixa: "gestão@" e "gestao@" são o mesmo login */
+function chaveEmail(v){
+  return String(v||'').normalize('NFD').replace(/[̀-ͯ]/g,'').trim().toLowerCase();
+}
+function ehMaster(email){ return chaveEmail(email) === EMAIL_MASTER; }
+
+function acessos(){ DB.acessos = DB.acessos || []; return DB.acessos; }
+function acessoDe(email){
+  const k = chaveEmail(email);
+  return acessos().find(a => chaveEmail(a.email) === k) || null;
+}
+const ACESSO_TOTAL = email => ({ master:true, irrestrito:true, email:email||'',
+                                 empresas:[], unidades:[], abas:[] });
+function carregarAcesso(){
+  const email = SESSAO.email || '';
+  /* sem login não há a quem restringir — é o build local, que roda aberto.
+     A restrição segue o LOGIN, não o modo de build: assim a lógica é a mesma
+     nos dois e dá para testar de verdade. */
+  if(!email && !CLOUD_ON){ ACESSO = ACESSO_TOTAL(''); return; }
+  if(ehMaster(email)){ ACESSO = ACESSO_TOTAL(email); return; }
+  const r = acessoDe(email);
+  ACESSO = { master:false, irrestrito:false, email, semCadastro: !r,
+             empresas: (r && r.empresas) || [], unidades: (r && r.unidades) || [],
+             abas: (r && r.abas) || [] };
+}
+function podeAba(id){
+  const m = MENU.find(x => x.id === id);
+  if(m && m.master && !ACESSO.master) return false;
+  return ACESSO.irrestrito || ACESSO.abas.indexOf(id) >= 0;
+}
+function podeGravar(){ return !!ACESSO.irrestrito; }
+function abasPermitidas(){ return MENU.filter(m => podeAba(m.id)); }
+
+/* Recorta a cópia em memória para o que o login enxerga. É isto que dispensa
+   cada tela de lembrar de filtrar: o dado simplesmente não está lá. */
+function aplicarEscopoAcesso(){
+  if(ACESSO.irrestrito) return;
+  const unis = new Set(ACESSO.unidades);
+  /* liberar a empresa libera todas as unidades dela */
+  (DB.unidades||[]).forEach(u => { if(ACESSO.empresas.indexOf(u.empresaId) >= 0) unis.add(u.id); });
+  /* e a unidade liberada arrasta a empresa dela, senão a tela fica sem o nome */
+  const emps = new Set(ACESSO.empresas);
+  (DB.unidades||[]).forEach(u => { if(unis.has(u.id)) emps.add(u.empresaId); });
+
+  DB.unidades      = (DB.unidades||[]).filter(u => unis.has(u.id));
+  DB.empresas      = (DB.empresas||[]).filter(e => emps.has(e.id));
+  DB.colaboradores = (DB.colaboradores||[]).filter(c => unis.has(c.unidadeId));
+  const colabs = new Set(DB.colaboradores.map(c => c.id));
+  const cpfs   = new Set(DB.colaboradores.map(c => cpfDigitos(c.cpf)).filter(Boolean));
+
+  DB.emissoes  = (DB.emissoes ||[]).filter(x => unis.has(x.unidadeId));
+  DB.asos      = (DB.asos     ||[]).filter(x => x.colaboradorId ? colabs.has(x.colaboradorId) : unis.has(x.unidadeId));
+  DB.laudos    = (DB.laudos   ||[]).filter(x => unis.has(x.unidadeId));
+  DB.visitas   = (DB.visitas  ||[]).filter(x => unis.has(x.unidadeId));
+  DB.atestados = (DB.atestados||[]).filter(x => unis.has(x.unidadeId));
+  DB.documentos  = (DB.documentos ||[]).filter(x => !x.unidadeId || unis.has(x.unidadeId));
+  DB.docsOficiais= (DB.docsOficiais||[]).filter(x => !x.unidadeId || unis.has(x.unidadeId));
+  /* eventos do eSocial carregam CPF: só ficam os das pessoas visíveis */
+  ['esocial2220','esocial2240'].forEach(k => {
+    DB[k] = (DB[k]||[]).filter(x => cpfs.has(cpfDigitos(x.cpf)));
+  });
+  /* a lista de logins é assunto do master */
+  DB.acessos = [];
+}
+
+/* ─── tela do master: quem entra e o que cada um enxerga ─── */
+function viewAcessos(){
+  if(!ACESSO.master){ telaSemAcesso(); return; }
+  const lista = acessos().slice().sort((a,b) => chaveEmail(a.email).localeCompare(chaveEmail(b.email)));
+  const resumoUnis = a => {
+    const nEmp = (a.empresas||[]).length, nUni = (a.unidades||[]).length;
+    if(!nEmp && !nUni) return '<span class="text-red-600">nada liberado</span>';
+    const p = [];
+    if(nEmp) p.push(nEmp + ' empresa(s) inteira(s)');
+    if(nUni) p.push(nUni + ' unidade(s)');
+    return esc(p.join(' + '));
+  };
+  const resumoAbas = a => {
+    const n = (a.abas||[]).length;
+    if(!n) return '<span class="text-red-600">nenhuma tela</span>';
+    return esc(MENU.filter(m => (a.abas||[]).indexOf(m.id) >= 0).map(m => m.label).join(', '));
+  };
+  $('#view').innerHTML = `
+    <div class="space-y-4">
+      <div class="rounded-xl border border-blue-200 bg-blue-50 px-5 py-4 text-sm text-blue-900 flex items-start gap-3">
+        <i class="fa-solid fa-circle-info mt-0.5"></i>
+        <div>
+          <p class="font-semibold">Todo login novo começa sem enxergar nada.</p>
+          <p class="text-xs mt-1">Criar a conta é feito no painel do Supabase (Authentication → Users);
+            aqui você diz o que aquele e-mail pode ver. Enquanto o e-mail não estiver nesta lista,
+            a pessoa entra e vê apenas um aviso de acesso não liberado.</p>
+          <p class="text-xs mt-1">Quem está nesta lista trabalha em <b>somente leitura</b> — consulta e imprime,
+            não grava. <b>${esc(EMAIL_MASTER)}</b> é o acesso total e não pode ser removido.</p>
+        </div>
+      </div>
+      <div class="bg-white rounded-xl border border-slate-200">
+        <div class="px-4 py-3 border-b border-slate-200 flex flex-wrap gap-2 items-center no-print">
+          ${botao('Novo acesso','fa-user-plus','editarAcesso()')}
+          <span class="text-xs text-slate-500 ml-auto">${lista.length} login(s) liberado(s), além do master</span>
+        </div>
+        <div class="overflow-x-auto rounded-b-xl">
+          <table class="w-full text-sm data">
+            <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
+              <tr><th class="px-4 py-3">E-mail</th><th class="px-4 py-3">Pessoa</th>
+                  <th class="px-4 py-3">Empresas e unidades</th><th class="px-4 py-3">Telas</th>
+                  <th class="px-4 py-3 text-right no-print">Ações</th></tr></thead>
+            <tbody class="divide-y divide-slate-100">
+              ${lista.length ? lista.map(a => `
+                <tr class="hover:bg-slate-50 align-top">
+                  <td class="px-4 py-3 font-medium text-slate-700 break-all">${esc(a.email)}</td>
+                  <td class="px-4 py-3 text-xs text-slate-600">${esc(a.nome||'—')}</td>
+                  <td class="px-4 py-3 text-xs text-slate-600">${resumoUnis(a)}</td>
+                  <td class="px-4 py-3 text-xs text-slate-600">${resumoAbas(a)}</td>
+                  <td class="px-4 py-3 text-right whitespace-nowrap no-print">
+                    <button onclick="editarAcesso('${esc(a.email)}')" class="text-slate-400 hover:text-accent px-1.5"
+                      title="Editar permissões"><i class="fa-solid fa-pen"></i></button>
+                    <button onclick="removerAcesso('${esc(a.email)}')" class="text-slate-400 hover:text-danger px-1.5"
+                      title="Remover o acesso"><i class="fa-solid fa-trash"></i></button>
+                  </td></tr>`).join('')
+                : vazio('Nenhum acesso liberado ainda — só o master entra.')}
+            </tbody></table>
+        </div>
+      </div>
+    </div>`;
+}
+
+function editarAcesso(email){
+  const a = email ? acessoDe(email) : null;
+  openForm({
+    title: a ? 'Permissões de ' + a.email : 'Novo acesso',
+    largura: 'max-w-4xl',
+    fields: [
+      { name:'email', label:'E-mail do login', req:true, col:'sm:col-span-2',
+        hint:'exatamente o e-mail criado no Supabase (Authentication → Users)' },
+      { name:'nome', label:'Pessoa / cargo', col:'sm:col-span-2', ph:'Ex.: Alessandra — RH Emerald' },
+      { type:'sep', label:'Telas que pode abrir' },
+      { name:'abas', label:'Menu lateral', type:'multi', col:'sm:col-span-2',
+        options: MENU.filter(m => !m.master).map(m => ({ v:m.id, l:m.label })),
+        hint:'sem nenhuma marcada, a pessoa entra e não vê tela nenhuma' },
+      { type:'sep', label:'O que pode enxergar' },
+      { name:'empresas', label:'Empresas inteiras', type:'multi', col:'sm:col-span-2',
+        options: (DB.empresas||[]).slice().sort((x,y) => x.nome.localeCompare(y.nome,'pt-BR'))
+                   .map(e => ({ v:e.id, l:e.nome })),
+        hint:'marcar a empresa já libera todas as unidades dela' },
+      { name:'unidades', label:'Unidades avulsas', type:'multi', col:'sm:col-span-2',
+        options: opcoesUnidades().map(o => ({ v:o.v, l:o.l })),
+        hint:'para liberar só parte de uma empresa' }
+    ],
+    values: a ? Object.assign({}, a) : { abas:[], empresas:[], unidades:[] },
+    onSave: v => {
+      v.email = String(v.email||'').trim();
+      if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v.email)){ toast('E-mail inválido.', 'erro'); return; }
+      if(ehMaster(v.email)){ toast('Este é o e-mail master — ele já tem acesso total.', 'alerta'); return; }
+      const outro = acessoDe(v.email);
+      if(outro && (!a || outro !== a)){ toast('Este e-mail já está na lista.', 'erro'); return; }
+      if(a) Object.assign(a, v);
+      else acessos().push(Object.assign({ criadoEm:new Date().toISOString(), criadoPor:SESSAO.email||'' }, v));
+      save(); closeModal(); go('acessos');
+      toast('Permissões de ' + v.email + ' salvas.' +
+            (!(v.abas||[]).length ? ' Atenção: nenhuma tela marcada — a pessoa não vai ver nada.' : ''),
+            (v.abas||[]).length ? 'ok' : 'alerta');
+    }
+  });
+}
+function removerAcesso(email){
+  const a = acessoDe(email); if(!a) return;
+  if(!confirm('Remover o acesso de ' + a.email + '?\n\nA conta continua existindo no Supabase, mas ao entrar ' +
+              'a pessoa não vai mais enxergar nada.')) return;
+  DB.acessos = acessos().filter(x => x !== a);
+  save(); go('acessos');
+  toast('Acesso de ' + a.email + ' removido.');
+}
+
+function telaSemAcesso(){
+  $('#pageTitle').textContent = 'Sem acesso liberado';
+  $('#pageSub').textContent = 'Peça ao administrador para liberar o que você precisa ver';
+  $('#nav').innerHTML = '';
+  $('#view').innerHTML = `
+    <div class="bg-white rounded-xl border border-slate-200 p-10 text-center max-w-xl mx-auto">
+      <i class="fa-solid fa-user-lock text-3xl text-slate-300 mb-3"></i>
+      <p class="text-sm font-semibold text-slate-700">Este login ainda não tem permissão</p>
+      <p class="text-xs text-slate-500 mt-2">Você entrou como <b>${esc(ACESSO.email || '—')}</b>, mas nenhuma
+        empresa, unidade ou tela foi liberada para esta conta.</p>
+      <p class="text-xs text-slate-500 mt-2">Peça a liberação a quem administra o Atlas
+        (<b>${esc(EMAIL_MASTER)}</b>), em <i>Acessos e permissões</i>.</p>
+      <button onclick="sairNuvem()" class="mt-4 px-4 py-2 rounded-lg text-sm bg-slate-100 hover:bg-slate-200">
+        <i class="fa-solid fa-right-from-bracket mr-1"></i>Sair da conta</button>
+    </div>`;
+}
 
 /* contadores que viram badge vermelha no menu lateral */
 function badgeMenu(id){
@@ -1294,15 +1548,19 @@ function badgeMenu(id){
                 title="${id==='cadastros'?'cadastros criados automaticamente aguardando revisão':'exames sem colaborador cadastrado'}">${n}</span>` : '';
 }
 function renderNav(){
-  $('#nav').innerHTML = MENU.map(m => `
+  $('#nav').innerHTML = abasPermitidas().map(m => `
     <button onclick="go('${m.id}')" data-rota="${m.id}"
       class="nav-item w-full text-left px-3 py-2.5 rounded-lg hover:bg-white/10 flex items-center gap-3 ${rota===m.id?'active':''}">
       <i class="fa-solid ${m.icon} w-4 text-slate-400"></i><span>${m.label}</span>${badgeMenu(m.id)}
     </button>`).join('');
 }
 function go(id){
+  /* rota fora da permissão cai na primeira liberada; sem nenhuma, tela de aviso */
+  const livres = abasPermitidas();
+  if(!livres.length){ telaSemAcesso(); return; }
+  let m = livres.find(x => x.id === id);
+  if(!m){ m = livres[0]; id = m.id; }
   rota = id;
-  const m = MENU.find(x => x.id === id) || MENU[0];
   $('#pageTitle').textContent = m.label;
   $('#pageSub').textContent = m.sub;
   renderNav();
@@ -1310,7 +1568,8 @@ function go(id){
   charts = {};
   ({ dashboard:viewDashboard, acompanhamentos:viewAcompanhamentos, empresas:viewEmpresas, laudos:viewLaudos, cadastros:viewCadastros,
      exames:viewExames, asos:viewAsos, visitas:viewVisitas, atestados:viewAtestados,
-     faturamento:viewFaturamento, documentos:viewDocumentos, backup:viewBackup })[id]();
+     faturamento:viewFaturamento, documentos:viewDocumentos, backup:viewBackup,
+     acessos:viewAcessos })[id]();
   renderBanner();
   if(window.innerWidth < 1024) fecharSidebar();
   window.scrollTo(0,0);
@@ -9676,6 +9935,17 @@ $('#hojeLabel').textContent = HOJE.toLocaleDateString('pt-BR', { weekday:'long',
   if(CLOUD_ON){
     const sess = await nuvemSessao();
     if(!sess){ mostrarLogin(); return; }
+    /* sessão mais velha que o limite: derruba antes de carregar qualquer dado */
+    if(Date.now() >= fimSessao(sess)){
+      try{ await sb.auth.signOut(); }catch(e){}
+      mostrarLogin('Sua sessão passou de ' + (SESSAO_MAX_MS/3600000) + ' horas. Entre de novo.');
+      return;
+    }
+    /* o e-mail precisa estar em mãos ANTES de recortar a base */
+    SESSAO.email    = (sess.user && sess.user.email) || '';
+    SESSAO.inicio   = inicioSessao(sess);
+    SESSAO.expiraEm = fimSessao(sess);
+    SESSAO.expira   = SESSAO.expiraEm;
   }
 
   try{
@@ -9690,6 +9960,13 @@ $('#hojeLabel').textContent = HOJE.toLocaleDateString('pt-BR', { weekday:'long',
               'vá em "Backup e segurança" e restaure a partir de um arquivo antes de continuar.'));
   }
   carimboSalvamento();
+
+  /* permissões antes da primeira tela: quem é restrito recebe a base já
+     recortada, então nenhuma view precisa saber que existe controle de acesso */
+  carregarAcesso();
+  aplicarEscopoAcesso();
+  armarFimDeSessao();
+
   go('dashboard');
 
   /* menu do usuário no cabeçalho (substitui o antigo botão "Sair" flutuante) */
