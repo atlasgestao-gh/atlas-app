@@ -476,11 +476,21 @@ function mesLabel(ym){
    coluna nas matrizes, nos ASOs e nas emissões já gravadas — trocar a chave
    obrigaria a migrar toda a base sem ganho nenhum. Só o rótulo mudou. */
 const TIPOS = {
-  ADMISSIONAL:'Admissional', PERIODICO:'Periódico', DEMISSIONAL:'Demissional',
-  RETORNO:'Retorno ao Trabalho', TROCA_FUNCAO:'Mudança de Risco'
+  ADMISSIONAL:'Admissional', PERIODICO:'Periódico', MONITORAMENTO:'Monitoramento',
+  DEMISSIONAL:'Demissional', RETORNO:'Retorno ao Trabalho', TROCA_FUNCAO:'Mudança de Risco'
 };
 const TIPO_MUDANCA_RISCO = 'TROCA_FUNCAO';
 const tipoLabel = t => TIPOS[t] || (t === 'MUDANCA_RISCO' ? TIPOS.TROCA_FUNCAO : (t ? t : '—'));
+
+/* Monitoramento segue as mesmas regras do periódico (validade de um ano, gera
+   ASO, entra no faturamento), com uma diferença: NÃO tem exame laboratorial
+   nenhum — é só o exame clínico, igual para toda função e toda unidade. Por
+   isso não ganha coluna na matriz: não há o que configurar por cargo.
+   Consequências que caem daqui: cobra sempre a tabela de ASO clínico, custa
+   só o clínico, e não emite carteirinha sanitária (que depende de exames
+   laboratoriais que este tipo não faz). */
+const TIPOS_SO_CLINICO = ['MONITORAMENTO'];
+function tipoSoClinico(tipo){ return TIPOS_SO_CLINICO.indexOf(tipo || '') >= 0; }
 
 /* mantido só para ler bases antigas — a falta virou situação no fluxo */
 const COMPARECIMENTO = [
@@ -3055,15 +3065,29 @@ function matrizDaFuncao(funcao){
   }
   return { matriz:null, via:'' };
 }
+/* nome do exame clínico como está no catálogo (as bases usam "Exame clínico"
+   ou "Avaliação clínica"); é ele que entra no custo e no Monitoramento */
+function nomeExameClinico(){
+  const e = (DB.exames||[]).find(x => ehExameClinico(x.nome));
+  return e ? e.nome : 'Exame clínico';
+}
 function examesDaFuncao(funcao, tipo){
+  /* Monitoramento não consulta matriz: é sempre só o clínico, qualquer cargo */
+  if(tipoSoClinico(tipo)) return [nomeExameClinico()];
   const { matriz } = matrizDaFuncao(funcao);
   if(!matriz) return [];
   return (matriz[tipo] || []).slice();
 }
+/* as bases escrevem o clínico das duas formas — reconhecer só uma delas fazia
+   "Avaliação clínica" ser tratada como laboratorial */
+function ehExameClinico(nome){
+  const n = norm(nome);
+  return n.includes('EXAMECLINICO') || n.includes('AVALIACAOCLINICA');
+}
 /* separa o que é exame clínico do que é laboratorial/complementar */
 function separaExames(lista){
   const clinicos = [], labs = [];
-  (lista||[]).forEach(x => (norm(x).includes('EXAMECLINICO') ? clinicos : labs).push(x));
+  (lista||[]).forEach(x => (ehExameClinico(x) ? clinicos : labs).push(x));
   return { clinicos, labs };
 }
 
@@ -3266,7 +3290,9 @@ function migrarPrecos(d){
 /* ─── carteirinha sanitária ───
    Exigida quando a FUNÇÃO está marcada na unidade, ou quando o cargo exige
    em qualquer unidade. Demissional nunca gera carteirinha. */
-const TIPOS_SEM_CARTEIRINHA = ['DEMISSIONAL'];
+/* Demissional não gera carteirinha; Monitoramento também não, porque a
+   carteirinha depende dos exames laboratoriais que ele não faz. */
+const TIPOS_SEM_CARTEIRINHA = ['DEMISSIONAL'].concat(TIPOS_SO_CLINICO);
 function tipoAceitaCarteirinha(tipo){ return !TIPOS_SEM_CARTEIRINHA.includes(tipo || ''); }
 
 /* exames laboratoriais obrigatórios para emitir a carteirinha sanitária */
@@ -3379,7 +3405,9 @@ function custoExame(nome, mes){
 }
 
 /* preço cobrado da unidade, respeitando override por unidade */
-function temLaboratorial(e){ return !!(e.exameLab||'').trim(); }
+/* Monitoramento nunca tem laboratorial — mesmo que sobre texto no campo
+   (tipo trocado depois de preenchido), ele cobra e custa como clínico puro */
+function temLaboratorial(e){ return !tipoSoClinico(e.tipoExame) && !!(e.exameLab||'').trim(); }
 function precoAso(unidadeId, comLab, mes){ return precoNoMes(mes, unidadeId, comLab ? 'asoLab' : 'asoClinico'); }
 function precoLaudo(unidadeId, mes){ return precoNoMes(mes, unidadeId, 'laudo'); }
 function precoVisita(unidadeId, mes){ return precoNoMes(mes, unidadeId, 'visita'); }
@@ -3402,8 +3430,9 @@ function custoEmissao(e, mes){
   if(naoCompareceu(e)) return 0;
   const m = mes !== undefined ? mes : e.fechamento;
   let total = 0;
-  const clin = DB.exames.find(x => norm(x.nome).includes('EXAMECLINICO') || norm(x.nome).includes('AVALIACAOCLINICA'));
+  const clin = DB.exames.find(x => ehExameClinico(x.nome));
   if(clin) total += custoExame(clin.nome, m);
+  if(tipoSoClinico(e.tipoExame)) return total;   /* monitoramento: só o clínico */
   (e.exameLab||'').split(/[\/;+]/).map(s => s.trim()).filter(Boolean).forEach(nome => {
     total += custoExame(nome, m);
   });
@@ -3800,8 +3829,16 @@ function painelMatriz(funcao, opcoes){
       ${cartNoTipo
         ? `<p class="mt-1 text-teal-700">Exames obrigatórios da carteirinha:
              <b>${EXAMES_CARTEIRINHA.join(' · ')}</b></p>`
-        : `<p class="mt-1 text-teal-700"><i class="fa-solid fa-circle-info mr-1"></i>Demissional não gera carteirinha.</p>`}
+        : `<p class="mt-1 text-teal-700"><i class="fa-solid fa-circle-info mr-1"></i>${esc(TIPOS[o.tipo]||'Este tipo')} não gera carteirinha.</p>`}
     </div>` : '';
+  /* Monitoramento não tem matriz por cargo: a lista é fixa e igual para todos */
+  if(tipoSoClinico(o.tipo)){
+    return `<div class="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-900">
+      <p class="font-medium mb-1"><i class="fa-solid fa-stethoscope mr-1"></i>Monitoramento — só exame clínico</p>
+      <p class="text-blue-800">Vale para todas as funções e todas as unidades: <b>${esc(nomeExameClinico())}</b>
+        com o médico credenciado, sem nenhum exame laboratorial.</p>
+    </div>` + avisoCart;
+  }
   if(!matriz){
     return `<div class="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-800">
       <p class="font-medium"><i class="fa-solid fa-triangle-exclamation mr-1"></i>Sem matriz de exames para "${esc(funcao)}".</p>
@@ -5026,6 +5063,13 @@ function abaMatriz(){
               onClick:"UIMatriz.pend='pendente';UIMatriz.page=1;viewCadastros()"})}
     </div>
 
+    <div class="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-xs text-blue-900 flex items-start gap-2 no-print">
+      <i class="fa-solid fa-stethoscope mt-0.5"></i>
+      <p><b>Monitoramento não aparece nesta matriz</b> — e não precisa aparecer: ele é sempre
+        só o <b>${esc(nomeExameClinico())}</b>, igual para todas as funções e todas as unidades,
+        sem nenhum exame laboratorial. Nada a cadastrar por cargo.</p>
+    </div>
+
     <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
       <div class="px-4 py-3 border-b border-slate-200 flex flex-wrap gap-2 items-center no-print">
         ${inputBusca('bMtz','Buscar função, CBO ou exame...','UIMatriz.q=this.value;UIMatriz.page=1;viewCadastros();focarBusca(&quot;bMtz&quot;)', UIMatriz.q)}
@@ -5512,7 +5556,17 @@ function ligarMatrizEmissao(form, preencherAuto, autoUnidade){
     const c = Object.assign({}, cReal, { funcao: fEf, unidadeId: (selUni && selUni.value) || cReal.unidadeId });
     const { aplicaveis, restritos } = examesParaColaborador(c, tipo);
     const { clinicos, labs } = separaExames(aplicaveis);
-    const acao = aplicaveis.length
+    /* Monitoramento não faz laboratorial: esvazia e tranca o campo, para que
+       nenhum exame sobrando de outro tipo acabe cobrado como ASO com lab */
+    if(txtLab){
+      const soClin = tipoSoClinico(tipo);
+      txtLab.readOnly = soClin;
+      txtLab.classList.toggle('bg-slate-100', soClin);
+      txtLab.classList.toggle('text-slate-500', soClin);
+      txtLab.placeholder = soClin ? 'Monitoramento não faz exame laboratorial' : '';
+      if(soClin) txtLab.value = '';
+    }
+    const acao = aplicaveis.length && !tipoSoClinico(tipo)
       ? `<button type="button" id="btnAplicarMatriz"
            class="mt-2 px-3 py-1.5 rounded-lg text-xs bg-accent text-white hover:bg-blue-700">
            <i class="fa-solid fa-wand-magic-sparkles mr-1"></i>Aplicar aos exames laboratoriais</button>
