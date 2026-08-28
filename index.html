@@ -4427,6 +4427,89 @@ async function aplicarImpColabs(){
         `Um ponto de retorno ficou em "Backup e segurança".`);
 }
 
+/* ══════════ CPF já cadastrado: avisa antes de criar um duplicado ══════════
+   Um CPF é de uma pessoa só. Antes de gravar uma ficha nova (ou de trocar o CPF
+   de uma existente) o sistema procura o número na base inteira — inclusive nos
+   desligados, que é justamente onde ninguém olha antes de cadastrar de novo. */
+const STATUS_INATIVOS = ['Desligado','Inativo'];
+function colabInativo(c){ return STATUS_INATIVOS.indexOf(c && c.status) >= 0; }
+function cpfDigitos(v){ return String(v||'').replace(/\D/g,''); }
+/* só procura com CPF completo: 3 ou 4 dígitos casariam com meio mundo */
+function colabPorCpf(cpf, ignorarId){
+  const d = cpfDigitos(cpf);
+  if(d.length !== 11) return null;
+  return DB.colaboradores.find(c => c.id !== ignorarId && cpfDigitos(c.cpf) === d) || null;
+}
+/* leva os dados digitados na ficha para o cadastro que já existia, sem apagar
+   o que ele já tinha e sem tocar no status (quem decide isso é a reativação) */
+function aproveitarDadosDigitados(c, v){
+  ['nome','rg','nascimento','sexo','celular','telefone','email','funcao','unidadeId','admissao','afastamento']
+    .forEach(k => { if((v[k]||'') !== '') c[k] = v[k]; });
+}
+/* o que a pessoa digitou fica aqui entre o aviso e a decisão — serializar isso
+   dentro do onclick quebraria em nome com apóstrofo */
+let _dadosDigitadosCpf = null;
+function reativarColaborador(id){
+  const c = colab(id); if(!c) return;
+  const dados = _dadosDigitadosCpf; _dadosDigitadosCpf = null;
+  if(dados) aproveitarDadosDigitados(c, dados);
+  c.status = 'Ativo';
+  delete c.revisar; delete c.origemAuto;
+  save(); closeModal();
+  UICad.aba = 'colaboradores'; UIColab.status = ''; UIColab.q = c.nome; UIColab.page = 1;
+  viewCadastros();
+  toast(c.nome + ' foi reativado e os dados digitados foram aplicados à ficha existente.', 'ok');
+}
+function abrirFichaExistente(id){ closeModal(); editarColab(id); }
+/* devolve true quando barrou o salvamento e assumiu a conversa com a pessoa */
+function barradoPorCpfDuplicado(v, ignorarId){
+  const dup = colabPorCpf(v.cpf, ignorarId);
+  if(!dup) return false;
+  const u = uniNome(dup.unidadeId);
+  const ficha = `<div class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs text-slate-700 mt-3">
+      <p class="font-semibold text-sm text-slate-800">${esc(dup.nome)}</p>
+      <p class="mt-0.5">CPF ${esc(dup.cpf||'—')} · ${esc(dup.funcao||'sem função')} · ${esc(u)}</p>
+      <p class="mt-0.5">Situação atual: <b>${esc(dup.status||'—')}</b>${dup.admissao?' · admitido em '+fmtDate(dup.admissao):''}</p>
+    </div>`;
+  _dadosDigitadosCpf = v;
+
+  if(colabInativo(dup)){
+    openInfo('CPF já cadastrado — reativar?', `
+      <div class="p-5">
+        <div class="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          <p class="font-semibold"><i class="fa-solid fa-circle-question mr-1"></i>Este CPF já tem cadastro, hoje ${esc((dup.status||'').toLowerCase())}.</p>
+          <p class="text-xs mt-1">Criar outra ficha deixaria o mesmo CPF em dois cadastros e o histórico de ASOs dividido entre eles.
+            O certo é <b>reativar a ficha que já existe</b> — ela volta a Ativo e recebe os dados que você acabou de digitar.</p>
+        </div>
+        ${ficha}
+        <div class="flex flex-wrap justify-end gap-2 mt-4">
+          <button onclick="closeModal()" class="px-4 py-2 rounded-lg text-sm border border-slate-300 text-slate-600 hover:bg-slate-50">Cancelar</button>
+          <button onclick="abrirFichaExistente('${dup.id}')" class="px-4 py-2 rounded-lg text-sm border border-slate-300 text-slate-700 hover:bg-slate-50">
+            <i class="fa-solid fa-folder-open mr-1"></i>Abrir a ficha sem reativar</button>
+          <button onclick="reativarColaborador('${dup.id}')" class="px-4 py-2 rounded-lg text-sm bg-emerald-600 text-white hover:bg-emerald-700">
+            <i class="fa-solid fa-rotate-left mr-1"></i>Reativar ${esc(dup.nome.split(' ')[0])}</button>
+        </div>
+      </div>`, 'max-w-xl');
+    return true;
+  }
+
+  openInfo('CPF já cadastrado', `
+    <div class="p-5">
+      <div class="rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800">
+        <p class="font-semibold"><i class="fa-solid fa-circle-exclamation mr-1"></i>Este CPF já pertence a um cadastro ${esc((dup.status||'').toLowerCase())}.</p>
+        <p class="text-xs mt-1">Não dá para criar uma segunda ficha com o mesmo CPF: os exames, os ASOs e o faturamento
+          passariam a se dividir entre as duas. Se a pessoa mudou de unidade ou de cargo, altere a ficha existente.</p>
+      </div>
+      ${ficha}
+      <div class="flex flex-wrap justify-end gap-2 mt-4">
+        <button onclick="closeModal()" class="px-4 py-2 rounded-lg text-sm border border-slate-300 text-slate-600 hover:bg-slate-50">Cancelar</button>
+        <button onclick="abrirFichaExistente('${dup.id}')" class="px-4 py-2 rounded-lg text-sm bg-accent text-white hover:bg-blue-700">
+          <i class="fa-solid fa-folder-open mr-1"></i>Abrir a ficha de ${esc(dup.nome.split(' ')[0])}</button>
+      </div>
+    </div>`, 'max-w-xl');
+  return true;
+}
+
 /* Define e-mail/telefone de uma vez para TODA a lista filtrada na tela.
    Nasceu do caso da SDU - E: a importação reaproveita cadastros antigos e traz
    junto o contato deles, e corrigir um a um é inviável. Só mexe em quem está
@@ -4501,6 +4584,7 @@ function editarColab(id, pre){
       { type:'sep', label:'Dados pessoais' },
       { name:'nome', label:'Nome completo', req:true, col:'sm:col-span-2' },
       { name:'cpf', label:'CPF' },
+      { type:'painel', name:'avisoCpf', col:'sm:col-span-2' },
       { name:'rg', label:'RG' },
       { name:'nascimento', label:'Data de nascimento', type:'date' },
       { name:'sexo', label:'Sexo', type:'select', req:true,
@@ -4528,6 +4612,22 @@ function editarColab(id, pre){
       selSexo.addEventListener('change', pintar);
       selUni.addEventListener('change', pintar);
       pintar();
+      /* avisa já na digitação do CPF, antes de a pessoa preencher a ficha inteira */
+      const inpCpf = form.elements['cpf'], boxCpf = form.querySelector('#avisoCpf');
+      const olharCpf = () => {
+        const dup = colabPorCpf(inpCpf.value, c ? c.id : null);
+        if(!dup){ boxCpf.innerHTML = ''; return; }
+        const inativo = colabInativo(dup);
+        boxCpf.innerHTML = `<div class="rounded-lg border px-3 py-2 text-xs ${inativo
+            ? 'border-amber-300 bg-amber-50 text-amber-900' : 'border-red-300 bg-red-50 text-red-800'}">
+          <i class="fa-solid fa-${inativo?'circle-question':'circle-exclamation'} mr-1"></i>
+          Este CPF já é de <b>${esc(dup.nome)}</b> (${esc(dup.status||'—')} · ${esc(uniNome(dup.unidadeId))}).
+          ${inativo ? 'Ao salvar, o sistema vai oferecer a reativação desta ficha.'
+                    : 'Não será possível criar uma segunda ficha com este CPF.'}</div>`;
+      };
+      inpCpf.addEventListener('input', olharCpf);
+      inpCpf.addEventListener('change', olharCpf);
+      olharCpf();
       /* botão extra: salva o cadastro e já abre a solicitação de ASO */
       const foot = document.getElementById('modalFoot');
       if(foot && !document.getElementById('btnSolicitarAso')){
@@ -4541,6 +4641,8 @@ function editarColab(id, pre){
     },
     onSave: (v, extra) => {
       v.nome = maiusc(v.nome);
+      /* o mesmo CPF em duas fichas divide exames, ASOs e faturamento — barra antes */
+      if(barradoPorCpfDuplicado(v, c ? c.id : null)) return;
       let eco = '';
       const eraNovo = !c;
       if(c){
