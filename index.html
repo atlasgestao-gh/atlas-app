@@ -1348,12 +1348,20 @@ let rota = 'dashboard';
    RLS por usuário. Por isso o restrito entra em SOMENTE LEITURA: ele trabalha
    sobre uma cópia recortada, e gravar publicaria esse recorte por cima da base
    de todo mundo. */
-const EMAIL_MASTER = 'gestao@atlasgestao.com.br';
+/* Todos os endereços que valem como master. São vários de propósito: o domínio
+   existe com e sem .br, e o "gestão" às vezes é escrito com acento. Fixar um só
+   já trancou a dona do sistema para fora uma vez — se um dia mudar o endereço,
+   ACRESCENTE aqui, não substitua. */
+const EMAILS_MASTER = [
+  'gestao@atlasgestao.com',
+  'gestao@atlasgestao.com.br'
+];
+const EMAIL_MASTER = EMAILS_MASTER[0];   /* o que aparece nas mensagens */
 /* compara sem acento e sem caixa: "gestão@" e "gestao@" são o mesmo login */
 function chaveEmail(v){
   return String(v||'').normalize('NFD').replace(/[̀-ͯ]/g,'').trim().toLowerCase();
 }
-function ehMaster(email){ return chaveEmail(email) === EMAIL_MASTER; }
+function ehMaster(email){ return EMAILS_MASTER.indexOf(chaveEmail(email)) >= 0; }
 
 function acessos(){ DB.acessos = DB.acessos || []; return DB.acessos; }
 function acessoDe(email){
@@ -1369,6 +1377,11 @@ function carregarAcesso(){
      nos dois e dá para testar de verdade. */
   if(!email && !CLOUD_ON){ ACESSO = ACESSO_TOTAL(''); return; }
   if(ehMaster(email)){ ACESSO = ACESSO_TOTAL(email); return; }
+  /* Enquanto NINGUÉM foi cadastrado, o controle fica dormindo. Sem isto, um
+     endereço de master escrito diferente do que está na lista tranca todo mundo
+     para fora — foi o que aconteceu com gestao@atlasgestao.com contra
+     .com.br. A partir do primeiro acesso cadastrado, vale a regra. */
+  if(!acessos().length){ ACESSO = ACESSO_TOTAL(email); return; }
   const r = acessoDe(email);
   ACESSO = { master:false, irrestrito:false, email, semCadastro: !r,
              empresas: (r && r.empresas) || [], unidades: (r && r.unidades) || [],
@@ -1534,6 +1547,10 @@ function telaSemAcesso(){
         empresa, unidade ou tela foi liberada para esta conta.</p>
       <p class="text-xs text-slate-500 mt-2">Peça a liberação a quem administra o Atlas
         (<b>${esc(EMAIL_MASTER)}</b>), em <i>Acessos e permissões</i>.</p>
+      <p class="text-[11px] text-slate-400 mt-3 border-t border-slate-100 pt-3">
+        Se <b>você</b> é quem administra e caiu aqui, é porque este endereço não está na lista
+        de administradores do sistema — que hoje aceita ${EMAILS_MASTER.map(e => '<b>'+esc(e)+'</b>').join(' e ')}
+        (com ou sem acento). Nesse caso o endereço precisa ser incluído no código.</p>
       <button onclick="sairNuvem()" class="mt-4 px-4 py-2 rounded-lg text-sm bg-slate-100 hover:bg-slate-200">
         <i class="fa-solid fa-right-from-bracket mr-1"></i>Sair da conta</button>
     </div>`;
