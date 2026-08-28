@@ -4460,10 +4460,10 @@ function analisarImpColabs(){
   const porCpf = {}, porNome = {};
   DB.colaboradores.forEach(c => {
     const d = digitos(c.cpf); if(d.length === 11) porCpf[d] = c;
-    porNome[norm(c.nome)] = c;
+    const n = norm(c.nome); if(!porNome[n]) porNome[n] = c;
   });
 
-  const itens = [];
+  const itens = [], homonimos = [];
   let vazias = 0;
   for(let i = h+1; i < linhas.length; i++){
     const r = linhas[i];
@@ -4473,13 +4473,40 @@ function analisarImpColabs(){
     let vc = paraISO(idx.vencimento !== undefined ? r[idx.vencimento] : '');
     if(!vc && ue) vc = addDays(ue, 365);
     const cpf = cel(r,'cpf');
-    const existente = porCpf[digitos(cpf)] || porNome[norm(nome)] || null;
+    /* ══ Casamento SEMPRE pelo CPF quando a linha traz um ══
+       Casar por nome tendo CPF na mão foi o que moveu gente de unidade e
+       sobrescreveu CPF sem ninguém ver (caso SDU - E). Sem CPF na linha o nome
+       ainda vale — senão uma planilha sem a coluna duplicaria a base inteira —,
+       mas a prévia passa a mostrar exatamente esses casos. */
+    let existente = null, via = '';
+    if(cpfValido(cpf)){
+      existente = porCpf[digitos(cpf)] || null;
+      if(existente) via = 'cpf';
+      else{
+        const h2 = porNome[norm(nome)];
+        if(h2 && !digitos(h2.cpf)){
+          /* a ficha da base ainda não tem CPF nenhum: não há CPF contra CPF,
+             a planilha está completando o cadastro. Casar aqui evita duplicar
+             toda ficha criada a partir de exame, que nasce sem CPF. */
+          existente = h2; via = 'completaCpf';
+        }else if(h2){
+          /* mesmo nome com OUTRO CPF: homônimo de verdade (vira ficha nova) ou
+             CPF errado na planilha — quem decide é a pessoa, olhando a prévia */
+          homonimos.push({ nome, cpfPlanilha: cpf, cpfBase: h2.cpf });
+        }
+      }
+    }else{
+      /* CPF em branco, incompleto ou com dígito verificador errado não serve
+         para casar nada — vale o nome, e o número não é gravado */
+      existente = porNome[norm(nome)] || null;
+      if(existente) via = 'nome';
+    }
     itens.push({
       nome, cpf, rg: cel(r,'rg'), nascimento: paraISO(idx.nascimento !== undefined ? r[idx.nascimento] : ''),
       sexo: normSexo(cel(r,'sexo')), celular: cel(r,'celular'), email: cel(r,'email'),
       funcao: cel(r,'funcao'), admissao: paraISO(idx.admissao !== undefined ? r[idx.admissao] : ''),
       afastamento: cel(r,'afastamento'), status: normStatus(cel(r,'status')),
-      ultimoExame: ue, vencimento: vc, existente
+      ultimoExame: ue, vencimento: vc, existente, via
     });
   }
   const catalogo = {};
@@ -4493,8 +4520,58 @@ function analisarImpColabs(){
     foraCatalogo: itens.filter(x => x.funcao && !catalogo[norm(x.funcao)]).length,
     /* linha nova sem CPF vira ficha sem CPF — o cadastro manual já não deixa,
        a planilha ainda deixa, então pelo menos avisa antes de confirmar */
-    semCpf: itens.filter(x => !x.existente && criticaCpf(x.cpf)).length
+    semCpf: itens.filter(x => !x.existente && criticaCpf(x.cpf)).length,
+    /* o que a prévia precisa mostrar antes de a pessoa confirmar */
+    mudamUnidade: itens.filter(x => x.existente && x.existente.unidadeId !== ImpColab.unidadeId),
+    casadosPorNome: itens.filter(x => x.via === 'nome'),
+    completamCpf: itens.filter(x => x.via === 'completaCpf'),
+    homonimos
   };
+}
+
+/* o que a importação vai mexer em ficha que JÁ EXISTE — precisa estar na cara
+   antes do clique, não descoberto depois pela pessoa que ligou reclamando */
+function avisosImpColabs(a){
+  const nomes = (lista, f) => {
+    const t = lista.slice(0,8).map(f).map(esc).join(' · ');
+    return t + (lista.length > 8 ? ' · e mais ' + (lista.length - 8) : '');
+  };
+  /* classes inteiras, não montadas por pedaço: o Play CDN gera o CSS varrendo o
+     DOM, e nome de classe partido em template é fácil de quebrar sem perceber */
+  const CORES = {
+    amber:   'border-amber-300 bg-amber-50 text-amber-900',
+    orange:  'border-orange-300 bg-orange-50 text-orange-900',
+    emerald: 'border-emerald-300 bg-emerald-50 text-emerald-900'
+  };
+  const bloco = (cor, icone, titulo, corpo) => `
+    <div class="mt-2 rounded-lg border px-3 py-2 text-xs ${CORES[cor]}">
+      <p class="font-semibold"><i class="fa-solid ${icone} mr-1"></i>${titulo}</p>
+      <p class="mt-0.5 leading-relaxed">${corpo}</p></div>`;
+  const destino = (uni(ImpColab.unidadeId)||{}).nome || 'a unidade escolhida';
+  let out = '';
+  if(a.mudamUnidade.length)
+    out += bloco('amber','fa-right-left',
+      `${a.mudamUnidade.length} vão mudar de unidade`,
+      `Já estão cadastrados em outra unidade e passam para <b>${esc(destino)}</b>: ` +
+      nomes(a.mudamUnidade, x => x.nome + ' (' + uniNome(x.existente.unidadeId) + ')') +
+      '. Exames já encerrados mantêm a unidade histórica.');
+  if(a.casadosPorNome.length)
+    out += bloco('amber','fa-signature',
+      `${a.casadosPorNome.length} casaram pelo nome`,
+      'Essas linhas não trazem um CPF válido, então o vínculo foi pelo nome — se houver dois ' +
+      'homônimos na base, pode cair na pessoa errada: ' + nomes(a.casadosPorNome, x => x.nome) + '.');
+  if(a.completamCpf.length)
+    out += bloco('emerald','fa-id-card',
+      `${a.completamCpf.length} vão receber o CPF da planilha`,
+      'A ficha já existia sem CPF e o nome bateu — a importação completa o cadastro ' +
+      'em vez de criar uma segunda ficha: ' + nomes(a.completamCpf, x => x.nome + ' → ' + x.cpf) + '.');
+  if(a.homonimos.length)
+    out += bloco('orange','fa-users',
+      `${a.homonimos.length} nome já cadastrado com outro CPF`,
+      'Entram como <b>ficha nova</b>, porque o CPF manda. Se for a mesma pessoa, é CPF errado ' +
+      'em algum dos dois lados — confira antes: ' +
+      nomes(a.homonimos, x => x.nome + ' (planilha ' + x.cpfPlanilha + ' × base ' + x.cpfBase + ')') + '.');
+  return out;
 }
 
 function previaImpColabs(){
@@ -4514,6 +4591,7 @@ function previaImpColabs(){
     <p class="text-[11px] text-slate-400 mt-2">Colunas reconhecidas: ${a.colunas.join(', ') || 'nenhuma'}.
       ${a.semCpf ? '<b class="text-amber-600">Entram sem CPF e ficam marcados na lista de colaboradores</b> — o ideal é completar a planilha antes. ' : ''}
       ${a.foraCatalogo ? 'Funções fora do catálogo entram mesmo assim e ficam marcadas na matriz de exames como pendentes.' : ''}</p>
+    ${avisosImpColabs(a)}
     <div class="max-h-40 overflow-y-auto border border-slate-200 rounded-lg mt-2">
       <table class="w-full text-xs"><thead class="bg-slate-50 text-slate-500 sticky top-0">
         <tr><th class="px-2 py-1.5 text-left">Nome</th><th class="px-2 py-1.5 text-left">Função</th>
@@ -4543,9 +4621,13 @@ async function aplicarImpColabs(){
     if(x.existente){
       const c = x.existente;
       /* preenche o que veio na planilha sem apagar o que já existe */
-      ['cpf','rg','nascimento','sexo','celular','email','funcao','admissao','afastamento'].forEach(k => {
+      ['rg','nascimento','sexo','celular','email','funcao','admissao','afastamento'].forEach(k => {
         if(x[k]) c[k] = x[k];
       });
+      /* CPF só entra em ficha que ainda não tem, e só se for um CPF de verdade.
+         Trocar o número de alguém por causa de um nome igual foi o defeito que
+         gerou o caso SDU - E — agora é impossível por construção. */
+      if(x.cpf && !cpfDigitos(c.cpf) && cpfValido(x.cpf)) c.cpf = x.cpf;
       c.status = x.status;
       c.unidadeId = ImpColab.unidadeId;
       atualizados++;
@@ -7703,12 +7785,32 @@ function montarEmail(unidadeIds, mes){
     ? partes.slice(0,-1).join(', ') + ' e ' + partes[partes.length-1]
     : (partes[0] || '');
 
-  const notaSemMovimento = nadaNoMes
-    ? `<p>Não houve exames, laudos ou visitas técnicas a registrar neste período.</p>`
-    : (semMovimento.length
-        ? `<p style="color:#475569"><i>Observação:</i> ${semMovimento.length>1?'as unidades':'a unidade'}
-           <b>${semMovimento.map(u=>esc(u.nome)).join(', ')}</b> não ${semMovimento.length>1?'registraram':'registrou'} movimento neste período.</p>`
-        : '');
+  /* "Não haverá cobrança" só pode ser dito onde não existe mensalidade de
+     contrato: a mensalidade é fixa e é devida mesmo num mês sem nenhum exame.
+     Prometer isenção para quem tem contrato mensal seria erro na frente do
+     cliente, então a frase é montada unidade a unidade. */
+  const listaNomes = us => us.map(u => esc(u.nome)).join(', ');
+  const semCobranca = us => us.filter(u => !(precoMensal(u.id, mes) > 0));
+
+  let notaSemMovimento = '';
+  if(nadaNoMes){
+    const livres = semCobranca(unidades);
+    const frase = livres.length === unidades.length
+      ? ' Não haverá cobrança referente a este período.'
+      : (livres.length
+          ? ` Não haverá cobrança referente a este período para ${listaNomes(livres)}; ` +
+            `${livres.length === unidades.length - 1 ? 'a outra unidade segue' : 'as demais seguem'} com a mensalidade do contrato.`
+          : ' A cobrança do período se restringe à mensalidade do contrato.');
+    notaSemMovimento = `<p>Não houve exames, laudos ou visitas técnicas a registrar neste período.${frase}</p>`;
+  }else if(semMovimento.length){
+    const livres = semCobranca(semMovimento);
+    const frase = livres.length === semMovimento.length
+      ? ' Não haverá cobrança referente a este período.'
+      : (livres.length ? ` Não haverá cobrança referente a este período para ${listaNomes(livres)}.` : '');
+    notaSemMovimento =
+      `<p style="color:#475569"><i>Observação:</i> ${semMovimento.length>1?'as unidades':'a unidade'}
+       <b>${listaNomes(semMovimento)}</b> não ${semMovimento.length>1?'registraram':'registrou'} movimento neste período.${frase}</p>`;
+  }
 
   const corpoProcedimentos = nadaNoMes ? '' : `
     <p>No período foram realizados ${resumoTexto}. Seguem os ASOs e o detalhamento:</p>
