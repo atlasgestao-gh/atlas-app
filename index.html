@@ -3336,6 +3336,39 @@ function funcaoCanonica(funcao){
   const qualquer = (DB.cargos||[]).find(c => norm(c.funcao) === n);
   return qualquer ? qualquer.funcao : funcao;
 }
+
+/* ══════════ Função fora do catálogo ══════════
+   "Fora do catálogo" = ninguém cadastrou a função em Cargos. Ou ela não existe
+   lá de jeito nenhum, ou existe só como variação de escrita colhida de uma
+   planilha (importado:true) — que é grafia, não cargo. Sem cargo próprio não há
+   CBO, nem descrição de atividades, nem matriz de exames: o agendamento fica
+   sem saber o que pedir para aquela pessoa. */
+function catalogoOficial(){
+  const s = new Set();
+  (DB.cargos||[]).forEach(c => { if(!c.importado) s.add(norm(c.funcao)); });
+  return s;
+}
+function funcaoForaCatalogo(funcao, oficiais){
+  if(!funcao) return false;
+  const of = oficiais || catalogoOficial();
+  /* atalho: se a grafia do cadastro já é a de um cargo oficial, nem precisa
+     resolver o canônico (isso roda para a base inteira a cada render) */
+  if(of.has(norm(funcao))) return false;
+  return !of.has(norm(funcaoCanonica(funcao)));
+}
+function colabForaCatalogo(c, oficiais){ return funcaoForaCatalogo(c && c.funcao, oficiais); }
+/* agrupado por função, para o aviso conseguir dizer QUAIS são */
+function funcoesForaCatalogo(){
+  const of = catalogoOficial(), mapa = new Map();
+  DB.colaboradores.forEach(c => {
+    if(!colabForaCatalogo(c, of)) return;
+    const nome = funcaoCanonica(c.funcao), chave = norm(nome), o = mapa.get(chave);
+    if(o){ o.n++; if(!colabInativo(c)) o.ativos++; }
+    else mapa.set(chave, { nome, chave, n:1, ativos: colabInativo(c) ? 0 : 1,
+                           matriz: !!matrizDaFuncao(nome).matriz });
+  });
+  return [...mapa.values()].sort((a,b) => b.n - a.n || a.nome.localeCompare(b.nome,'pt-BR'));
+}
 function unidadeExigeCarteirinha(unidadeId, funcao){
   const u = uni(unidadeId);
   if(!u || !funcao) return false;
@@ -3892,7 +3925,7 @@ function temExameRestrito(matriz, tipos){
 /* ═══════════════════════════ 4. CADASTROS ═══════════════════════════ */
 const UICad = { aba:'colaboradores' };
 const UIColab = { q:'', emp:'', uni:'', cargos:[], cargoAberto:false, cargoBusca:'',
-                  status:'Ativo', sexo:'', page:1, revisar:false, semCpf:false };
+                  status:'Ativo', sexo:'', page:1, revisar:false, semCpf:false, foraCat:false };
 
 function viewCadastros(){
   const abas = [
@@ -3916,6 +3949,7 @@ function viewCadastros(){
 /* ---- 4a. colaboradores ---- */
 function colabsFiltrados(ignorarCargo){
   const q = norm(UIColab.q);
+  const oficiais = UIColab.foraCat ? catalogoOficial() : null;
   return DB.colaboradores.filter(c => {
     const u = uni(c.unidadeId);
     return (!UIColab.emp || (u && u.empresaId === UIColab.emp)) &&
@@ -3923,6 +3957,7 @@ function colabsFiltrados(ignorarCargo){
            (ignorarCargo || !UIColab.cargos.length || UIColab.cargos.indexOf(cargoDaLista(c)) >= 0) &&
            (!UIColab.revisar || !!c.revisar) &&
            (!UIColab.semCpf || colabSemCpf(c)) &&
+           (!UIColab.foraCat || colabForaCatalogo(c, oficiais)) &&
            (!UIColab.status || c.status === UIColab.status) &&
            (!UIColab.sexo || (UIColab.sexo === 'SEM' ? !c.sexo : c.sexo === UIColab.sexo)) &&
            (!q || norm(c.nome + c.cpf + c.funcao + c.email).includes(q));
@@ -4024,7 +4059,8 @@ function mensagemVazioColabs(){
 }
 function limparFiltrosColabs(){
   UIColab.emp=''; UIColab.uni=''; UIColab.cargos=[]; UIColab.cargoAberto=false; UIColab.cargoBusca='';
-  UIColab.status=''; UIColab.sexo=''; UIColab.revisar=false; UIColab.semCpf=false; UIColab.page=1;
+  UIColab.status=''; UIColab.sexo=''; UIColab.revisar=false; UIColab.semCpf=false;
+  UIColab.foraCat=false; UIColab.page=1;
   viewCadastros();
 }
 /* o botão do aviso abre a lista em quem está sem CPF — limpando o status, senão
@@ -4032,6 +4068,62 @@ function limparFiltrosColabs(){
 function filtrarSemCpf(ligar){
   UIColab.semCpf = ligar; UIColab.status = ''; UIColab.revisar = false; UIColab.page = 1;
   viewCadastros();
+}
+function filtrarForaCatalogo(ligar){
+  UIColab.foraCat = ligar; UIColab.status = ''; UIColab.revisar = false;
+  UIColab.cargos = []; UIColab.page = 1;
+  viewCadastros();
+}
+/* o filtro de cargos já trabalha com a chave normalizada da função canônica */
+function verColabsDaFuncao(chave){
+  closeModal();
+  UICad.aba = 'colaboradores';
+  UIColab.foraCat = false; UIColab.semCpf = false; UIColab.revisar = false;
+  UIColab.status = ''; UIColab.cargos = [chave]; UIColab.page = 1;
+  viewCadastros();
+}
+/* a lista fica aqui em vez de ir serializada no onclick: nome de função com
+   apóstrofo ou parêntese quebraria o atributo */
+let _foraCatalogo = [];
+function cadastrarFuncaoNoCatalogo(i){
+  const f = _foraCatalogo[i]; if(!f) return;
+  closeModal();
+  editarCargo(null, { funcao: f.nome });
+}
+function verFuncoesForaCatalogo(){
+  const fs = funcoesForaCatalogo();
+  _foraCatalogo = fs;
+  if(!fs.length){ toast('Todas as funções em uso estão no catálogo.', 'ok'); return; }
+  const total = fs.reduce((s,f) => s + f.n, 0);
+  const semMatriz = fs.filter(f => !f.matriz).length;
+  openInfo('Funções fora do catálogo', `
+    <p class="text-sm text-slate-600">${total} colaborador(es) em <b>${fs.length} função(ões)</b> que não estão
+      cadastradas em <b>Cargos</b>. Sem cargo próprio a função fica sem CBO e sem descrição de atividades${
+      semMatriz ? `, e ${semMatriz} dela(s) ainda não tem matriz de exames — nessas o agendamento não sugere o que pedir` : ''}.</p>
+    <p class="text-xs text-slate-500 mt-1">Cadastrar a função aqui não mexe em ficha nenhuma: o vínculo é pelo nome,
+      então os colaboradores passam a enxergar o cargo assim que ele existir.</p>
+    <div class="overflow-x-auto border border-slate-200 rounded-lg mt-3">
+      <table class="w-full text-sm">
+        <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
+          <tr><th class="px-3 py-2">Função</th><th class="px-3 py-2 whitespace-nowrap">Colaboradores</th>
+              <th class="px-3 py-2 whitespace-nowrap">Matriz de exames</th>
+              <th class="px-3 py-2 text-right">Ações</th></tr></thead>
+        <tbody class="divide-y divide-slate-100">
+          ${fs.map((f, i) => `<tr class="hover:bg-slate-50">
+            <td class="px-3 py-2 font-medium text-slate-700">${esc(f.nome)}</td>
+            <td class="px-3 py-2 text-xs text-slate-600">${f.n}${
+              f.ativos !== f.n ? ` <span class="text-slate-400">(${f.ativos} ativo(s))</span>` : ''}</td>
+            <td class="px-3 py-2">${f.matriz
+              ? badge('definida','bg-emerald-100 text-emerald-700')
+              : badge('sem matriz','bg-red-100 text-red-700')}</td>
+            <td class="px-3 py-2 text-right whitespace-nowrap">
+              <button onclick="verColabsDaFuncao('${f.chave}')"
+                class="px-2 py-1 rounded text-xs border border-slate-300 text-slate-600 hover:bg-slate-50">Ver quem</button>
+              <button onclick="cadastrarFuncaoNoCatalogo(${i})"
+                class="ml-1 px-2 py-1 rounded text-xs bg-accent text-white hover:opacity-90">Cadastrar no catálogo</button>
+            </td></tr>`).join('')}
+        </tbody></table>
+    </div>`);
 }
 function paginaColabs(p){ UIColab.page = p; viewCadastros(); }
 
@@ -4150,7 +4242,30 @@ function abaColaboradores(){
   const nRev = colabsParaRevisar().length;
   const semCpf = DB.colaboradores.filter(colabSemCpf);
   const semCpfAtivos = semCpf.filter(c => !colabInativo(c)).length;
+  const oficiais = catalogoOficial();
+  const fora = funcoesForaCatalogo();
+  const nFora = fora.reduce((s,f) => s + f.n, 0);
+  const foraSemMatriz = fora.filter(f => !f.matriz).length;
   $('#abaCad').innerHTML = `
+  ${fora.length ? `<div class="mb-4 rounded-xl border border-orange-300 bg-orange-50 px-5 py-4 flex items-start gap-3">
+      <i class="fa-solid fa-briefcase text-orange-500 mt-0.5"></i>
+      <div class="text-sm text-orange-900 flex-1">
+        <p class="font-semibold">${nFora} colaborador(es) em ${fora.length} função(ões) fora do catálogo</p>
+        <p class="text-xs mt-1">${fora.slice(0,4).map(f => esc(f.nome) + ' (' + f.n + ')').join(' · ')}${
+          fora.length > 4 ? ' · e mais ' + (fora.length - 4) : ''}</p>
+        <p class="text-xs mt-1">Essas funções não estão cadastradas em <b>Cargos</b>: ficam sem CBO e sem descrição de atividades${
+          foraSemMatriz ? `, e ${foraSemMatriz} ainda não tem matriz de exames — nessas o agendamento não sugere o que pedir` : ''}.</p>
+      </div>
+      <div class="flex flex-col gap-1 shrink-0">
+        <button onclick="verFuncoesForaCatalogo()"
+          class="px-3 py-1.5 rounded-lg text-xs bg-orange-500 text-white hover:opacity-90 whitespace-nowrap">
+          <i class="fa-solid fa-list-ul mr-1"></i>Ver quais</button>
+        <button onclick="filtrarForaCatalogo(${UIColab.foraCat?'false':'true'})"
+          class="px-3 py-1.5 rounded-lg text-xs border whitespace-nowrap ${UIColab.foraCat
+            ? 'bg-slate-600 text-white border-slate-600' : 'bg-white border-orange-300 text-orange-700 hover:bg-orange-100'}">
+          <i class="fa-solid fa-filter mr-1"></i>${UIColab.foraCat?'Mostrar todos':'Filtrar na lista'}</button>
+      </div>
+    </div>` : ''}
   ${semCpf.length ? `<div class="mb-4 rounded-xl border border-amber-300 bg-amber-50 px-5 py-4 flex items-start gap-3">
       <i class="fa-solid fa-id-card text-amber-500 mt-0.5"></i>
       <div class="text-sm text-amber-900 flex-1">
@@ -4194,7 +4309,7 @@ function abaColaboradores(){
         ? botao('Definir sexo pelo nome ('+DB.colaboradores.filter(c=>!c.sexo).length+')','fa-venus-mars','preencherSexoPorNome()',
                 'bg-white border border-amber-300 text-amber-700 hover:bg-amber-50')
         : ''}
-      ${(UIColab.emp||UIColab.uni||UIColab.cargos.length||UIColab.status||UIColab.sexo||UIColab.revisar||UIColab.semCpf)
+      ${(UIColab.emp||UIColab.uni||UIColab.cargos.length||UIColab.status||UIColab.sexo||UIColab.revisar||UIColab.semCpf||UIColab.foraCat)
         ? botao('Limpar filtros','fa-filter-circle-xmark','limparFiltrosColabs()','bg-white border border-amber-300 text-amber-700 hover:bg-amber-50')
         : ''}
       ${botao('Definir contato em lote','fa-address-book','definirContatoEmLote()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
@@ -4220,7 +4335,11 @@ function abaColaboradores(){
                   ? `<span class="px-1.5 py-0.5 rounded bg-amber-100 text-amber-800" title="${esc(criticaCpf(c.cpf))} — abra a ficha e preencha"><i class="fa-solid fa-triangle-exclamation mr-1"></i>${esc(c.cpf || 'sem CPF')}</span>`
                   : `<span class="text-slate-600">${esc(c.cpf)}</span>`}</td>
               <td class="px-4 py-3 text-xs text-slate-600">${esc(uniNome(c.unidadeId))}</td>
-              <td class="px-4 py-3 text-xs text-slate-600">${esc(c.funcao||'—')}</td>
+              <td class="px-4 py-3 text-xs">${!c.funcao
+                  ? '<span class="text-slate-400">—</span>'
+                  : colabForaCatalogo(c, oficiais)
+                    ? `<span class="px-1.5 py-0.5 rounded bg-orange-100 text-orange-800" title="Função fora do catálogo — cadastre em Cargos para ter CBO, atividades e matriz de exames"><i class="fa-solid fa-briefcase mr-1"></i>${esc(c.funcao)}</span>`
+                    : `<span class="text-slate-600">${esc(c.funcao)}</span>`}</td>
               <td class="px-4 py-3 text-xs text-slate-500">
                 <p>${esc(c.celular||'—')}</p>
                 ${c.telefone?`<p>${esc(c.telefone)}</p>`:''}
@@ -5206,7 +5325,9 @@ function abaCargos(){
     ${semMatriz?`<p class="text-xs text-danger px-4 pb-3">${semMatriz} cargo(s) sem matriz de exames — nesses o agendamento não sugere exames automaticamente</p>`:''}
   </div>`;
 }
-function editarCargo(id){
+/* pre: valores iniciais para um cargo novo (usado ao promover uma função que
+   só existia escrita nas fichas) */
+function editarCargo(id, pre){
   const c = id ? DB.cargos.find(x => x.id === id) : null;
   openForm({
     title: c ? 'Editar cargo' : 'Novo cargo',
@@ -5217,7 +5338,7 @@ function editarCargo(id){
         hint:'vale em qualquer unidade — use para funções de manipulação de alimentos' },
       { name:'descricao', label:'Descrição das atividades', type:'textarea', rows:4, col:'sm:col-span-2' }
     ],
-    values: c || {},
+    values: c || pre || {},
     afterRender: () => {
       /* atalho: grava o cargo e já abre a matriz de exames dele, sem passar pela grade */
       const foot = document.getElementById('modalFoot');
