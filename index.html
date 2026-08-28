@@ -4177,6 +4177,7 @@ function abaColaboradores(){
       ${(UIColab.emp||UIColab.uni||UIColab.cargos.length||UIColab.status||UIColab.sexo||UIColab.revisar)
         ? botao('Limpar filtros','fa-filter-circle-xmark','limparFiltrosColabs()','bg-white border border-amber-300 text-amber-700 hover:bg-amber-50')
         : ''}
+      ${botao('Definir contato em lote','fa-address-book','definirContatoEmLote()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
       ${botao('CSV','fa-file-csv','exportarColabs()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
       </div>
     </div>
@@ -4424,6 +4425,59 @@ async function aplicarImpColabs(){
   viewCadastros();
   toast(`Importação concluída: ${novos} novo(s), ${atualizados} atualizado(s), ${asosCriados} ASO(s) criado(s). ` +
         `Um ponto de retorno ficou em "Backup e segurança".`);
+}
+
+/* Define e-mail/telefone de uma vez para TODA a lista filtrada na tela.
+   Nasceu do caso da SDU - E: a importação reaproveita cadastros antigos e traz
+   junto o contato deles, e corrigir um a um é inviável. Só mexe em quem está
+   na lista atual, mostra a conta antes e guarda ponto de retorno. */
+function definirContatoEmLote(){
+  const lista = colabsFiltrados();
+  if(!lista.length){ toast('A lista atual está vazia — ajuste os filtros primeiro.', 'erro'); return; }
+  const escopo = [
+    UIColab.uni ? 'unidade ' + uniNome(UIColab.uni) : (UIColab.emp ? 'empresa ' + ((emp(UIColab.emp)||{}).nome||'') : 'TODAS as unidades'),
+    UIColab.cargos.length ? UIColab.cargos.length + ' cargo(s)' : '',
+    UIColab.status ? 'status ' + UIColab.status : 'todos os status',
+    UIColab.q ? 'busca "' + UIColab.q + '"' : ''
+  ].filter(Boolean).join(' · ');
+  const comContato = lista.filter(c => (c.email||'').trim() || (c.celular||'').trim() || (c.telefone||'').trim()).length;
+
+  openForm({
+    title: 'Definir contato em lote',
+    fields: [
+      { type:'html', html: `<div class="sm:col-span-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2.5 text-xs text-amber-900">
+          <p><b>${lista.length} colaborador(es)</b> serão alterados — exatamente os que estão na lista agora.</p>
+          <p class="mt-1">Recorte atual: ${esc(escopo)}.</p>
+          ${comContato ? `<p class="mt-1">${comContato} já tem algum contato preenchido; por padrão eles <b>não</b> são tocados.</p>` : ''}
+          <p class="mt-1">Campo deixado em branco aqui não apaga o que está gravado.</p>
+        </div>` },
+      { name:'email', label:'E-mail', type:'email', col:'sm:col-span-2' },
+      { name:'celular', label:'Celular' },
+      { name:'telefone', label:'Telefone fixo / recado' },
+      { name:'sobrescrever', label:'Substituir também quem já tem contato preenchido', type:'checkbox',
+        hint:'marque para corrigir contato herdado de um cadastro antigo', col:'sm:col-span-2' }
+    ],
+    values: { email:'', celular:'', telefone:'', sobrescrever:false },
+    onSave: async v => {
+      const campos = ['email','celular','telefone'].filter(k => (v[k]||'').trim());
+      if(!campos.length){ toast('Preencha ao menos um contato.', 'erro'); return; }
+      const alvos = colabsFiltrados();
+      await guardarSnapshotLocal('antes de definir contato em lote (' + alvos.length + ' colaboradores)');
+      let n = 0;
+      alvos.forEach(c => {
+        let mexeu = false;
+        campos.forEach(k => {
+          if(!v.sobrescrever && (c[k]||'').trim()) return;
+          if((c[k]||'') === v[k].trim()) return;
+          c[k] = v[k].trim(); mexeu = true;
+        });
+        if(mexeu) n++;
+      });
+      save(); closeModal(); viewCadastros();
+      toast(n ? n + ' cadastro(s) atualizado(s). Ponto de retorno guardado em "Backup e segurança".'
+              : 'Nada mudou — os cadastros já estavam com esse contato.', n ? 'ok' : 'info');
+    }
+  });
 }
 
 function editarColab(id, pre){
