@@ -1743,12 +1743,17 @@ function viewAcessos(){
   if(!ACESSO.master){ telaSemAcesso(); return; }
   const lista = acessos().slice().sort((a,b) => chaveEmail(a.email).localeCompare(chaveEmail(b.email)));
   const resumoUnis = a => {
-    const nEmp = (a.empresas||[]).length, nUni = (a.unidades||[]).length;
-    if(!nEmp && !nUni) return '<span class="text-red-600">nada liberado</span>';
-    const p = [];
-    if(nEmp) p.push(nEmp + ' empresa(s) inteira(s)');
-    if(nUni) p.push(nUni + ' unidade(s)');
-    return esc(p.join(' + '));
+    const ids = a.unidades || [];
+    if(!ids.length) return '<span class="text-red-600">nenhuma unidade</span>';
+    const nomes = ids.map(id => (uni(id)||{}).sigla || (uni(id)||{}).nome || id);
+    return esc(nomes.slice(0,4).join(', ')) + (nomes.length > 4 ? ' <span class="text-slate-400">+' + (nomes.length-4) + '</span>' : '');
+  };
+  const resumoVerbos = a => {
+    const v = [];
+    if(a.podeIncluir) v.push('incluir');
+    if(a.podeEditar)  v.push('editar');
+    if(a.podeExcluir) v.push('excluir');
+    return v.length ? esc(v.join(' · ')) : '<span class="text-slate-500">só visualiza</span>';
   };
   const resumoAbas = a => {
     const n = (a.abas||[]).length;
@@ -1786,7 +1791,8 @@ function viewAcessos(){
           <table class="w-full text-sm data">
             <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
               <tr><th class="px-4 py-3">E-mail</th><th class="px-4 py-3">Pessoa</th>
-                  <th class="px-4 py-3">Empresas e unidades</th><th class="px-4 py-3">Telas</th>
+                  <th class="px-4 py-3">Unidades</th><th class="px-4 py-3">Pode</th>
+                  <th class="px-4 py-3">Telas</th>
                   <th class="px-4 py-3 text-right no-print">Ações</th></tr></thead>
             <tbody class="divide-y divide-slate-100">
               ${lista.length ? lista.map(a => `
@@ -1794,6 +1800,7 @@ function viewAcessos(){
                   <td class="px-4 py-3 font-medium text-slate-700 break-all">${esc(a.email)}</td>
                   <td class="px-4 py-3 text-xs text-slate-600">${esc(a.nome||'—')}</td>
                   <td class="px-4 py-3 text-xs text-slate-600">${resumoUnis(a)}</td>
+                  <td class="px-4 py-3 text-xs text-slate-600">${resumoVerbos(a)}</td>
                   <td class="px-4 py-3 text-xs text-slate-600">${resumoAbas(a)}</td>
                   <td class="px-4 py-3 text-right whitespace-nowrap no-print">
                     <button onclick="editarAcesso('${esc(a.email)}')" class="text-slate-400 hover:text-accent px-1.5"
@@ -1822,10 +1829,10 @@ function editarAcesso(email){
         options: MENU.filter(m => !m.master).map(m => ({ v:m.id, l:m.label })),
         hint:'sem nenhuma marcada, a pessoa entra e não vê tela nenhuma' },
       { type:'sep', label:'O que pode enxergar' },
-      { name:'empresas', label:'Empresas inteiras', type:'multi', col:'sm:col-span-2',
+      { name:'empresas', label:'Atalho: marcar todas as unidades de', type:'multi', col:'sm:col-span-2',
         options: (DB.empresas||[]).slice().sort((x,y) => x.nome.localeCompare(y.nome,'pt-BR'))
                    .map(e => ({ v:e.id, l:e.nome })),
-        hint:'marcar a empresa já libera todas as unidades dela' },
+        hint:'só um atalho — ao salvar, vira a lista de unidades abaixo. Unidade criada depois NÃO entra sozinha.' },
       { name:'unidades', label:'Unidades avulsas', type:'multi', col:'sm:col-span-2',
         options: opcoesUnidades().map(o => ({ v:o.v, l:o.l })),
         hint:'nada é herdado: unidade criada depois precisa ser liberada aqui de novo' },
@@ -1842,13 +1849,26 @@ function editarAcesso(email){
       if(ehMaster(v.email)){ toast('Este é o e-mail master — ele já tem acesso total.', 'alerta'); return; }
       const outro = acessoDe(v.email);
       if(outro && (!a || outro !== a)){ toast('Este e-mail já está na lista.', 'erro'); return; }
+      /* o campo de empresa é atalho, não permissão: expande nas unidades que
+         existem AGORA e some. O que fica gravado é sempre a lista de unidades
+         — é o que garante que unidade nova não entre para ninguém sozinha. */
+      let pelaEmpresa = 0;
+      (v.empresas || []).forEach(eid => {
+        (DB.unidades||[]).filter(u => u.empresaId === eid).forEach(u => {
+          if((v.unidades||[]).indexOf(u.id) < 0){ v.unidades = (v.unidades||[]).concat([u.id]); pelaEmpresa++; }
+        });
+      });
+      v.empresas = [];
       if(a) Object.assign(a, v);
       else acessos().push(Object.assign({ criadoEm:new Date().toISOString(), criadoPor:SESSAO.email||'' }, v));
       gravarAcessos();
       closeModal(); go('acessos');
-      toast('Permissões de ' + v.email + ' salvas.' +
-            (!(v.abas||[]).length ? ' Atenção: nenhuma tela marcada — a pessoa não vai ver nada.' : ''),
-            (v.abas||[]).length ? 'ok' : 'alerta');
+      const avisos = [];
+      if(pelaEmpresa) avisos.push(pelaEmpresa + ' unidade(s) marcadas pelo atalho de empresa');
+      if(!(v.abas||[]).length) avisos.push('nenhuma tela marcada — a pessoa não vai ver nada');
+      if(!(v.unidades||[]).length) avisos.push('nenhuma unidade marcada');
+      toast('Permissões de ' + v.email + ' salvas.' + (avisos.length ? ' ' + avisos.join('; ') + '.' : ''),
+            ((v.abas||[]).length && (v.unidades||[]).length) ? 'ok' : 'alerta');
     }
   });
 }
