@@ -220,8 +220,18 @@ async function nuvemGravarJa(){
     /* formato novo: grava o comum + as linhas de unidade */
     if(NUVEM_PARTIDA){
       const r = await nuvemGravarPartida();
-      if(!r.ok) console.warn('nuvemGravarPartida', r.motivo);
-      else FS.ultimoNuvem = new Date().toISOString();
+      if(r.ok){
+        FS.ultimoNuvem = new Date().toISOString();
+        FS.erroNuvem = '';
+      }else{
+        /* falha de gravação NÃO pode ficar só no console: ela não é vista, e a
+           pessoa segue trabalhando achando que salvou */
+        console.warn('nuvemGravarPartida', r.motivo);
+        FS.erroNuvem = r.motivo || 'motivo desconhecido';
+        toast('NÃO consegui salvar na nuvem: ' + FS.erroNuvem +
+              '. Não feche a página — baixe um backup e me avise.', 'erro');
+      }
+      carimboSalvamento();
       return;
     }
     const u = await nuvemUsuario();
@@ -1219,8 +1229,16 @@ function carimboSalvamento(){
   if(!el) return;
   const q = DB.meta && DB.meta.salvoEm ? new Date(DB.meta.salvoEm).toLocaleTimeString('pt-BR') : '—';
   const arq = FS.ultimoWrite ? new Date(FS.ultimoWrite).toLocaleTimeString('pt-BR') : null;
+  /* o rodapé é o único lugar que a pessoa olha o tempo todo: se a gravação foi
+     recusada, tem de aparecer aqui — antes de qualquer outra consideração */
+  if(FS.erroNuvem){
+    el.innerHTML = `<span class="text-red-400" title="${esc(FS.erroNuvem)}">
+      <i class="fa-solid fa-triangle-exclamation"></i> NÃO SALVOU na nuvem</span> · baixe um backup`;
+    return;
+  }
   if(CLOUD_ON){
-    el.innerHTML = `<span class="text-emerald-400"><i class="fa-solid fa-cloud"></i> nuvem</span> · salvo ${q}`;
+    el.innerHTML = `<span class="text-emerald-400"><i class="fa-solid fa-cloud"></i> nuvem${
+      NUVEM_PARTIDA ? ' por unidade' : ''}</span> · salvo ${q}`;
     return;
   }
   el.innerHTML = FS.permissao
