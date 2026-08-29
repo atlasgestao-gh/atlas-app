@@ -2155,6 +2155,33 @@ function campoHTML(f, v){
     ${inner}${f.hint?`<p class="text-[11px] text-slate-400 mt-1">${esc(f.hint)}</p>`:''}</div>`;
 }
 
+/* ═════════ BARRA DE SUB-ABAS ═════════
+   Uma peça só para as telas que têm abas internas — antes estava copiada em
+   Clientes, Colaboradores e ASOs, cada cópia levemente diferente.
+
+   `abas`: [{ id, label, icon, n, tom }]
+     n   — contador na pílula. Sem ele a pílula sai limpa (é o caso das telas
+           antigas, que continuam idênticas).
+     tom — 'alerta' pinta o contador de vermelho mesmo na aba inativa. É o que
+           impede uma pendência de sumir atrás de uma aba que ninguém abriu:
+           separar em abas sem contador seria perder o "vejo tudo de uma vez".
+   `onclick` recebe o id e devolve a expressão do onclick. */
+function barraAbas(abas, ativa, onclick){
+  return `<div class="flex gap-1 bg-white rounded-xl border border-slate-200 p-1 overflow-x-auto no-print">
+    ${abas.map(a => {
+      const on = ativa === a.id;
+      const temN = a.n !== undefined && a.n !== null;
+      const cor = on ? 'bg-white/25 text-white'
+                     : (a.tom === 'alerta' && a.n ? 'bg-red-100 text-red-700' : 'bg-slate-200 text-slate-600');
+      const cont = temN ? `<span class="text-[10px] px-1.5 py-0.5 rounded-full ${cor}">${a.n}</span>` : '';
+      return `<button onclick="${onclick(a.id)}"
+        class="px-4 py-2 rounded-lg text-sm whitespace-nowrap flex items-center gap-2 ${
+          on ? 'bg-accent text-white' : 'text-slate-600 hover:bg-slate-100'}">
+        <i class="fa-solid ${a.icon}"></i>${esc(a.label)}${cont}</button>`;
+    }).join('')}
+  </div>`;
+}
+
 function openForm({ title, fields, values = {}, onSave, largura = 'max-w-3xl', afterRender = null }){
   $('#modalTitle').textContent = title;
   $('#modal').querySelector('.relative').className =
@@ -2912,11 +2939,7 @@ function viewEmpresas(){
   ];
   $('#view').innerHTML = `
     <div class="space-y-4">
-      <div class="flex gap-1 bg-white rounded-xl border border-slate-200 p-1 overflow-x-auto no-print">
-        ${abas.map(a => `<button onclick="UIEmp.aba='${a.id}';viewEmpresas()"
-          class="px-4 py-2 rounded-lg text-sm whitespace-nowrap flex items-center gap-2 ${UIEmp.aba===a.id?'bg-accent text-white':'text-slate-600 hover:bg-slate-100'}">
-          <i class="fa-solid ${a.icon}"></i>${a.label}</button>`).join('')}
-      </div>
+      ${barraAbas(abas, UIEmp.aba, id => `UIEmp.aba='${id}';viewEmpresas()`)}
       <div id="abaEmp"></div>
     </div>`;
   ({ unidades:abaUnidades, empresas:abaEmpresas, clinicas:abaClinicas, prestadores:abaPrestadores })[UIEmp.aba]();
@@ -4686,11 +4709,7 @@ function viewCadastros(){
   ];
   $('#view').innerHTML = `
     <div class="space-y-4">
-      <div class="flex gap-1 bg-white rounded-xl border border-slate-200 p-1 overflow-x-auto no-print">
-        ${abas.map(a => `<button onclick="UICad.aba='${a.id}';viewCadastros()"
-          class="px-4 py-2 rounded-lg text-sm whitespace-nowrap flex items-center gap-2 ${UICad.aba===a.id?'bg-accent text-white':'text-slate-600 hover:bg-slate-100'}">
-          <i class="fa-solid ${a.icon}"></i>${a.label}</button>`).join('')}
-      </div>
+      ${barraAbas(abas, UICad.aba, id => `UICad.aba='${id}';viewCadastros()`)}
       <div id="abaCad"></div>
     </div>`;
   ({ colaboradores:abaColaboradores, cargos:abaCargos, matriz:abaMatriz, exames:abaExamesCatalogo })[UICad.aba]();
@@ -7283,13 +7302,9 @@ function paginaAsos(p){ UIAso.page = p; viewAsos(); }
 function viewAsos(){
   $('#view').innerHTML = `
     <div class="space-y-4">
-      <div class="flex gap-1 bg-white rounded-xl border border-slate-200 p-1 overflow-x-auto no-print">
-        ${[{id:'asos',label:'Acompanhamento de ASOs',icon:'fa-notes-medical'},
-           {id:'esocial',label:'Eventos eSocial importados',icon:'fa-file-code'}].map(a => `
-          <button onclick="UIAso.aba='${a.id}';viewAsos()"
-            class="px-4 py-2 rounded-lg text-sm whitespace-nowrap flex items-center gap-2 ${UIAso.aba===a.id?'bg-accent text-white':'text-slate-600 hover:bg-slate-100'}">
-            <i class="fa-solid ${a.icon}"></i>${a.label}</button>`).join('')}
-      </div>
+      ${barraAbas([{ id:'asos',    label:'Acompanhamento de ASOs',      icon:'fa-notes-medical' },
+                   { id:'esocial', label:'Eventos eSocial importados',  icon:'fa-file-code' }],
+                  UIAso.aba, id => `UIAso.aba='${id}';viewAsos()`)}
       <div id="abaAso"></div>
     </div>`;
   UIAso.aba === 'asos' ? abaAsos() : abaEsocial();
