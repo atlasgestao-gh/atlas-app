@@ -1648,7 +1648,10 @@ const MENU = [
   { id:'faturamento', label:'Faturamento',         icon:'fa-file-invoice-dollar', sub:'Fechamento mensal, cobrança e e-mail' },
   { id:'documentos',  label:'Documentos',          icon:'fa-file-pen',          sub:'Ofícios, orçamentos e comunicados no papel timbrado' },
   { id:'backup',      label:'Backup e segurança',  icon:'fa-shield-halved',     sub:'Onde os dados estão gravados e como recuperá-los' },
-  { id:'acessos',     label:'Acessos e permissões', icon:'fa-user-shield',      sub:'Quem entra no app e o que cada login enxerga', master:true }
+  { id:'acessos',     label:'Acessos e permissões', icon:'fa-user-shield',      sub:'Quem entra no app e o que cada login enxerga', master:true },
+  /* A tela da gerente. `gerente:true` é o espelho de `master:true`: item que só
+     aquele perfil vê — e, no caso dela, o ÚNICO que ela vê (ver podeAba). */
+  { id:'minhaunidade', label:'Minha unidade',      icon:'fa-clipboard-list',    sub:'Peça exames e acompanhe a sua unidade', gerente:true }
 ];
 let rota = 'dashboard';
 
@@ -1689,13 +1692,21 @@ function acessos(){
 /* a tabela usa snake_case; o app fala o dialeto dele */
 function acessoDaLinha(r){
   return { email:r.email, nome:r.nome || '', master:!!r.master,
+           perfil: r.perfil === 'gerente' ? 'gerente' : 'atlas',
            abas:r.abas || [], unidades:r.unidade_ids || [], empresas:[],
            podeIncluir:!!r.pode_incluir, podeEditar:!!r.pode_editar, podeExcluir:!!r.pode_excluir };
 }
 function linhaDoAcesso(a){
+  const ger = a.perfil === 'gerente';
   return { email:String(a.email||'').trim().toLowerCase(), nome:a.nome || '',
-           master:!!a.master, abas:a.abas || [], unidade_ids:a.unidades || [],
-           pode_incluir:!!a.podeIncluir, pode_editar:!!a.podeEditar, pode_excluir:!!a.podeExcluir,
+           master: ger ? false : !!a.master,
+           perfil: ger ? 'gerente' : 'atlas',
+           abas: ger ? [] : (a.abas || []), unidade_ids:a.unidades || [],
+           /* gerente não grava dado real em hipótese nenhuma: os verbos vão
+              falsos para o banco, não só para a tela */
+           pode_incluir: ger ? false : !!a.podeIncluir,
+           pode_editar:  ger ? false : !!a.podeEditar,
+           pode_excluir: ger ? false : !!a.podeExcluir,
            criado_por: SESSAO.email || '' };
 }
 function acessoDe(email){
@@ -1721,15 +1732,26 @@ function carregarAcesso(){
      restrito controla ou não enxerga. Quem protege contra travamento é o
      ehMaster() acima, que é lista literal no código. */
   const r = acessoDe(email);
-  ACESSO = { master:false, irrestrito:false, email, semCadastro: !r,
+  const gerente = !!(r && r.perfil === 'gerente');
+  ACESSO = { master:false, irrestrito:false, email, semCadastro: !r, gerente,
              empresas: (r && r.empresas) || [], unidades: (r && r.unidades) || [],
-             abas: (r && r.abas) || [],
-             podeIncluir: !!(r && r.podeIncluir), podeEditar: !!(r && r.podeEditar),
-             podeExcluir: !!(r && r.podeExcluir) };
+             abas: gerente ? [] : ((r && r.abas) || []),
+             /* gerente é perfil de PEDIDO: ela nunca escreve no dado real, e
+                por isso os verbos são zerados aqui também — não só na gravação
+                da linha. Marcação errada na tela de acessos não vira escrita. */
+             podeIncluir: !gerente && !!(r && r.podeIncluir),
+             podeEditar:  !gerente && !!(r && r.podeEditar),
+             podeExcluir: !gerente && !!(r && r.podeExcluir) };
 }
 function podeAba(id){
   const m = MENU.find(x => x.id === id);
-  if(m && m.master && !ACESSO.master) return false;
+  if(!m) return false;
+  /* A gerente não navega o sistema: ela vê a tela dela e nada mais. É LISTA
+     FECHADA, não "abas marcadas" — assim um clique errado na tela de acessos
+     não consegue lhe dar o faturamento. */
+  if(ACESSO.gerente) return !!m.gerente;
+  if(m.gerente) return false;
+  if(m.master && !ACESSO.master) return false;
   return ACESSO.irrestrito || ACESSO.abas.indexOf(id) >= 0;
 }
 /* No formato partido, gravar é seguro para quem tem verbo: a política do banco
@@ -1738,12 +1760,13 @@ function podeAba(id){
    só o master grava. */
 function podeGravar(){
   if(ACESSO.irrestrito) return true;
+  if(ACESSO.gerente) return false;      /* pedir não é gravar */
   if(!NUVEM_PARTIDA) return false;
   return !!(ACESSO.podeIncluir || ACESSO.podeEditar || ACESSO.podeExcluir);
 }
-function podeIncluir(){ return ACESSO.irrestrito || !!(NUVEM_PARTIDA && ACESSO.podeIncluir); }
-function podeEditar(){  return ACESSO.irrestrito || !!(NUVEM_PARTIDA && ACESSO.podeEditar); }
-function podeExcluir(){ return ACESSO.irrestrito || !!(NUVEM_PARTIDA && ACESSO.podeExcluir); }
+function podeIncluir(){ return ACESSO.irrestrito || !!(!ACESSO.gerente && NUVEM_PARTIDA && ACESSO.podeIncluir); }
+function podeEditar(){  return ACESSO.irrestrito || !!(!ACESSO.gerente && NUVEM_PARTIDA && ACESSO.podeEditar); }
+function podeExcluir(){ return ACESSO.irrestrito || !!(!ACESSO.gerente && NUVEM_PARTIDA && ACESSO.podeExcluir); }
 function abasPermitidas(){ return MENU.filter(m => podeAba(m.id)); }
 
 /* Recorta a cópia em memória para o que o login enxerga. É isto que dispensa
@@ -1788,7 +1811,9 @@ function viewAcessos(){
     const nomes = ids.map(id => (uni(id)||{}).sigla || (uni(id)||{}).nome || id);
     return esc(nomes.slice(0,4).join(', ')) + (nomes.length > 4 ? ' <span class="text-slate-400">+' + (nomes.length-4) + '</span>' : '');
   };
+  const ehGerente = a => a.perfil === 'gerente';
   const resumoVerbos = a => {
+    if(ehGerente(a)) return '<span class="text-slate-500">pede exame · não grava</span>';
     const v = [];
     if(a.podeIncluir) v.push('incluir');
     if(a.podeEditar)  v.push('editar');
@@ -1796,10 +1821,14 @@ function viewAcessos(){
     return v.length ? esc(v.join(' · ')) : '<span class="text-slate-500">só visualiza</span>';
   };
   const resumoAbas = a => {
+    if(ehGerente(a)) return '<span class="text-slate-500">Minha unidade</span>';
     const n = (a.abas||[]).length;
     if(!n) return '<span class="text-red-600">nenhuma tela</span>';
     return esc(MENU.filter(m => (a.abas||[]).indexOf(m.id) >= 0).map(m => m.label).join(', '));
   };
+  const selo = a => ehGerente(a)
+    ? '<span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700 whitespace-nowrap">gerente</span>'
+    : '';
   $('#view').innerHTML = `
     <div class="space-y-4">
       <div class="rounded-xl border border-blue-200 bg-blue-50 px-5 py-4 text-sm text-blue-900 flex items-start gap-3">
@@ -1837,7 +1866,7 @@ function viewAcessos(){
             <tbody class="divide-y divide-slate-100">
               ${lista.length ? lista.map(a => `
                 <tr class="hover:bg-slate-50 align-top">
-                  <td class="px-4 py-3 font-medium text-slate-700 break-all">${esc(a.email)}</td>
+                  <td class="px-4 py-3 font-medium text-slate-700 break-all">${esc(a.email)}${selo(a)}</td>
                   <td class="px-4 py-3 text-xs text-slate-600">${esc(a.nome||'—')}</td>
                   <td class="px-4 py-3 text-xs text-slate-600">${resumoUnis(a)}</td>
                   <td class="px-4 py-3 text-xs text-slate-600">${resumoVerbos(a)}</td>
@@ -1864,9 +1893,14 @@ function editarAcesso(email){
       { name:'email', label:'E-mail do login', req:true, col:'sm:col-span-2',
         hint:'exatamente o e-mail criado no Supabase (Authentication → Users)' },
       { name:'nome', label:'Pessoa / cargo', col:'sm:col-span-2', ph:'Ex.: Alessandra — RH Emerald' },
-      { type:'sep', label:'Telas que pode abrir' },
+      { name:'perfil', label:'Perfil de acesso', type:'select', col:'sm:col-span-2',
+        options:[{ v:'atlas',   l:'Atlas — opera o sistema' },
+                 { v:'gerente', l:'Gerente do cliente — só pede exames e acompanha' }],
+        hint:'gerente vê apenas a tela "Minha unidade" e nunca grava no cadastro; ' +
+             'as telas e os verbos abaixo não se aplicam a ela' },
+      { type:'sep', name:'sepTelas', label:'Telas que pode abrir' },
       { name:'abas', label:'Menu lateral', type:'multi', col:'sm:col-span-2',
-        options: MENU.filter(m => !m.master).map(m => ({ v:m.id, l:m.label })),
+        options: MENU.filter(m => !m.master && !m.gerente).map(m => ({ v:m.id, l:m.label })),
         hint:'sem nenhuma marcada, a pessoa entra e não vê tela nenhuma' },
       { type:'sep', label:'O que pode enxergar' },
       { name:'empresas', label:'Atalho: marcar todas as unidades de', type:'multi', col:'sm:col-span-2',
@@ -1876,13 +1910,29 @@ function editarAcesso(email){
       { name:'unidades', label:'Unidades avulsas', type:'multi', col:'sm:col-span-2',
         options: opcoesUnidades().map(o => ({ v:o.v, l:o.l })),
         hint:'nada é herdado: unidade criada depois precisa ser liberada aqui de novo' },
-      { type:'sep', label:'O que pode fazer' },
+      { type:'sep', name:'sepFazer', label:'O que pode fazer' },
       { name:'podeIncluir', label:'Pode incluir registros novos', type:'checkbox' },
       { name:'podeEditar',  label:'Pode editar registros existentes', type:'checkbox' },
       { name:'podeExcluir', label:'Pode excluir registros', type:'checkbox',
         hint:'sem nenhum destes, a pessoa só visualiza e imprime' }
     ],
-    values: a ? Object.assign({}, a) : { abas:[], empresas:[], unidades:[] },
+    values: a ? Object.assign({ perfil:'atlas' }, a)
+              : { perfil:'atlas', abas:[], empresas:[], unidades:[] },
+    /* perfil gerente esconde o que não se aplica a ela — marcar coisa que não
+       tem efeito é o tipo de confusão que volta como bug daqui a três semanas */
+    afterRender: form => {
+      const sel = form.elements['perfil'];
+      const some = ['sepTelas','abas','sepFazer','podeIncluir','podeEditar','podeExcluir'];
+      const pintar = () => {
+        const ger = sel.value === 'gerente';
+        some.forEach(n => {
+          const el = form.querySelector('[data-campo="' + n + '"]');
+          if(el) el.classList.toggle('hidden', ger);
+        });
+      };
+      sel.addEventListener('change', pintar);
+      pintar();
+    },
     onSave: v => {
       v.email = String(v.email||'').trim();
       if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v.email)){ toast('E-mail inválido.', 'erro'); return; }
@@ -1899,16 +1949,21 @@ function editarAcesso(email){
         });
       });
       v.empresas = [];
+      /* gerente é perfil fechado: a tela dela não vem de "abas marcadas", e ela
+         não grava. Zerado aqui para o que vai ao banco bater com a regra. */
+      const ger = v.perfil === 'gerente';
+      if(ger){ v.abas = []; v.podeIncluir = false; v.podeEditar = false; v.podeExcluir = false; }
       if(a) Object.assign(a, v);
       else acessos().push(Object.assign({ criadoEm:new Date().toISOString(), criadoPor:SESSAO.email||'' }, v));
       gravarAcessos();
       closeModal(); go('acessos');
       const avisos = [];
       if(pelaEmpresa) avisos.push(pelaEmpresa + ' unidade(s) marcadas pelo atalho de empresa');
-      if(!(v.abas||[]).length) avisos.push('nenhuma tela marcada — a pessoa não vai ver nada');
-      if(!(v.unidades||[]).length) avisos.push('nenhuma unidade marcada');
+      if(!ger && !(v.abas||[]).length) avisos.push('nenhuma tela marcada — a pessoa não vai ver nada');
+      if(!(v.unidades||[]).length) avisos.push('nenhuma unidade marcada — sem isso ela não enxerga ninguém');
+      const ok = (ger || (v.abas||[]).length) && (v.unidades||[]).length;
       toast('Permissões de ' + v.email + ' salvas.' + (avisos.length ? ' ' + avisos.join('; ') + '.' : ''),
-            ((v.abas||[]).length && (v.unidades||[]).length) ? 'ok' : 'alerta');
+            ok ? 'ok' : 'alerta');
     }
   });
 }
@@ -1933,6 +1988,22 @@ function gravarAcessos(){
   sb.from('atlas_acesso')
     .upsert(ACESSOS_NUVEM.map(linhaDoAcesso), { onConflict:'email' })
     .then(r => { if(r && r.error) toast('Não consegui gravar as permissões: ' + r.error.message, 'erro'); });
+}
+
+/* ═════════ MINHA UNIDADE — a tela da gerente ═════════
+   Etapa 5 do plano. Por enquanto é só o esqueleto, para o perfil `gerente` já
+   ter para onde ir; as três sub-abas (Pedidos, Acompanhamento, Estatísticas)
+   entram em seguida. */
+function viewMinhaUnidade(){
+  const unis = (DB.unidades||[]).map(u => uniNome(u.id)).filter(Boolean);
+  $('#view').innerHTML = `
+    <div class="bg-white rounded-xl border border-slate-200 p-10 text-center max-w-xl mx-auto">
+      <i class="fa-solid fa-helmet-safety text-3xl text-slate-300 mb-3"></i>
+      <p class="text-sm font-semibold text-slate-700">Esta tela está sendo construída</p>
+      <p class="text-xs text-slate-500 mt-2">Aqui você vai pedir exames e acompanhar
+        ${unis.length ? '<b>' + esc(unis.join(' · ')) + '</b>' : 'a sua unidade'}.</p>
+      <p class="text-xs text-slate-400 mt-3">Se precisar de alguma coisa agora, fale com a Atlas.</p>
+    </div>`;
 }
 
 function telaSemAcesso(){
@@ -1986,7 +2057,7 @@ function go(id){
   ({ dashboard:viewDashboard, acompanhamentos:viewAcompanhamentos, empresas:viewEmpresas, laudos:viewLaudos, cadastros:viewCadastros,
      exames:viewExames, asos:viewAsos, visitas:viewVisitas, atestados:viewAtestados,
      faturamento:viewFaturamento, documentos:viewDocumentos, backup:viewBackup,
-     acessos:viewAcessos })[id]();
+     acessos:viewAcessos, minhaunidade:viewMinhaUnidade })[id]();
   renderBanner();
   if(window.innerWidth < 1024) fecharSidebar();
   window.scrollTo(0,0);
@@ -2090,7 +2161,7 @@ function openForm({ title, fields, values = {}, onSave, largura = 'max-w-3xl', a
     `relative mx-auto my-4 sm:my-10 w-[95%] ${largura} bg-white rounded-xl shadow-2xl max-h-[92vh] flex flex-col fade-in`;
   $('#modalBody').innerHTML = `<form id="modalForm" class="grid grid-cols-1 sm:grid-cols-2 gap-4">
     ${fields.map(f => f.type === 'sep'
-      ? `<p class="sm:col-span-2 text-xs font-semibold uppercase tracking-wide text-slate-400 border-b border-slate-200 pb-1 mt-2">${esc(f.label)}</p>`
+      ? `<p class="sm:col-span-2 text-xs font-semibold uppercase tracking-wide text-slate-400 border-b border-slate-200 pb-1 mt-2" data-campo="${esc(f.name||'')}">${esc(f.label)}</p>`
       : campoHTML(f, values[f.name])).join('')}</form>`;
   $('#modalFoot').innerHTML = `
     <button onclick="closeModal()" class="px-4 py-2 rounded-lg text-sm text-slate-600 hover:bg-slate-100">Cancelar</button>
