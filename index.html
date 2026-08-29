@@ -204,6 +204,12 @@ async function nuvemLer(){
   const partida = await nuvemLerPartida();
   if(partida){ NUVEM_PARTIDA = true; return partida.base; }
   NUVEM_PARTIDA = false;
+  /* A atlas_estado é a base INTEIRA num documento só. Ela é rede de segurança
+     DO MASTER e nada mais: quem não é master não cai aqui nem que a política do
+     banco afrouxe. Foi por este caminho que um login sem permissão nenhuma leu
+     a base toda em 28/08 — a política da atlas_estado tinha ficado aberta para
+     qualquer autenticado, e o app caía nela quando não achava linha de unidade. */
+  if(!ehMaster(SESSAO.email || '')) return null;
   try{
     const { data, error } = await sb.from('atlas_estado').select('dados').eq('id',1).single();
     if(error){ console.warn('nuvemLer', error.message); return null; }
@@ -1705,11 +1711,15 @@ function carregarAcesso(){
      nos dois e dá para testar de verdade. */
   if(!email && !CLOUD_ON){ ACESSO = ACESSO_TOTAL(''); return; }
   if(ehMaster(email)){ ACESSO = ACESSO_TOTAL(email); return; }
-  /* Enquanto NINGUÉM foi cadastrado, o controle fica dormindo. Sem isto, um
-     endereço de master escrito diferente do que está na lista tranca todo mundo
-     para fora — foi o que aconteceu com gestao@atlasgestao.com contra
-     .com.br. A partir do primeiro acesso cadastrado, vale a regra. */
-  if(!acessos().length){ ACESSO = ACESSO_TOTAL(email); return; }
+  /* NÃO volte a pôr aqui um "o controle dorme enquanto ninguém foi cadastrado".
+     Existiu, para um endereço de master errado não trancar todo mundo, e virou
+     porta dos fundos em 28/08: a política do banco deixa cada pessoa ler APENAS
+     A PRÓPRIA linha de permissão, então quem não tem linha recebe a lista
+     VAZIA — e a regra concluía "ainda não configuraram" e liberava tudo.
+     Justamente para quem ela deveria barrar.
+     A lição: uma trava não pode se decidir por informação que o próprio usuário
+     restrito controla ou não enxerga. Quem protege contra travamento é o
+     ehMaster() acima, que é lista literal no código. */
   const r = acessoDe(email);
   ACESSO = { master:false, irrestrito:false, email, semCadastro: !r,
              empresas: (r && r.empresas) || [], unidades: (r && r.unidades) || [],
