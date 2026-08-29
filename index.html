@@ -393,6 +393,73 @@ async function nuvemLerAcessos(){
   }catch(e){ console.warn('nuvemLerAcessos', e); return null; }
 }
 
+/* ═════════ PEDIDOS DAS GERENTES (atlas_solicitacao) ═════════
+   Tabela À PARTE de propósito. Se o pedido fosse uma emissão, ele moraria
+   dentro da linha jsonb da unidade — a gerente teria escrita ali e, pela API,
+   poderia gravar qualquer coisa naquela linha. Além disso faturamento, alertas
+   e contagens varrem DB.emissoes, e um pedido não conferido entraria em todos.
+   Aqui ele é invisível para essas telas por construção.
+   Em modo local (sem nuvem) os pedidos vivem só em memória: melhor perdê-los ao
+   recarregar do que enfiá-los no JSON da unidade. */
+let SOLICITACOES = [];
+function solicitacoes(){ return SOLICITACOES; }
+function solicitacao(id){ return SOLICITACOES.find(s => s.id === id) || null; }
+function pedidosAbertos(){ return SOLICITACOES.filter(s => s.status === 'aberto'); }
+
+/* a tabela fala snake_case */
+function pedidoDaLinha(r){
+  return { id:r.id, unidadeId:r.unidade_id, colaboradorId:r.colaborador_id || '',
+           nome:r.nome || '', cpf:r.cpf || '', funcao:r.funcao || '',
+           funcaoNova:r.funcao_nova || '', tipoExame:r.tipo_exame || 'PERIODICO',
+           observacao:r.observacao || '', status:r.status || 'aberto',
+           motivoRecusa:r.motivo_recusa || '', emissaoId:r.emissao_id || '',
+           pedidoPor:r.pedido_por || '', pedidoEm:r.pedido_em || '',
+           resolvidoPor:r.resolvido_por || '', resolvidoEm:r.resolvido_em || '' };
+}
+function linhaDoPedido(p){
+  return { unidade_id:p.unidadeId, colaborador_id:p.colaboradorId || null,
+           nome:p.nome, cpf:cpfDigitos(p.cpf), funcao:p.funcao || null,
+           funcao_nova:p.funcaoNova || null, tipo_exame:p.tipoExame,
+           observacao:p.observacao || null, status:'aberto', pedido_por:SESSAO.email || '' };
+}
+
+async function nuvemLerSolicitacoes(){
+  if(!nuvemLigada()) return null;
+  try{
+    const { data, error } = await sb.from('atlas_solicitacao').select('*').order('pedido_em');
+    if(error){ console.warn('nuvemLerSolicitacoes', error.message); return null; }
+    return (data || []).map(pedidoDaLinha);
+  }catch(e){ console.warn('nuvemLerSolicitacoes', e); return null; }
+}
+/* a gerente abre o pedido; a política do banco confere unidade e autor */
+async function nuvemAbrirSolicitacao(p){
+  if(!nuvemLigada()){ SOLICITACOES.push(Object.assign({ id:uid('sol'), status:'aberto',
+      pedidoPor:SESSAO.email||'', pedidoEm:new Date().toISOString() }, p)); return { ok:true }; }
+  try{
+    const { data, error } = await sb.from('atlas_solicitacao').insert(linhaDoPedido(p)).select().single();
+    if(error) return { ok:false, motivo:error.message };
+    SOLICITACOES.push(pedidoDaLinha(data));
+    return { ok:true };
+  }catch(e){ return { ok:false, motivo:String(e && e.message || e) }; }
+}
+/* só a Atlas resolve — a política recusa o resto, e o gatilho impede que um
+   "cancelar" da gerente altere o conteúdo do pedido */
+async function nuvemResolverSolicitacao(id, patch){
+  const p = solicitacao(id);
+  if(!p) return { ok:false, motivo:'pedido não encontrado' };
+  const antes = Object.assign({}, p);
+  Object.assign(p, patch, { resolvidoPor:SESSAO.email || '', resolvidoEm:new Date().toISOString() });
+  if(!nuvemLigada()) return { ok:true };
+  try{
+    const { error } = await sb.from('atlas_solicitacao').update({
+      status:p.status, motivo_recusa:p.motivoRecusa || null, emissao_id:p.emissaoId || null,
+      resolvido_por:p.resolvidoPor, resolvido_em:p.resolvidoEm
+    }).eq('id', id);
+    if(error){ Object.assign(p, antes); return { ok:false, motivo:error.message }; }
+    return { ok:true };
+  }catch(e){ Object.assign(p, antes); return { ok:false, motivo:String(e && e.message || e) }; }
+}
+
 /* devolve { base, linhas } ou null quando ainda não há nada partido */
 async function nuvemLerPartida(){
   if(!nuvemLigada()) return null;
@@ -2028,12 +2095,18 @@ function telaSemAcesso(){
 }
 
 /* contadores que viram badge vermelha no menu lateral */
+const DICA_BADGE = {
+  cadastros:      'cadastros criados automaticamente aguardando revisão',
+  exames:         'exames sem colaborador cadastrado',
+  acompanhamentos:'pedidos das gerentes esperando resposta'
+};
 function badgeMenu(id){
   let n = 0;
-  if(id === 'cadastros') n = colabsParaRevisar().length;
-  if(id === 'exames')    n = emissoesSemCadastro().length;
+  if(id === 'cadastros')       n = colabsParaRevisar().length;
+  if(id === 'exames')          n = emissoesSemCadastro().length;
+  if(id === 'acompanhamentos') n = pedidosAbertos().length;
   return n ? `<span class="ml-auto text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-red-500 text-white"
-                title="${id==='cadastros'?'cadastros criados automaticamente aguardando revisão':'exames sem colaborador cadastrado'}">${n}</span>` : '';
+                title="${DICA_BADGE[id]||''}">${n}</span>` : '';
 }
 function renderNav(){
   $('#nav').innerHTML = abasPermitidas().map(m => `
@@ -2608,7 +2681,7 @@ function agendarDeAlerta(colaboradorId){
    junta os exames parados no fornecedor com os alertas de ASO num só painel,
    pesquisável por nome — separado do painel geral a pedido da Jessica */
 /* cada grade da tela tem a sua própria busca — filtrar uma não mexe nas outras */
-const UIAcomp = { fazer:'', acompanhar:'', afastados:'', laudos:'' };
+const UIAcomp = { pedidos:'', fazer:'', acompanhar:'', afastados:'', laudos:'' };
 const chaveAcomp = (nome, uni) => norm(nome) + '|' + (uni||'');
 /* busca ampla: nome, unidade, função, tipo e status entram no mesmo saco */
 function filtrarAcomp(lista, termo){
@@ -2628,6 +2701,46 @@ function fmtDiasAcomp(d){
   if(d === 0)   return `<span class="text-amber-700 font-semibold">vence hoje</span>`;
   return `<span class="text-amber-700">em ${d} d</span>`;
 }
+/* Os pedidos das gerentes, no formato das outras grades. Só os abertos: pedido
+   resolvido sai da fila e o que sobra é a emissão. */
+function itensPedidos(){
+  const porNome = nome => DB.colaboradores.find(x => norm(x.nome) === norm(nome)) || null;
+  const recusar = { label:'Recusar', icon:'fa-xmark', dica:'exige motivo, que a gerente vê',
+                    cls:'bg-white border border-slate-300 text-slate-600 hover:bg-slate-50' };
+  return pedidosAbertos().map(p => {
+    const c = (p.colaboradorId && colab(p.colaboradorId)) || porNome(p.nome);
+    const novo = !c;
+    return {
+      origem:'Pedido', pedidoId:p.id, colaborador:p.nome, unidadeId:p.unidadeId,
+      semCadastro: novo,
+      funcao: p.funcaoNova || p.funcao || (c && c.funcao) || '',
+      tipo: tipoLabel(p.tipoExame),
+      quando: 'pedido ' + fmtDate((p.pedidoEm || '').slice(0,10)) +
+              (p.pedidoPor ? ' · ' + p.pedidoPor : ''),
+      dias: null,
+      statusLabel: novo ? 'Sem cadastro' : 'Pedido aberto',
+      statusCls: novo ? 'bg-amber-100 text-amber-700' : 'bg-indigo-100 text-indigo-700',
+      acoes: [ novo
+        ? { label:'Cadastrar e agendar', icon:'fa-user-plus', acao:`aprovarPedido('${p.id}')`,
+            dica:'cria a ficha marcada como "revisar" e abre o exame' }
+        : { label:'Agendar', icon:'fa-calendar-plus', acao:`aprovarPedido('${p.id}')`,
+            dica:'abre o exame em Solicitado' },
+        recusar ]
+    };
+  });
+}
+/* pedido de quem JÁ tem exame andando: o certo é apontar para o exame que
+   existe, não criar outro. Recusar seria errado — o pedido está correto, só já
+   estava sendo feito, e recusar faria a gerente achar que precisa de outra coisa. */
+function marcarPedidoComExame(p, f){
+  p.statusLabel = 'Já tem exame';
+  p.statusCls = 'bg-emerald-100 text-emerald-700';
+  p.tipo = p.tipo + ' · já ' + (f.statusLabel || '').toLowerCase();
+  p.acoes = [{ label:'Vincular', icon:'fa-link', acao:`vincularPedido('${p.pedidoId}')`,
+               dica:'aponta o pedido para o exame que já está em andamento',
+               cls:'bg-emerald-600 text-white hover:bg-emerald-700' }].concat(p.acoes.slice(1));
+}
+
 function itensAcompanhamento(){
   const colabDe = nome => DB.colaboradores.find(x => norm(x.nome) === norm(nome)) || null;
   const funcaoDe = nome => { const c = colabDe(nome); return c ? (c.funcao||'') : ''; };
@@ -2651,21 +2764,41 @@ function itensAcompanhamento(){
     statusLabel:'Solicitado', statusCls:'bg-amber-100 text-amber-700',
     acaoLabel:'Abrir laudo', acaoIcon:'fa-file-shield', acao:`editarLaudo('${l.id}')`
   }));
-  /* Fusão: se o colaborador já tem exame no fornecedor (solicitado/agendado), o
-     alerta de ASO dele não precisa do botão "agendar" nem da badge "vencido" —
-     leva a contagem de dias (urgência) para o item do fornecedor e descarta o ASO. */
-  const fornPorChave = {};
+  /* ── FUSÃO ENTRE AS TRÊS GRADES ──
+     Quem já tem exame no fornecedor não precisa aparecer também como alerta de
+     ASO: a urgência (dias) viaja para a linha do fornecedor e o alerta some.
+
+     O PEDIDO da gerente absorve o alerta de ASO da mesma pessoa — é a mesma
+     necessidade, e o pedido é o único lugar onde alguém está esperando resposta.
+     Você responde a gerente e resolve o seu vencimento no mesmo clique.
+
+     Já o exame EM ANDAMENTO não é absorvido pelo pedido: são duas pendências
+     diferentes (uma pede resposta, a outra pede acompanhamento). O pedido só
+     ganha a marca de que o exame já existe, para você Vincular em vez de
+     duplicar. Depois de vinculado o pedido sai da fila e sobra o exame. */
+  const pedItens = itensPedidos();
+  const fornPorChave = {}, pedPorChave = {};
   fornItens.forEach(f => { fornPorChave[chaveAcomp(f.colaborador, f.unidadeId)] = f; });
+  pedItens.forEach(p => { pedPorChave[chaveAcomp(p.colaborador, p.unidadeId)] = p; });
+
   const asoFinal = [];
   asoItens.forEach(a => {
-    const f = fornPorChave[chaveAcomp(a.colaborador, a.unidadeId)];
-    if(f){ if(f.dias == null) f.dias = a.dias; }   /* já solicitado: some com o ASO redundante */
-    else { asoFinal.push(a); }
+    const k = chaveAcomp(a.colaborador, a.unidadeId);
+    const f = fornPorChave[k], p = pedPorChave[k];
+    if(f){ if(f.dias == null) f.dias = a.dias; return; }   /* já solicitado */
+    if(p){ if(p.dias == null) p.dias = a.dias; return; }   /* a gerente já pediu */
+    asoFinal.push(a);
   });
-  /* A FAZER: ASOs vencidos/vencendo ainda sem exame pedido (ação = agendar).
-     ACOMPANHAR: exames já solicitados/agendados no fornecedor + laudos solicitados.
+  pedItens.forEach(p => {
+    const f = fornPorChave[chaveAcomp(p.colaborador, p.unidadeId)];
+    if(f) marcarPedidoComExame(p, f);
+  });
+
+  /* PEDIDOS: o que veio das gerentes e ainda não foi respondido.
+     A FAZER: ASOs vencidos/vencendo sem exame pedido nem pedido de gerente.
+     ACOMPANHAR: exames já solicitados/agendados no fornecedor + laudos.
      Sai sem filtro — cada grade aplica a busca dela. */
-  return { aFazer: asoFinal, acompanhar: fornItens.concat(laudoItens) };
+  return { pedidos: pedItens, aFazer: asoFinal, acompanhar: fornItens.concat(laudoItens) };
 }
 /* junta numa linha só tudo do mesmo colaborador (mesma pessoa + unidade):
    quem está com ASO atrasado e o exame já solicitado aparece uma vez, não duas */
@@ -2678,6 +2811,18 @@ function agruparAcompanhamento(lista){
   });
   return ordem.map(k => grupos[k]);
 }
+/* Uma linha pode ter mais de um botão — a grade de Pedidos precisa de
+   Agendar/Vincular ao lado de Recusar. As grades antigas continuam mandando um
+   só (acao/acaoLabel/acaoIcon) e caem no primeiro ramo. */
+function botoesLinha(x){
+  const acs = (x.acoes && x.acoes.length) ? x.acoes
+            : (x.acao ? [{ label:x.acaoLabel, icon:x.acaoIcon, acao:x.acao }] : []);
+  return acs.map(a => `<button onclick="${a.acao}" title="${esc(a.dica||'')}"
+      class="ml-1 px-2.5 py-1.5 rounded-lg text-xs whitespace-nowrap ${
+        a.cls || 'bg-accent text-white hover:bg-blue-700'}">
+      <i class="fa-solid ${a.icon} mr-1"></i>${esc(a.label)}</button>`).join('');
+}
+
 function gridAcompanhamento(bruta, titulo, icon, chave, vazioMsg, comCsv){
   const lista = filtrarAcomp(bruta, UIAcomp[chave]);
   const grupos = agruparAcompanhamento(lista);
@@ -2692,9 +2837,7 @@ function gridAcompanhamento(bruta, titulo, icon, chave, vazioMsg, comCsv){
       <td class="px-4 py-3 text-xs text-slate-500 whitespace-nowrap">${esc(x.quando)}</td>
       <td class="px-4 py-3 text-xs whitespace-nowrap">${fmtDiasAcomp(x.dias)}</td>
       <td class="px-4 py-3">${badge(x.statusLabel, x.statusCls)}</td>
-      <td class="px-4 py-3 text-right whitespace-nowrap no-print">
-        <button onclick="${x.acao}" class="px-2.5 py-1.5 rounded-lg text-xs bg-accent text-white hover:bg-blue-700 whitespace-nowrap">
-          <i class="fa-solid ${x.acaoIcon} mr-1"></i>${x.acaoLabel}</button></td>
+      <td class="px-4 py-3 text-right whitespace-nowrap no-print">${botoesLinha(x)}</td>
     </tr>`).join('')).join('');
   return `
     <div class="bg-white rounded-xl border border-slate-200 overflow-hidden print-block">
@@ -2904,21 +3047,51 @@ function aplicarConciliacao(){
   toast(`Conciliação aplicada: ${vinc} vinculado(s), ${del} removido(s).`, 'ok');
   viewAcompanhamentos();
 }
+/* A tela virou um funil, de cima para baixo: o que chegou de fora (Pedidos), o
+   que você mesma achou pelo vencimento (A fazer), o que já está rodando
+   (Acompanhar). As três terminam no mesmo lugar — uma emissão.
+   Em abas, mas com CONTADOR em cada pílula: sem ele a separação esconderia
+   pendência atrás de aba fechada, e hoje a página mostra tudo de uma vez. */
+const UIAcompAba = { aba:'' };
+function abaAcomp(id){ UIAcompAba.aba = id; viewAcompanhamentos(); }
 function viewAcompanhamentos(){
   const it = itensAcompanhamento();
   const alertasLaudo = alertasCriticos().filter(a => a.tipo === 'Laudo');
   const nSem = emissoesSemCadastro().length;
+  const nAfast = colabsAfastados().length;
+
+  const abas = [
+    { id:'pedidos',    label:'Pedidos',    icon:'fa-inbox',          n:it.pedidos.length, tom:'alerta' },
+    { id:'fazer',      label:'A fazer',    icon:'fa-calendar-plus',  n:it.aFazer.length },
+    { id:'acompanhar', label:'Acompanhar', icon:'fa-truck-medical',  n:it.acompanhar.length },
+    { id:'afastados',  label:'Afastados',  icon:'fa-user-clock',     n:nAfast },
+    { id:'laudos',     label:'Laudos',     icon:'fa-file-shield',    n:alertasLaudo.length }
+  ];
+  /* abre em Pedidos quando tem gente esperando resposta; senão, no trabalho do dia */
+  if(!UIAcompAba.aba) UIAcompAba.aba = it.pedidos.length ? 'pedidos' : 'fazer';
+  if(!abas.some(a => a.id === UIAcompAba.aba)) UIAcompAba.aba = 'fazer';
+  const aba = UIAcompAba.aba;
+
+  const corpo =
+    aba === 'pedidos'    ? gridAcompanhamento(it.pedidos, 'Pedidos das gerentes', 'fa-inbox', 'pedidos',
+                             'Nenhum pedido em aberto.')
+  : aba === 'fazer'      ? gridAcompanhamento(it.aFazer, 'Agendamentos a fazer', 'fa-calendar-plus', 'fazer',
+                             'Nenhum exame a agendar — tudo em dia!', true)
+  : aba === 'acompanhar' ? gridAcompanhamento(it.acompanhar, 'Acompanhar agendamentos', 'fa-truck-medical',
+                             'acompanhar', 'Nada solicitado ou agendado no momento.')
+  : aba === 'afastados'  ? (gridAfastados() || `<div class="bg-white rounded-xl border border-slate-200 p-8 text-center text-sm text-slate-500">Ninguém afastado no momento.</div>`)
+  :                        gridAlertas('Laudo', 'Alertas de laudos SST — atrasos e próximos vencimentos',
+                             alertasLaudo, 'laudos');
+
   $('#view').innerHTML = `
-    <div class="space-y-5">
+    <div class="space-y-4">
+      ${barraAbas(abas, aba, id => `abaAcomp('${id}')`)}
       <div class="flex items-center justify-end no-print">
         <button onclick="conciliarSemCadastro()" class="px-3 py-2 rounded-lg text-sm bg-white border border-slate-300 text-slate-700 hover:bg-slate-50">
           <i class="fa-solid fa-wand-magic-sparkles mr-1 text-amber-500"></i>Conciliar exames sem cadastro${nSem ? ` <span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700">${nSem}</span>` : ''}</button>
       </div>
       ${alertaSemCadastro()}
-      ${gridAcompanhamento(it.aFazer, 'Agendamentos a fazer', 'fa-calendar-plus', 'fazer', 'Nenhum exame a agendar — tudo em dia!', true)}
-      ${gridAcompanhamento(it.acompanhar, 'Acompanhar agendamentos', 'fa-truck-medical', 'acompanhar', 'Nada solicitado ou agendado no momento.')}
-      ${gridAfastados()}
-      ${gridAlertas('Laudo', 'Alertas de laudos SST — atrasos e próximos vencimentos', alertasLaudo, 'laudos')}
+      ${corpo}
     </div>`;
 }
 
@@ -5741,8 +5914,10 @@ function editarColab(id, pre){
 
 /* cria a solicitação de ASO a partir do cadastro do colaborador.
    Novo → Admissional; afastado → Retorno ao trabalho; senão → Periódico. Situação: Solicitado. */
-function solicitarAsoDoCadastro(c, eraNovo){
-  const tipo = eraNovo ? 'ADMISSIONAL' : (c.status === 'Afastado' ? 'RETORNO' : 'PERIODICO');
+function solicitarAsoDoCadastro(c, eraNovo, tipoForcado){
+  /* tipoForcado: quando o pedido da gerente já disse qual exame é, a escolha
+     dela manda — ela sabe se foi mudança de função, retorno ou desligamento */
+  const tipo = tipoForcado || (eraNovo ? 'ADMISSIONAL' : (c.status === 'Afastado' ? 'RETORNO' : 'PERIODICO'));
   const em = {
     id: uid('em'), colaborador: c.nome, unidadeId: c.unidadeId, funcao: c.funcao || '',
     tipoExame: tipo, status: 'SOLICITADO', exameLab:'', laboratorio:'', medico:'',
@@ -5762,6 +5937,88 @@ function solicitarAsoDoCadastro(c, eraNovo){
 }
 /* aciona o onSave do formulário sinalizando "também solicitar ASO" */
 function salvarESolicitarAso(){ if(modalSave) modalSave('solicitarAso'); }
+
+/* ═════════ RESOLVER PEDIDO DA GERENTE ═════════
+   Aprovar não abre formulário: cria a emissão em SOLICITADO, como a Jessica
+   descreveu — daí em diante vale o fluxo de sempre (Acompanhar → Agendado →
+   Realizado), e a gerente vê o mesmo status que você.
+   As checagens finas (diff da matriz na Mudança de Risco, status no Demissional,
+   reconferência do que mudou desde o pedido) são a etapa 6. */
+async function aprovarPedido(id){
+  const p = solicitacao(id);
+  if(!p || p.status !== 'aberto') return;
+  const porNome = nome => DB.colaboradores.find(x => norm(x.nome) === norm(nome)) || null;
+  let c = (p.colaboradorId && colab(p.colaboradorId)) || porNome(p.nome);
+  const eraNovo = !c;
+
+  if(eraNovo){
+    if(!cpfValido(p.cpf)){ toast('O pedido veio com CPF inválido — recuse e peça o certo.', 'erro'); return; }
+    const jaTem = DB.colaboradores.find(x => cpfDigitos(x.cpf) === cpfDigitos(p.cpf));
+    if(jaTem){
+      toast('Esse CPF já está cadastrado como ' + jaTem.nome + '. Vinculando ao cadastro que existe.', 'alerta');
+      c = jaTem;
+    }else{
+      /* a ficha nasce incompleta de propósito: a gerente manda nome, CPF e
+         função, e o resto (admissão, sexo, matrícula) é você que completa.
+         `revisar` já existe e some sozinho quando você salva a ficha. */
+      c = { id:uid('col'), nome:p.nome, cpf:p.cpf, unidadeId:p.unidadeId,
+            funcao:p.funcao || '', sexo:'', admissao:'', status:'Ativo',
+            revisar:true,
+            origemAuto:'pedido de ' + tipoLabel(p.tipoExame).toLowerCase() +
+                       (p.pedidoPor ? ' · ' + p.pedidoPor : '') +
+                       ' · ' + fmtDate((p.pedidoEm||'').slice(0,10)) };
+      DB.colaboradores.push(c);
+    }
+  }
+
+  const em = solicitarAsoDoCadastro(c, eraNovo && !c.admissao, p.tipoExame);
+  const r = await nuvemResolverSolicitacao(id, { status:'agendado', emissaoId: em.id });
+  if(!r.ok){ toast('Não consegui marcar o pedido como resolvido: ' + r.motivo, 'erro'); }
+  save();
+  go('acompanhamentos');
+  toast((eraNovo ? 'Ficha criada (marcada como "revisar") e exame' : 'Exame') +
+        ' aberto para ' + c.nome + ' — ' + tipoLabel(p.tipoExame) + '.', 'ok');
+}
+
+/* pedido certo que já estava sendo feito: aponta para a emissão existente */
+async function vincularPedido(id){
+  const p = solicitacao(id);
+  if(!p || p.status !== 'aberto') return;
+  const em = emissoesPendentesFornecedor()
+    .find(e => norm(e.colaborador) === norm(p.nome) && e.unidadeId === p.unidadeId);
+  if(!em){ toast('Não achei mais exame em andamento para essa pessoa — use Agendar.', 'alerta'); return; }
+  const r = await nuvemResolverSolicitacao(id, { status:'vinculado', emissaoId: em.id });
+  if(!r.ok){ toast('Não consegui vincular: ' + r.motivo, 'erro'); return; }
+  go('acompanhamentos');
+  toast('Pedido de ' + p.nome + ' apontado para o exame que já estava em andamento.', 'ok');
+}
+
+function recusarPedido(id){
+  const p = solicitacao(id);
+  if(!p || p.status !== 'aberto') return;
+  openForm({
+    title: 'Recusar o pedido de ' + p.nome,
+    largura: 'max-w-xl',
+    fields: [
+      { type:'html', name:'resumo',
+        html:`<p class="sm:col-span-2 text-xs text-slate-600 bg-slate-50 rounded-lg px-3 py-2">
+              ${esc(tipoLabel(p.tipoExame))} · ${esc(uniNome(p.unidadeId))} ·
+              pedido por ${esc(p.pedidoPor||'—')}</p>` },
+      { name:'motivo', label:'Motivo', type:'textarea', req:true, col:'sm:col-span-2',
+        ph:'Ex.: fez o periódico em 12/07, o próximo é só em julho de 2027.',
+        hint:'a gerente vê este texto na tela dela — sem ele, ela reenvia o mesmo pedido' }
+    ],
+    values: {},
+    onSave: async v => {
+      const motivo = String(v.motivo||'').trim();
+      if(!motivo){ toast('Diga o motivo — é o que evita o pedido voltar igual.', 'erro'); return; }
+      const r = await nuvemResolverSolicitacao(id, { status:'recusado', motivoRecusa:motivo });
+      if(!r.ok){ toast('Não consegui recusar: ' + r.motivo, 'erro'); return; }
+      closeModal(); go('acompanhamentos');
+      toast('Pedido de ' + p.nome + ' recusado. A gerente vê o motivo.', 'ok');
+    }
+  });
+}
 
 /* ═════════ EQUALIZAÇÃO DE CAMPOS ENTRE MÓDULOS ═════════
    O cadastro do colaborador é a fonte da verdade de nome, unidade e função.
@@ -10508,6 +10765,13 @@ $('#hojeLabel').textContent = HOJE.toLocaleDateString('pt-BR', { weekday:'long',
   carregarAcesso();
   aplicarEscopoAcesso();
   armarFimDeSessao();
+
+  /* pedidos das gerentes — depois do acesso, porque a política do banco recorta
+     pelo login: a Atlas recebe todos, cada gerente recebe só os das unidades dela */
+  if(CLOUD_ON){
+    const peds = await comLimite(nuvemLerSolicitacoes(), 8000);
+    if(peds) SOLICITACOES = peds;
+  }
 
   go('dashboard');
 
