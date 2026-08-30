@@ -1718,7 +1718,7 @@ const MENU = [
   { id:'acessos',     label:'Acessos e permissões', icon:'fa-user-shield',      sub:'Quem entra no app e o que cada login enxerga', master:true },
   /* A tela da gerente. `gerente:true` é o espelho de `master:true`: item que só
      aquele perfil vê — e, no caso dela, o ÚNICO que ela vê (ver podeAba). */
-  { id:'minhaunidade', label:'Minha unidade',      icon:'fa-clipboard-list',    sub:'Peça exames e acompanhe a sua unidade', gerente:true }
+  { id:'minhaunidade', label:'Meus pedidos',       icon:'fa-clipboard-list',    sub:'Peça exames e acompanhe a sua unidade', gerente:true }
 ];
 let rota = 'dashboard';
 
@@ -2062,8 +2062,28 @@ function gravarAcessos(){
    numa tabela à parte. Tudo o mais é leitura.
    Nota que a tela não precisa filtrar nada: `aplicarEscopoAcesso()` já podou
    DB.colaboradores/emissoes/unidades para as unidades dela no arranque. */
-const UIGer = { aba:'pedidos', q:'' };
+const UIGer = { aba:'pedidos', q:'', uni:'' };
 function abaGer(id){ UIGer.aba = id; viewMinhaUnidade(); }
+
+function unidadesDaGerente(){
+  return (DB.unidades||[]).slice()
+    .sort((a,b) => uniNome(a.id).localeCompare(uniNome(b.id),'pt-BR'));
+}
+/* Uma unidade só: não há escolha a fazer. Mais de uma: há SEMPRE uma
+   selecionada, e nunca existe "todas" — misturar unidades numa tela só é
+   exatamente o que o isolamento por unidade existe para evitar, e a gerente
+   que cuida de duas casas precisa olhar uma de cada vez. */
+function unidadeGer(){
+  const unis = unidadesDaGerente();
+  if(!unis.length) return '';
+  if(!UIGer.uni || !unis.some(u => u.id === UIGer.uni)) UIGer.uni = unis[0].id;
+  return UIGer.uni;
+}
+function daUnidadeGer(unidadeId){ const u = unidadeGer(); return !u || unidadeId === u; }
+function verUnidadeGer(id){ UIGer.uni = id; UIGer.q = ''; viewMinhaUnidade(); renderNav(); }
+function colabsDaGerente(){ return DB.colaboradores.filter(c => daUnidadeGer(c.unidadeId)); }
+function ativosDaGerente(){ return colabsDaGerente().filter(c => c.status === 'Ativo'); }
+function pedidosDaGerente(){ return solicitacoes().filter(s => daUnidadeGer(s.unidadeId)); }
 
 const SIT_PEDIDO = {
   aberto:    { l:'Aguardando a Atlas', c:'bg-indigo-100 text-indigo-700' },
@@ -2074,15 +2094,28 @@ const SIT_PEDIDO = {
 };
 
 function viewMinhaUnidade(){
+  const uni = unidadeGer();
+  const varias = unidadesDaGerente().length > 1;
   const abas = [
     { id:'pedidos',      label:'Pedidos',        icon:'fa-paper-plane',
-      n: solicitacoes().filter(s => s.status === 'aberto').length, tom:'alerta' },
+      n: pedidosDaGerente().filter(s => s.status === 'aberto').length, tom:'alerta' },
     { id:'acompanhar',   label:'Acompanhamento', icon:'fa-list-check', n: emissoesDaGerente().length },
     { id:'estatisticas', label:'Estatísticas',   icon:'fa-chart-pie' }
   ];
   if(!abas.some(a => a.id === UIGer.aba)) UIGer.aba = 'pedidos';
+  /* com mais de uma unidade, o nome fica visível o tempo todo: nada pior do que
+     pedir exame achando que está na outra casa */
+  $('#pageSub').textContent = varias
+    ? 'Você está vendo ' + uniNome(uni) + ' — troque no menu à esquerda'
+    : 'Peça exames e acompanhe a sua unidade';
   $('#view').innerHTML = `
     <div class="space-y-4">
+      ${varias ? `<div class="flex items-center gap-2 text-sm bg-white rounded-xl border border-slate-200 px-4 py-3">
+        <i class="fa-solid fa-store text-accent"></i>
+        <span class="text-slate-500 text-xs">Unidade</span>
+        <b class="text-slate-800">${esc(uniNome(uni))}</b>
+        <span class="ml-auto text-[11px] text-slate-400">as outras unidades não aparecem nesta tela</span>
+      </div>` : ''}
       ${barraAbas(abas, UIGer.aba, id => `abaGer('${id}')`)}
       <div id="abaGer"></div>
     </div>`;
@@ -2090,7 +2123,7 @@ function viewMinhaUnidade(){
 }
 
 function emissoesDaGerente(){
-  return DB.emissoes.filter(e => !exameEncerrado(e))
+  return DB.emissoes.filter(e => !exameEncerrado(e) && daUnidadeGer(e.unidadeId))
     .sort((a,b) => (a.dataClinico||'9999').localeCompare(b.dataClinico||'9999'));
 }
 
@@ -2100,7 +2133,7 @@ function emissoesDaGerente(){
    evita as duas pedirem a mesma coisa. Só o próprio autor pode cancelar. */
 function meuPedido(s){ return chaveEmail(s.pedidoPor) === chaveEmail(SESSAO.email); }
 function gerPedidos(){
-  const meus = solicitacoes().slice().sort((a,b) => (b.pedidoEm||'').localeCompare(a.pedidoEm||''));
+  const meus = pedidosDaGerente().slice().sort((a,b) => (b.pedidoEm||'').localeCompare(a.pedidoEm||''));
   const linhas = meus.map(s => {
     const sit = SIT_PEDIDO[s.status] || SIT_PEDIDO.aberto;
     const em = s.emissaoId ? DB.emissoes.find(e => e.id === s.emissaoId) : null;
@@ -2160,13 +2193,20 @@ function gerAcompanhar(){
     norm([e.colaborador, uniNome(e.unidadeId), e.funcao, tipoLabel(e.tipoExame), FLUXO_LABEL[e.status]]
       .filter(Boolean).join(' ')).includes(q));
 
-  const naoCompareceu = DB.emissoes.filter(e => e.status === 'NAO_COMPARECEU');
+  const naoCompareceu = DB.emissoes.filter(e => e.status === 'NAO_COMPARECEU' && daUnidadeGer(e.unidadeId));
 
-  const vencendo = colaboradoresAtivos().map(c => {
+  /* SEM corte de prazo, e por isso nunca vazia: uma grade vazia aqui é lida
+     como erro do sistema, não como "está tudo em dia". Mostra todo mundo do
+     mais urgente ao mais distante — quem não tem ASO vem primeiro. */
+  const vencendo = ativosDaGerente().map(c => {
     const a = asoVigente(c.id);
-    return a ? { c, a, s: semaforo(a.vencimento) } : { c, a:null, s:null };
-  }).filter(x => !x.a || x.s.key === 'vencido' || x.s.key === 'avencer')
-    .sort((x,y) => (x.a ? x.a.vencimento : '0000').localeCompare(y.a ? y.a.vencimento : '0000'));
+    return { c, a: a || null, s: a ? semaforo(a.vencimento) : null };
+  }).sort((x,y) => {
+    if(!x.a && !y.a) return x.c.nome.localeCompare(y.c.nome,'pt-BR');
+    if(!x.a) return -1;
+    if(!y.a) return 1;
+    return (x.a.vencimento||'').localeCompare(y.a.vencimento||'');
+  });
 
   const linhaEm = e => `<tr class="hover:bg-slate-50">
     <td class="px-4 py-3 font-medium text-slate-700">${esc(e.colaborador)}</td>
@@ -2211,10 +2251,11 @@ function gerAcompanhar(){
          <th class="px-4 py-3">Exame</th><th class="px-4 py-3">Data</th><th class="px-4 py-3">Situação</th>`,
         naoCompareceu.map(linhaEm).join(''), naoCompareceu.length, '') : ''}
 
-      ${bloco('A vencer e vencidos', 'fa-hourglass-half',
+      ${bloco('Vencimentos — do mais urgente ao mais distante', 'fa-hourglass-half',
         `<th class="px-4 py-3">Colaborador</th><th class="px-4 py-3">Unidade</th>
          <th class="px-4 py-3">Função</th><th class="px-4 py-3">Vence em</th><th class="px-4 py-3">Situação</th>`,
-        vencendo.map(linhaVenc).join(''), vencendo.length, 'Ninguém vencendo — tudo em dia!')}
+        vencendo.map(linhaVenc).join(''), vencendo.length,
+        'Nenhum colaborador ativo nesta unidade.')}
     </div>`;
 }
 
@@ -2222,7 +2263,7 @@ function gerAcompanhar(){
    SÓ NÚMERO, nenhuma pessoa nomeada. É a aba que ela leva para o chefe dela:
    número agregado passa por qualquer lugar; nome com exame, não. */
 function gerEstatisticas(){
-  const ativos = colaboradoresAtivos();
+  const ativos = ativosDaGerente();
   const st = { emdia:0, avencer:0, vencido:0, sem:0 };
   ativos.forEach(c => {
     const a = asoVigente(c.id);
@@ -2242,9 +2283,9 @@ function gerEstatisticas(){
   }).length;
 
   const emAndamento = emissoesDaGerente().length;
-  const faltas = DB.emissoes.filter(e => e.status === 'NAO_COMPARECEU').length;
-  const desligados = DB.colaboradores.filter(c => c.status === 'Desligado').length;
-  const afastados = DB.colaboradores.filter(c => c.status === 'Afastado').length;
+  const faltas = DB.emissoes.filter(e => e.status === 'NAO_COMPARECEU' && daUnidadeGer(e.unidadeId)).length;
+  const desligados = colabsDaGerente().filter(c => c.status === 'Desligado').length;
+  const afastados = colabsDaGerente().filter(c => c.status === 'Afastado').length;
 
   const porFuncao = {};
   ativos.forEach(c => { const f = c.funcao || '(sem função)'; porFuncao[f] = (porFuncao[f]||0) + 1; });
@@ -2314,11 +2355,14 @@ async function cpfOnde(cpf){
 }
 
 function pedirExame(){
-  const gente = DB.colaboradores.slice().sort((a,b) => a.nome.localeCompare(b.nome,'pt-BR'));
-  const unis = opcoesUnidades().map(o => ({ v:o.v, l:o.l }));
+  /* só a unidade que ela está olhando: pedir para a casa errada é o engano mais
+     fácil de cometer e o mais chato de desfazer */
+  const uniAtual = unidadeGer();
+  const gente = colabsDaGerente().slice().sort((a,b) => a.nome.localeCompare(b.nome,'pt-BR'));
+  const unis = uniAtual ? [{ v:uniAtual, l:uniNome(uniAtual) }] : [];
   const tipos = Object.keys(TIPOS).map(t => ({ v:t, l:TIPOS[t] }));
   openForm({
-    title: 'Pedir exame',
+    title: unidadesDaGerente().length > 1 ? 'Pedir exame — ' + uniNome(uniAtual) : 'Pedir exame',
     largura: 'max-w-2xl',
     fields: [
       { name:'colaboradorId', label:'Quem?', type:'select', req:true, col:'sm:col-span-2',
@@ -2378,7 +2422,10 @@ function pedirExame(){
            que ela já enxerga? Resposta instantânea, e funciona mesmo offline. */
         const dupLocal = DB.colaboradores.find(c => cpfDigitos(c.cpf) === cpfDigitos(v.cpf));
         if(dupLocal){
-          toast('Esse CPF é de ' + dupLocal.nome + ', que já está na lista. Escolha a pessoa lá em cima.', 'alerta');
+          toast(daUnidadeGer(dupLocal.unidadeId)
+            ? 'Esse CPF é de ' + dupLocal.nome + ', que já está na lista. Escolha a pessoa lá em cima.'
+            : 'Esse CPF é de ' + dupLocal.nome + ', que está em ' + uniNome(dupLocal.unidadeId) +
+              '. Troque de unidade no menu, ou fale com a Atlas para transferir.', 'alerta');
           return;
         }
         const jaPedido = pedidosAbertos().find(s => cpfDigitos(s.cpf) === cpfDigitos(v.cpf));
@@ -2488,11 +2535,28 @@ function badgeMenu(id){
                 title="${DICA_BADGE[id]||''}">${n}</span>` : '';
 }
 function renderNav(){
-  $('#nav').innerHTML = abasPermitidas().map(m => `
+  $('#nav').innerHTML = abasPermitidas().map(m => {
+    const bt = `
     <button onclick="go('${m.id}')" data-rota="${m.id}"
       class="nav-item w-full text-left px-3 py-2.5 rounded-lg hover:bg-white/10 flex items-center gap-3 ${rota===m.id?'active':''}">
       <i class="fa-solid ${m.icon} w-4 text-slate-400"></i><span>${m.label}</span>${badgeMenu(m.id)}
-    </button>`).join('');
+    </button>`;
+    /* Gerente de mais de uma unidade escolhe qual está olhando aqui no menu.
+       As unidades NÃO se misturam em tela nenhuma: pedidos, acompanhamento e
+       estatísticas leem sempre a unidade selecionada. */
+    if(m.id !== 'minhaunidade' || !ACESSO.gerente) return bt;
+    const unis = unidadesDaGerente();
+    if(unis.length < 2) return bt;
+    /* unidadeGer() escolhe a primeira quando ainda não há nenhuma; precisa ser
+       chamado AQUI porque go() renderiza o menu antes da view */
+    const sel = unidadeGer();
+    return bt + `<div class="ml-7 mb-1 space-y-0.5">${unis.map(u => `
+      <button onclick="verUnidadeGer('${u.id}')" data-uni="${u.id}"
+        class="w-full text-left px-3 py-1.5 rounded-lg text-xs flex items-center gap-2 ${
+          sel === u.id ? 'bg-white/15 text-white font-medium' : 'text-slate-400 hover:bg-white/10'}">
+        <i class="fa-solid fa-store w-3 shrink-0"></i><span class="truncate">${esc(uniNome(u.id))}</span>
+      </button>`).join('')}</div>`;
+  }).join('');
 }
 function go(id){
   /* rota fora da permissão cai na primeira liberada; sem nenhuma, tela de aviso */
