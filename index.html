@@ -2058,19 +2058,398 @@ function gravarAcessos(){
 }
 
 /* ═════════ MINHA UNIDADE — a tela da gerente ═════════
-   Etapa 5 do plano. Por enquanto é só o esqueleto, para o perfil `gerente` já
-   ter para onde ir; as três sub-abas (Pedidos, Acompanhamento, Estatísticas)
-   entram em seguida. */
+   Ela NUNCA escreve no dado real: o único registro que sai daqui é um pedido,
+   numa tabela à parte. Tudo o mais é leitura.
+   Nota que a tela não precisa filtrar nada: `aplicarEscopoAcesso()` já podou
+   DB.colaboradores/emissoes/unidades para as unidades dela no arranque. */
+const UIGer = { aba:'pedidos', q:'' };
+function abaGer(id){ UIGer.aba = id; viewMinhaUnidade(); }
+
+const SIT_PEDIDO = {
+  aberto:    { l:'Aguardando a Atlas', c:'bg-indigo-100 text-indigo-700' },
+  agendado:  { l:'Exame aberto',        c:'bg-emerald-100 text-emerald-700' },
+  vinculado: { l:'Já estava em andamento', c:'bg-emerald-100 text-emerald-700' },
+  recusado:  { l:'Recusado',            c:'bg-red-100 text-red-700' },
+  cancelado: { l:'Cancelado',           c:'bg-slate-100 text-slate-500' }
+};
+
 function viewMinhaUnidade(){
-  const unis = (DB.unidades||[]).map(u => uniNome(u.id)).filter(Boolean);
+  const abas = [
+    { id:'pedidos',      label:'Pedidos',        icon:'fa-paper-plane',
+      n: solicitacoes().filter(s => s.status === 'aberto').length, tom:'alerta' },
+    { id:'acompanhar',   label:'Acompanhamento', icon:'fa-list-check', n: emissoesDaGerente().length },
+    { id:'estatisticas', label:'Estatísticas',   icon:'fa-chart-pie' }
+  ];
+  if(!abas.some(a => a.id === UIGer.aba)) UIGer.aba = 'pedidos';
   $('#view').innerHTML = `
-    <div class="bg-white rounded-xl border border-slate-200 p-10 text-center max-w-xl mx-auto">
-      <i class="fa-solid fa-helmet-safety text-3xl text-slate-300 mb-3"></i>
-      <p class="text-sm font-semibold text-slate-700">Esta tela está sendo construída</p>
-      <p class="text-xs text-slate-500 mt-2">Aqui você vai pedir exames e acompanhar
-        ${unis.length ? '<b>' + esc(unis.join(' · ')) + '</b>' : 'a sua unidade'}.</p>
-      <p class="text-xs text-slate-400 mt-3">Se precisar de alguma coisa agora, fale com a Atlas.</p>
+    <div class="space-y-4">
+      ${barraAbas(abas, UIGer.aba, id => `abaGer('${id}')`)}
+      <div id="abaGer"></div>
     </div>`;
+  ({ pedidos:gerPedidos, acompanhar:gerAcompanhar, estatisticas:gerEstatisticas })[UIGer.aba]();
+}
+
+function emissoesDaGerente(){
+  return DB.emissoes.filter(e => !exameEncerrado(e))
+    .sort((a,b) => (a.dataClinico||'9999').localeCompare(b.dataClinico||'9999'));
+}
+
+/* ── aba 1: os pedidos ──
+   A política do banco entrega os pedidos das UNIDADES dela, não só os que ela
+   mesma abriu: duas gerentes da mesma unidade se enxergam, e isso é desejável —
+   evita as duas pedirem a mesma coisa. Só o próprio autor pode cancelar. */
+function meuPedido(s){ return chaveEmail(s.pedidoPor) === chaveEmail(SESSAO.email); }
+function gerPedidos(){
+  const meus = solicitacoes().slice().sort((a,b) => (b.pedidoEm||'').localeCompare(a.pedidoEm||''));
+  const linhas = meus.map(s => {
+    const sit = SIT_PEDIDO[s.status] || SIT_PEDIDO.aberto;
+    const em = s.emissaoId ? DB.emissoes.find(e => e.id === s.emissaoId) : null;
+    return `<tr class="hover:bg-slate-50 align-top">
+      <td class="px-4 py-3 font-medium text-slate-700">${esc(s.nome)}
+        ${!s.colaboradorId ? '<span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700">novo</span>' : ''}</td>
+      <td class="px-4 py-3 text-xs text-slate-600">${esc(tipoLabel(s.tipoExame))}</td>
+      <td class="px-4 py-3 text-xs text-slate-500 whitespace-nowrap">${esc(fmtDate((s.pedidoEm||'').slice(0,10)))}
+        ${!meuPedido(s) ? `<div class="text-[11px] text-slate-400">${esc(s.pedidoPor||'')}</div>` : ''}</td>
+      <td class="px-4 py-3">${badge(sit.l, sit.c)}
+        ${em ? `<div class="text-[11px] text-slate-500 mt-1">exame: ${esc(FLUXO_LABEL[em.status]||em.status)}${
+          em.dataClinico ? ' · ' + esc(fmtDate(em.dataClinico)) : ''}</div>` : ''}
+        ${s.status === 'recusado' && s.motivoRecusa
+          ? `<div class="text-[11px] text-red-700 mt-1"><b>Motivo:</b> ${esc(s.motivoRecusa)}</div>` : ''}</td>
+      <td class="px-4 py-3 text-right whitespace-nowrap no-print">
+        ${s.status === 'aberto' && meuPedido(s)
+          ? `<button onclick="cancelarPedido('${s.id}')" class="px-2.5 py-1.5 rounded-lg text-xs bg-white border border-slate-300 text-slate-600 hover:bg-slate-50">
+               <i class="fa-solid fa-xmark mr-1"></i>Cancelar</button>` : ''}</td>
+    </tr>`;
+  }).join('');
+  $('#abaGer').innerHTML = `
+    <div class="space-y-4">
+      <div class="rounded-xl border border-blue-200 bg-blue-50 px-5 py-4 text-sm text-blue-900 flex items-start gap-3">
+        <i class="fa-solid fa-circle-info mt-0.5"></i>
+        <div><b>Peça o exame aqui.</b> A Atlas confere e abre o agendamento — a partir daí você acompanha
+          o andamento nesta mesma tela. Cadastro, datas e resultados continuam com a Atlas.</div>
+      </div>
+      <div class="flex justify-end no-print">
+        <button onclick="pedirExame()" class="px-4 py-2 rounded-lg text-sm bg-accent text-white hover:bg-blue-700">
+          <i class="fa-solid fa-plus mr-1"></i>Pedir exame</button>
+      </div>
+      <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
+        <div class="px-5 py-4 border-b border-slate-200 flex items-center gap-2">
+          <i class="fa-solid fa-paper-plane text-accent"></i>
+          <h3 class="font-semibold text-sm text-slate-700">Pedidos da unidade</h3>
+          <span class="text-xs text-slate-500">${meus.length}</span>
+        </div>
+        <div class="overflow-x-auto"><table class="w-full text-sm data">
+          <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
+            <tr><th class="px-4 py-3">Colaborador</th><th class="px-4 py-3">Exame</th>
+                <th class="px-4 py-3">Pedido em</th><th class="px-4 py-3">Situação</th>
+                <th class="px-4 py-3 no-print"></th></tr></thead>
+          <tbody class="divide-y divide-slate-100">
+            ${meus.length ? linhas : vazio('Você ainda não pediu nenhum exame.')}
+          </tbody></table></div>
+      </div>
+    </div>`;
+}
+
+/* ── aba 2: o que está rodando na unidade dela ──
+   Mostra TODAS as emissões da unidade, não só as que nasceram de pedido dela:
+   a Atlas também abre exame por conta própria, e um retrato parcial faria ela
+   ligar perguntando de gente que já está agendada. */
+function gerAcompanhar(){
+  const q = norm(UIGer.q);
+  const emiss = emissoesDaGerente().filter(e => !q ||
+    norm([e.colaborador, uniNome(e.unidadeId), e.funcao, tipoLabel(e.tipoExame), FLUXO_LABEL[e.status]]
+      .filter(Boolean).join(' ')).includes(q));
+
+  const naoCompareceu = DB.emissoes.filter(e => e.status === 'NAO_COMPARECEU');
+
+  const vencendo = colaboradoresAtivos().map(c => {
+    const a = asoVigente(c.id);
+    return a ? { c, a, s: semaforo(a.vencimento) } : { c, a:null, s:null };
+  }).filter(x => !x.a || x.s.key === 'vencido' || x.s.key === 'avencer')
+    .sort((x,y) => (x.a ? x.a.vencimento : '0000').localeCompare(y.a ? y.a.vencimento : '0000'));
+
+  const linhaEm = e => `<tr class="hover:bg-slate-50">
+    <td class="px-4 py-3 font-medium text-slate-700">${esc(e.colaborador)}</td>
+    <td class="px-4 py-3 text-xs text-slate-600">${esc(uniNome(e.unidadeId))}</td>
+    <td class="px-4 py-3 text-xs text-slate-600">${esc(tipoLabel(e.tipoExame))}</td>
+    <td class="px-4 py-3 text-xs text-slate-500 whitespace-nowrap">${
+      e.dataClinico ? esc(fmtDate(e.dataClinico)) : '<span class="text-slate-300">a marcar</span>'}</td>
+    <td class="px-4 py-3">${badge(FLUXO_LABEL[e.status] || e.status, corFluxo(e.status))}</td></tr>`;
+
+  const linhaVenc = x => `<tr class="hover:bg-slate-50">
+    <td class="px-4 py-3 font-medium text-slate-700">${esc(x.c.nome)}</td>
+    <td class="px-4 py-3 text-xs text-slate-600">${esc(uniNome(x.c.unidadeId))}</td>
+    <td class="px-4 py-3 text-xs text-slate-600">${esc(x.c.funcao || '—')}</td>
+    <td class="px-4 py-3 text-xs whitespace-nowrap">${
+      x.a ? esc(fmtDate(x.a.vencimento)) : '<span class="text-slate-400">nunca fez</span>'}</td>
+    <td class="px-4 py-3">${x.a ? badge(x.s.label, x.s.cls) : badge('Sem ASO', 'bg-red-100 text-red-700')}</td></tr>`;
+
+  const bloco = (titulo, icon, cabec, corpo, n, vazioMsg, busca) => `
+    <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
+      <div class="px-5 py-4 border-b border-slate-200 flex items-center gap-2 flex-wrap">
+        <i class="fa-solid ${icon} text-accent"></i>
+        <h3 class="font-semibold text-sm text-slate-700">${titulo}</h3>
+        <span class="text-xs text-slate-500">${n}</span>
+        ${busca ? `<div class="ml-auto no-print">${busca}</div>` : ''}
+      </div>
+      <div class="overflow-x-auto max-h-[420px] overflow-y-auto"><table class="w-full text-sm data">
+        <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500"><tr>${cabec}</tr></thead>
+        <tbody class="divide-y divide-slate-100">${corpo || vazio(vazioMsg)}</tbody>
+      </table></div>
+    </div>`;
+
+  $('#abaGer').innerHTML = `
+    <div class="space-y-4">
+      ${bloco('Exames em andamento', 'fa-truck-medical',
+        `<th class="px-4 py-3">Colaborador</th><th class="px-4 py-3">Unidade</th>
+         <th class="px-4 py-3">Exame</th><th class="px-4 py-3">Data</th><th class="px-4 py-3">Situação</th>`,
+        emiss.map(linhaEm).join(''), emiss.length, 'Nada em andamento no momento.',
+        inputBusca('bGer', 'Buscar por nome...', 'UIGer.q=this.value;viewMinhaUnidade();focarBusca(&quot;bGer&quot;)', UIGer.q))}
+
+      ${naoCompareceu.length ? bloco('Não compareceram', 'fa-user-xmark',
+        `<th class="px-4 py-3">Colaborador</th><th class="px-4 py-3">Unidade</th>
+         <th class="px-4 py-3">Exame</th><th class="px-4 py-3">Data</th><th class="px-4 py-3">Situação</th>`,
+        naoCompareceu.map(linhaEm).join(''), naoCompareceu.length, '') : ''}
+
+      ${bloco('A vencer e vencidos', 'fa-hourglass-half',
+        `<th class="px-4 py-3">Colaborador</th><th class="px-4 py-3">Unidade</th>
+         <th class="px-4 py-3">Função</th><th class="px-4 py-3">Vence em</th><th class="px-4 py-3">Situação</th>`,
+        vencendo.map(linhaVenc).join(''), vencendo.length, 'Ninguém vencendo — tudo em dia!')}
+    </div>`;
+}
+
+/* ── aba 3: os números ──
+   SÓ NÚMERO, nenhuma pessoa nomeada. É a aba que ela leva para o chefe dela:
+   número agregado passa por qualquer lugar; nome com exame, não. */
+function gerEstatisticas(){
+  const ativos = colaboradoresAtivos();
+  const st = { emdia:0, avencer:0, vencido:0, sem:0 };
+  ativos.forEach(c => {
+    const a = asoVigente(c.id);
+    if(!a){ st.sem++; return; }
+    const k = semaforo(a.vencimento).key;
+    st[k === 'sem' ? 'sem' : k]++;
+  });
+  const cobertos = st.emdia + st.avencer;
+  const pct = ativos.length ? Math.round(cobertos / ativos.length * 100) : 0;
+
+  const hoje = new Date();
+  const dentro = d => { const t = Date.parse(d); return !isNaN(t) && (t - hoje) / 864e5; };
+  const faixa = (de, ate) => ativos.filter(c => {
+    const a = asoVigente(c.id); if(!a) return false;
+    const d = dentro(a.vencimento);
+    return d !== false && d > de && d <= ate;
+  }).length;
+
+  const emAndamento = emissoesDaGerente().length;
+  const faltas = DB.emissoes.filter(e => e.status === 'NAO_COMPARECEU').length;
+  const desligados = DB.colaboradores.filter(c => c.status === 'Desligado').length;
+  const afastados = DB.colaboradores.filter(c => c.status === 'Afastado').length;
+
+  const porFuncao = {};
+  ativos.forEach(c => { const f = c.funcao || '(sem função)'; porFuncao[f] = (porFuncao[f]||0) + 1; });
+  const fun = Object.keys(porFuncao).sort((a,b) => porFuncao[b] - porFuncao[a]);
+
+  const cartao = (rot, val, sub, cor) => `
+    <div class="bg-white rounded-xl border border-slate-200 p-5">
+      <p class="text-[11px] uppercase tracking-wide text-slate-500">${rot}</p>
+      <p class="text-2xl font-bold ${cor||'text-slate-800'} mt-1">${val}</p>
+      ${sub ? `<p class="text-[11px] text-slate-400 mt-0.5">${sub}</p>` : ''}
+    </div>`;
+
+  $('#abaGer').innerHTML = `
+    <div class="space-y-4">
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        ${cartao('Colaboradores ativos', ativos.length, afastados ? afastados + ' afastado(s)' : '')}
+        ${cartao('ASO em dia', pct + '%', cobertos + ' de ' + ativos.length,
+                 pct >= 90 ? 'text-emerald-600' : (pct >= 70 ? 'text-amber-600' : 'text-red-600'))}
+        ${cartao('Exames em andamento', emAndamento)}
+        ${cartao('Não compareceram', faltas, faltas ? 'precisa cobrar o colaborador' : '', faltas ? 'text-red-600' : '')}
+      </div>
+
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        ${cartao('Vencidos', st.vencido, '', st.vencido ? 'text-red-600' : '')}
+        ${cartao('Vencem em 30 dias', faixa(0, 30), '', 'text-amber-600')}
+        ${cartao('Vencem em 60 dias', faixa(30, 60))}
+        ${cartao('Vencem em 90 dias', faixa(60, 90))}
+      </div>
+
+      ${st.sem ? `<div class="rounded-xl border border-red-200 bg-red-50 px-5 py-4 text-sm text-red-900">
+        <b>${st.sem} colaborador(es) ativos sem nenhum ASO registrado.</b>
+        Peça o exame na aba Pedidos, ou fale com a Atlas se achar que está errado.</div>` : ''}
+
+      <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
+        <div class="px-5 py-4 border-b border-slate-200 flex items-center gap-2">
+          <i class="fa-solid fa-users text-accent"></i>
+          <h3 class="font-semibold text-sm text-slate-700">Quadro por função</h3>
+          <span class="text-xs text-slate-500">${fun.length} função(ões)</span>
+        </div>
+        <div class="overflow-x-auto max-h-[420px] overflow-y-auto"><table class="w-full text-sm data">
+          <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
+            <tr><th class="px-4 py-3">Função</th><th class="px-4 py-3 text-right">Ativos</th></tr></thead>
+          <tbody class="divide-y divide-slate-100">
+            ${fun.length ? fun.map(f => `<tr class="hover:bg-slate-50">
+              <td class="px-4 py-3 text-slate-700">${esc(f)}</td>
+              <td class="px-4 py-3 text-right text-slate-600">${porFuncao[f]}</td></tr>`).join('')
+              : vazio('Nenhum colaborador ativo.')}
+          </tbody></table></div>
+      </div>
+
+      ${desligados ? `<p class="text-xs text-slate-400 text-center">${desligados} desligado(s) no histórico —
+        não entram nos números acima, mas aparecem na busca ao pedir exame.</p>` : ''}
+    </div>`;
+}
+
+/* "esse CPF já existe?" contra a base INTEIRA, sem revelar nada: a função no
+   banco devolve só nao/minha/outra. É o que impede a gerente de pedir cadastro
+   de alguém que já está em outra unidade — o jeito clássico de nascer ficha
+   duplicada. */
+async function cpfOnde(cpf){
+  if(!nuvemLigada()) return 'nao';
+  try{
+    const { data, error } = await sb.rpc('atlas_cpf_onde', { p_cpf: cpfDigitos(cpf) });
+    if(error){ console.warn('atlas_cpf_onde', error.message); return ''; }
+    return data || 'nao';
+  }catch(e){ console.warn('atlas_cpf_onde', e); return ''; }
+}
+
+function pedirExame(){
+  const gente = DB.colaboradores.slice().sort((a,b) => a.nome.localeCompare(b.nome,'pt-BR'));
+  const unis = opcoesUnidades().map(o => ({ v:o.v, l:o.l }));
+  const tipos = Object.keys(TIPOS).map(t => ({ v:t, l:TIPOS[t] }));
+  openForm({
+    title: 'Pedir exame',
+    largura: 'max-w-2xl',
+    fields: [
+      { name:'colaboradorId', label:'Quem?', type:'select', req:true, col:'sm:col-span-2',
+        options: [{ v:'', l:'— selecione —' }]
+          .concat(gente.map(c => ({ v:c.id,
+            l: c.nome + (c.status && c.status !== 'Ativo' ? ' (' + c.status + ')' : '') +
+               (c.funcao ? ' · ' + c.funcao : '') })))
+          .concat([{ v:'NOVO', l:'— não está na lista (pessoa nova) —' }]),
+        hint:'não achou? escolha a última opção e informe os dados' },
+
+      { type:'sep', name:'sepNovo', label:'Dados da pessoa nova' },
+      { name:'nome', label:'Nome completo', col:'sm:col-span-2' },
+      { name:'cpf', label:'CPF', ph:'000.000.000-00',
+        hint:'obrigatório — é com ele que a Atlas evita cadastro duplicado' },
+      { name:'funcao', label:'Função', type:'datalist',
+        options: (DB.cargos||[]).map(c => c.funcao).filter(Boolean).sort() },
+      { name:'unidadeId', label:'Unidade', type:'select', options: unis },
+
+      { type:'sep', name:'sepExame', label:'O exame' },
+      { name:'tipoExame', label:'Tipo de ASO', type:'select', req:true, col:'sm:col-span-2', options: tipos },
+      { name:'funcaoNova', label:'Função nova', type:'datalist', col:'sm:col-span-2',
+        options: (DB.cargos||[]).map(c => c.funcao).filter(Boolean).sort(),
+        hint:'sem ela a Atlas não sabe quais exames a função nova exige' },
+      { name:'observacao', label:'Alguma observação?', type:'textarea', col:'sm:col-span-2',
+        ph:'Ex.: entra dia 05, precisa do exame antes.' }
+    ],
+    values: { tipoExame:'PERIODICO', unidadeId: unis.length === 1 ? unis[0].v : '' },
+    afterRender: form => {
+      const mostrar = (nomes, sim) => nomes.forEach(n => {
+        const el = form.querySelector('[data-campo="' + n + '"]');
+        if(el) el.classList.toggle('hidden', !sim);
+      });
+      const pintar = () => {
+        const novo = form.elements['colaboradorId'].value === 'NOVO';
+        mostrar(['sepNovo','nome','cpf','funcao'], novo);
+        /* com uma unidade só não faz sentido perguntar */
+        mostrar(['unidadeId'], novo && unis.length > 1);
+        mostrar(['funcaoNova'], form.elements['tipoExame'].value === TIPO_MUDANCA_RISCO);
+      };
+      form.elements['colaboradorId'].addEventListener('change', pintar);
+      form.elements['tipoExame'].addEventListener('change', pintar);
+      pintar();
+    },
+    onSave: async v => {
+      const novo = v.colaboradorId === 'NOVO';
+      let p;
+
+      if(novo){
+        const nome = String(v.nome||'').trim();
+        if(nome.length < 3){ toast('Escreva o nome completo.', 'erro'); return; }
+        const critica = criticaCpf(v.cpf);
+        if(critica){ toast('CPF: ' + critica + '.', 'erro'); return; }
+        const uid_ = unis.length === 1 ? unis[0].v : v.unidadeId;
+        if(!uid_){ toast('Escolha a unidade.', 'erro'); return; }
+
+        /* primeiro o que dá para responder sem ir ao banco: o CPF é de alguém
+           que ela já enxerga? Resposta instantânea, e funciona mesmo offline. */
+        const dupLocal = DB.colaboradores.find(c => cpfDigitos(c.cpf) === cpfDigitos(v.cpf));
+        if(dupLocal){
+          toast('Esse CPF é de ' + dupLocal.nome + ', que já está na lista. Escolha a pessoa lá em cima.', 'alerta');
+          return;
+        }
+        const jaPedido = pedidosAbertos().find(s => cpfDigitos(s.cpf) === cpfDigitos(v.cpf));
+        if(jaPedido){
+          toast('Já existe pedido em aberto para esse CPF (' + jaPedido.nome + ').', 'alerta');
+          return;
+        }
+        /* e o que só o banco sabe: existe em OUTRA unidade? */
+        const onde = await cpfOnde(v.cpf);
+        if(onde === 'minha'){
+          toast('Esse CPF já está cadastrado numa unidade sua — procure a pessoa na lista acima.', 'alerta');
+          return;
+        }
+        if(onde === 'outra'){
+          toast('Essa pessoa já tem cadastro em outra unidade. Fale com a Atlas para transferir — ' +
+                'pedir de novo criaria ficha duplicada.', 'alerta');
+          return;
+        }
+        p = { unidadeId:uid_, colaboradorId:'', nome, cpf:cpfDigitos(v.cpf),
+              funcao:String(v.funcao||'').trim() };
+      }else{
+        const c = colab(v.colaboradorId);
+        if(!c){ toast('Escolha quem vai fazer o exame.', 'erro'); return; }
+        p = { unidadeId:c.unidadeId, colaboradorId:c.id, nome:c.nome,
+              cpf:cpfDigitos(c.cpf), funcao:c.funcao || '' };
+
+        /* já tem pedido aberto para essa pessoa? */
+        const jaPediu = pedidosAbertos().find(s => s.colaboradorId === c.id);
+        if(jaPediu){
+          toast('Você já pediu ' + tipoLabel(jaPediu.tipoExame).toLowerCase() +
+                ' para ' + c.nome + '. A Atlas ainda está olhando.', 'alerta');
+          return;
+        }
+        /* já tem exame do MESMO tipo em andamento? responde na hora, sem fila —
+           só o que precisa do julgamento da Atlas deve chegar lá */
+        const andando = emissoesPendentesFornecedor().find(e =>
+          norm(e.colaborador) === norm(c.nome) && e.unidadeId === c.unidadeId &&
+          e.tipoExame === v.tipoExame);
+        if(andando){
+          closeModal();
+          toast('O ' + tipoLabel(v.tipoExame).toLowerCase() + ' de ' + c.nome +
+                ' já está em andamento (' + (FLUXO_LABEL[andando.status]||'') +
+                '). Acompanhe na aba Acompanhamento.', 'ok');
+          return;
+        }
+      }
+
+      p.tipoExame = v.tipoExame;
+      p.funcaoNova = v.tipoExame === TIPO_MUDANCA_RISCO ? String(v.funcaoNova||'').trim() : '';
+      p.observacao = String(v.observacao||'').trim();
+      if(v.tipoExame === TIPO_MUDANCA_RISCO && !p.funcaoNova){
+        toast('Diga qual é a função nova — é ela que define os exames.', 'erro'); return;
+      }
+
+      const r = await nuvemAbrirSolicitacao(p);
+      if(!r.ok){ toast('Não consegui enviar o pedido: ' + r.motivo, 'erro'); return; }
+      closeModal(); viewMinhaUnidade();
+      toast('Pedido enviado. A Atlas vai conferir e abrir o agendamento.', 'ok');
+    }
+  });
+}
+
+async function cancelarPedido(id){
+  const p = solicitacao(id);
+  if(!p || p.status !== 'aberto') return;
+  if(!confirm('Cancelar o pedido de ' + tipoLabel(p.tipoExame).toLowerCase() +
+              ' para ' + p.nome + '?')) return;
+  const r = await nuvemResolverSolicitacao(id, { status:'cancelado' });
+  if(!r.ok){ toast('Não consegui cancelar: ' + r.motivo, 'erro'); return; }
+  viewMinhaUnidade();
+  toast('Pedido cancelado.', 'ok');
 }
 
 function telaSemAcesso(){
