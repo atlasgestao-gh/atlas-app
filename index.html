@@ -5676,7 +5676,8 @@ function abaColaboradores(){
             const a = asoVigente(c.id); const s = a ? semaforo(a.vencimento) : null;
             return `<tr class="hover:bg-slate-50">
               <td class="px-4 py-3"><p class="font-medium text-slate-700">${esc(c.nome)}
-                  ${c.revisar?`<span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 whitespace-nowrap" title="${esc(c.origemAuto||'cadastro criado automaticamente')} — complete os dados e salve"><i class="fa-solid fa-user-pen mr-0.5"></i>revisar</span>`:''}</p>
+                  ${c.revisar?`<span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 whitespace-nowrap" title="${esc(c.origemAuto||'cadastro criado automaticamente')} — complete os dados e salve"><i class="fa-solid fa-user-pen mr-0.5"></i>revisar</span>`:''}
+                  ${c.notaStatus?`<span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-slate-200 text-slate-600 whitespace-nowrap" title="${esc(c.notaStatus)} — se não se confirmou, é só voltar o status para Ativo"><i class="fa-solid fa-clock-rotate-left mr-0.5"></i>status automático</span>`:''}</p>
                   <p class="text-[11px] text-slate-500">${c.nascimento?'Nasc. '+fmtDate(c.nascimento):''}</p></td>
               <td class="px-4 py-3 text-xs whitespace-nowrap">${colabSemCpf(c)
                   ? `<span class="px-1.5 py-0.5 rounded bg-amber-100 text-amber-800" title="${esc(criticaCpf(c.cpf))} — abra a ficha e preencha"><i class="fa-solid fa-triangle-exclamation mr-1"></i>${esc(c.cpf || 'sem CPF')}</span>`
@@ -6323,7 +6324,105 @@ function salvarESolicitarAso(){ if(modalSave) modalSave('solicitarAso'); }
    Realizado), e a gerente vê o mesmo status que você.
    As checagens finas (diff da matriz na Mudança de Risco, status no Demissional,
    reconferência do que mudou desde o pedido) são a etapa 6. */
-async function aprovarPedido(id){
+/* Quais exames mudam quando a função muda. É a conferência que a aprovação de
+   Mudança de Risco não pode dispensar: descobrir o exame novo três semanas
+   depois faz o pedido não ter servido para nada. */
+function diffMatriz(c, funcaoNova){
+  const antes  = examesParaColaborador(Object.assign({}, c), TIPO_MUDANCA_RISCO).aplicaveis;
+  const depois = examesParaColaborador(Object.assign({}, c, { funcao:funcaoNova }),
+                                       TIPO_MUDANCA_RISCO).aplicaveis;
+  const sa = new Set(antes.map(norm)), sd = new Set(depois.map(norm));
+  return { entram: depois.filter(x => !sa.has(norm(x))), saem: antes.filter(x => !sd.has(norm(x))) };
+}
+
+/* O que mudou no mundo desde que o pedido foi feito. Pedido envelhece na fila:
+   a pessoa pode ter trocado de função, mudado de unidade, sido desligada ou já
+   ter ganhado exame por outro caminho. Aprovar às cegas passa por cima. */
+function conferirPedido(p, c){
+  const av = [];
+  if(!c){
+    if(!cpfValido(p.cpf)) av.push('O CPF do pedido <b>não é válido</b> — recuse e peça o número certo.');
+    return av;
+  }
+  if(p.funcao && c.funcao && norm(p.funcao) !== norm(c.funcao))
+    av.push('No pedido a função era <b>' + esc(p.funcao) + '</b>; no cadastro está <b>' + esc(c.funcao) + '</b>.');
+  if(p.unidadeId && c.unidadeId && p.unidadeId !== c.unidadeId)
+    av.push('A pessoa mudou de unidade desde o pedido — agora está em <b>' + esc(uniNome(c.unidadeId)) + '</b>.');
+  if(c.status === 'Desligado' && p.tipoExame !== 'DEMISSIONAL')
+    av.push('Esta pessoa está <b>desligada</b> no cadastro.');
+  const andando = emissoesPendentesFornecedor().find(e =>
+    norm(e.colaborador) === norm(c.nome) && e.unidadeId === c.unidadeId);
+  if(andando)
+    av.push('Já existe <b>' + esc(tipoLabel(andando.tipoExame)) + '</b> em andamento (' +
+            esc(FLUXO_LABEL[andando.status]||'') + ') — considere <b>Vincular</b> em vez de abrir outro.');
+  return av;
+}
+
+/* Aprovar passa por uma tela de conferência: é onde a afirmação da gerente
+   encontra o catálogo. */
+function aprovarPedido(id){
+  const p = solicitacao(id);
+  if(!p || p.status !== 'aberto') return;
+  const porNome = nome => DB.colaboradores.find(x => norm(x.nome) === norm(nome)) || null;
+  const c = (p.colaboradorId && colab(p.colaboradorId)) || porNome(p.nome) ||
+            DB.colaboradores.find(x => cpfDigitos(x.cpf) === cpfDigitos(p.cpf)) || null;
+  const eraNovo = !c;
+  const avisos = conferirPedido(p, c);
+  const dif = (p.tipoExame === TIPO_MUDANCA_RISCO && p.funcaoNova && c) ? diffMatriz(c, p.funcaoNova) : null;
+  const d = cpfDigitos(p.cpf);
+  const cpfFmt = d.length === 11 ? d.slice(0,3)+'.'+d.slice(3,6)+'.'+d.slice(6,9)+'-'+d.slice(9) : (p.cpf||'—');
+
+  const linha = (rot, val) => `<div class="flex gap-2 text-xs py-1 border-b border-slate-100 last:border-0">
+    <span class="text-slate-500 w-28 shrink-0">${rot}</span><span class="text-slate-800">${val}</span></div>`;
+  const chips = (l, cls) => l.length
+    ? l.map(x => `<span class="inline-block text-[11px] px-2 py-0.5 rounded-full ${cls} mr-1 mb-1">${esc(x)}</span>`).join('')
+    : '<span class="text-xs text-slate-400">nenhum</span>';
+
+  openForm({
+    title: eraNovo ? 'Cadastrar e agendar' : 'Agendar a partir do pedido',
+    largura: 'max-w-2xl',
+    fields: [
+      { type:'html', name:'resumo', html:`<div class="sm:col-span-2 bg-slate-50 rounded-lg px-4 py-3">
+          ${linha('Colaborador', esc(p.nome) + (eraNovo
+            ? ' <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700">ficha nova</span>' : ''))}
+          ${linha('CPF', esc(cpfFmt))}
+          ${linha('Unidade', esc(uniNome(p.unidadeId)))}
+          ${linha('Exame', esc(tipoLabel(p.tipoExame)))}
+          ${p.funcaoNova ? linha('Função nova', esc(p.funcaoNova)) : ''}
+          ${linha('Pedido por', esc(p.pedidoPor||'—') + ' · ' + esc(fmtDate((p.pedidoEm||'').slice(0,10))))}
+          ${p.observacao ? linha('Observação', esc(p.observacao)) : ''}
+        </div>` },
+
+      ...(avisos.length ? [{ type:'html', name:'avisos',
+        html:`<div class="sm:col-span-2 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3">
+          <p class="text-xs font-semibold text-amber-900 mb-1">
+            <i class="fa-solid fa-triangle-exclamation mr-1"></i>Confira antes</p>
+          <ul class="text-xs text-amber-900 list-disc pl-4 space-y-0.5">
+            ${avisos.map(a => '<li>' + a + '</li>').join('')}</ul></div>` }] : []),
+
+      ...(dif ? [{ type:'html', name:'diff',
+        html:`<div class="sm:col-span-2 rounded-lg border border-slate-200 px-4 py-3">
+          <p class="text-xs font-semibold text-slate-700 mb-2">O que muda na matriz de exames</p>
+          <p class="text-[11px] text-slate-500 mb-1">Passam a ser exigidos</p>
+          <div class="mb-2">${chips(dif.entram, 'bg-emerald-100 text-emerald-800')}</div>
+          <p class="text-[11px] text-slate-500 mb-1">Deixam de ser exigidos</p>
+          <div>${chips(dif.saem, 'bg-slate-200 text-slate-600')}</div>
+        </div>` },
+        { name:'trocarFuncao', type:'checkbox', col:'sm:col-span-2',
+          label:'Atualizar também a função no cadastro para "' + p.funcaoNova + '"' }] : []),
+
+      ...(p.tipoExame === 'DEMISSIONAL' && c ? [{ name:'desligar', type:'checkbox', col:'sm:col-span-2',
+        label:'Marcar ' + p.nome + ' como Desligado no cadastro',
+        hint:'fica anotado na ficha que foi o demissional que desligou — se o desligamento não se confirmar, você desfaz' }] : [])
+    ],
+    values: { trocarFuncao:true, desligar:true },
+    onSave: async v => { closeModal(); await aplicarPedido(id, v); }
+  });
+}
+
+/* faz o que a tela de conferência prometeu */
+async function aplicarPedido(id, opt){
+  opt = opt || {};
   const p = solicitacao(id);
   if(!p || p.status !== 'aberto') return;
   const porNome = nome => DB.colaboradores.find(x => norm(x.nome) === norm(nome)) || null;
@@ -6350,13 +6449,36 @@ async function aprovarPedido(id){
     }
   }
 
+  const extras = [];
+
+  /* Mudança de Risco: é a função nova que define a matriz. Se a ficha não
+     acompanhar, a matriz erra em todos os exames seguintes. A decisão é da
+     conferência — a gerente não altera cadastro, você altera. */
+  if(p.tipoExame === TIPO_MUDANCA_RISCO && p.funcaoNova && opt.trocarFuncao){
+    c.funcao = p.funcaoNova;
+    extras.push('função atualizada para ' + p.funcaoNova);
+  }
+
   const em = solicitarAsoDoCadastro(c, eraNovo && !c.admissao, p.tipoExame);
+
+  /* Demissional: o exame vem ANTES do desligamento, então o status só muda
+     porque você marcou na conferência. A nota fica na ficha porque Desligado
+     tira a pessoa das listas de ativos e dos alertas de vencimento — se o
+     desligamento não se confirmar, ninguém descobriria por que ela sumiu. */
+  if(p.tipoExame === 'DEMISSIONAL' && opt.desligar && c.status !== 'Desligado'){
+    c.status = 'Desligado';
+    c.notaStatus = 'desligado ao abrir o demissional em ' + fmtDate(isoToday()) +
+                   (p.pedidoPor ? ' · pedido de ' + p.pedidoPor : '');
+    extras.push('marcado como Desligado');
+  }
+
   const r = await nuvemResolverSolicitacao(id, { status:'agendado', emissaoId: em.id });
   if(!r.ok){ toast('Não consegui marcar o pedido como resolvido: ' + r.motivo, 'erro'); }
   save();
   go('acompanhamentos');
   toast((eraNovo ? 'Ficha criada (marcada como "revisar") e exame' : 'Exame') +
-        ' aberto para ' + c.nome + ' — ' + tipoLabel(p.tipoExame) + '.', 'ok');
+        ' aberto para ' + c.nome + ' — ' + tipoLabel(p.tipoExame) + '.' +
+        (extras.length ? ' Também: ' + extras.join('; ') + '.' : ''), 'ok');
 }
 
 /* pedido certo que já estava sendo feito: aponta para a emissão existente */
