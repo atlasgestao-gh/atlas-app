@@ -3219,13 +3219,10 @@ function itensAcompanhamento(){
     statusLabel:FLUXO_LABEL[e.status], statusCls:corFluxo(e.status),
     acaoLabel:'Editar', acaoIcon:'fa-pen', acao:`editarEmissao('${e.id}')`
   }));
-  /* laudo pedido à clínica e ainda não entregue também é coisa a cobrar */
-  const laudoItens = DB.laudos.filter(l => l.atual && l.atual.pagamento === 'Solicitado').map(l => ({
-    origem:'Laudo', colaborador: docsLabel(l.atual.documentos), unidadeId:l.unidadeId,
-    tipo: 'Laudo SST', funcao: '', quando: 'Clínica: ' + (l.atual.clinica || '—'), dias: null,
-    statusLabel:'Solicitado', statusCls:'bg-amber-100 text-amber-700',
-    acaoLabel:'Abrir laudo', acaoIcon:'fa-file-shield', acao:`editarLaudo('${l.id}')`
-  }));
+  /* Laudo NÃO entra aqui. "Acompanhar agendamentos" é sobre exame de pessoa —
+     misturar documento da unidade no meio confunde a leitura da grade, e laudo
+     já tem aba própria, onde agora aparece em todos os estados (sem laudo,
+     em elaboração, a vencer, vencido). */
   /* ── FUSÃO ENTRE AS TRÊS GRADES ──
      Quem já tem exame no fornecedor não precisa aparecer também como alerta de
      ASO: a urgência (dias) viaja para a linha do fornecedor e o alerta some.
@@ -3260,7 +3257,7 @@ function itensAcompanhamento(){
      A FAZER: ASOs vencidos/vencendo sem exame pedido nem pedido de gerente.
      ACOMPANHAR: exames já solicitados/agendados no fornecedor + laudos.
      Sai sem filtro — cada grade aplica a busca dela. */
-  return { pedidos: pedItens, aFazer: asoFinal, acompanhar: fornItens.concat(laudoItens) };
+  return { pedidos: pedItens, aFazer: asoFinal, acompanhar: fornItens };
 }
 /* junta numa linha só tudo do mesmo colaborador (mesma pessoa + unidade):
    quem está com ASO atrasado e o exame já solicitado aparece uma vez, não duas */
