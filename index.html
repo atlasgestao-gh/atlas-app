@@ -2928,14 +2928,20 @@ function alertasCriticos(){
     const s = laudoSituacao(l);
     const a = l.atual;
     if(l.renovacao){
-      /* já está sendo tratado — só entra na lista se o laudo vigente já venceu/está vencendo
-         ou se a solicitação está parada há mais de 30 dias na clínica */
+      /* Laudo em elaboração aparece SEMPRE. Antes só entrava se o vigente já
+         estivesse vencendo ou se a clínica estivesse parada há mais de 30 dias
+         — a intenção era não fazer barulho com o que já está sendo tratado, mas
+         o efeito era esconder justamente o que você está esperando. Pior ainda
+         numa unidade que nunca teve laudo: nada cobre a unidade e mesmo assim
+         ela sumia da tela. */
       const parado = diasDesde(l.renovacao.solicitadoEm);
-      const urgente = s.base.key === 'vencido' || s.base.key === 'avencer';
-      if(!urgente && !(parado !== null && parado > 30)) return;
+      const semAnterior = s.base.key === 'sem';
       linhas.push({
         tipo:'Laudo', ref:l.id, nome: docsLabel(l.renovacao.documentos), unidadeId:l.unidadeId,
-        detalhe: 'Em elaboração há ' + parado + ' dia(s) · ' + (l.renovacao.clinica || 'clínica não informada'),
+        detalhe: (semAnterior ? 'Primeiro laudo da unidade · ' : '') +
+                 'Em elaboração há ' + (parado === null ? '?' : parado) + ' dia(s) · ' +
+                 (l.renovacao.clinica || 'clínica não informada') +
+                 (parado !== null && parado > 30 ? ' · PARADO há mais de 30 dias' : ''),
         vencimento: a ? a.vencimento : '', dias: s.dias, sem: s,
         acao:`concluirRenovacao('${l.id}')`, acaoLabel:'Registrar entrega', acaoIcon:'fa-check'
       });
@@ -2955,8 +2961,14 @@ function alertasCriticos(){
       });
     }
   });
-  /* sem laudo vai para o topo: `dias` é nulo e cairia no fim da lista */
-  const peso = x => (x.sem && x.sem.key === 'sem') ? -1e9 : (x.dias ?? 9e9);
+  /* Unidade sem laudo vai para o topo — inclusive quando o primeiro já está em
+     elaboração. `dias` é nulo nesses casos e cairia no fim da lista.
+     Em elaboração, o que importa é o estado do laudo POR BAIXO (s.base). */
+  const peso = x => {
+    const s = x.sem || {};
+    const k = (s.base && s.base.key) || s.key;
+    return k === 'sem' ? -1e9 : (x.dias ?? 9e9);
+  };
   return linhas.sort((a,b) => peso(a) - peso(b));
 }
 
