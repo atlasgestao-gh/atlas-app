@@ -4702,7 +4702,6 @@ function migrarPrecos(d){
   if(d.precos.carteirinhaCusto == null) d.precos.carteirinhaCusto = 16;
   (d.emissoes||[]).forEach(e => { if(e.carteirinha === undefined) e.carteirinha = false; });
   /* a exigência é por FUNÇÃO dentro da unidade — recepção, por exemplo, não precisa. */
-  (d.cargos||[]).forEach(c => { if(c.carteirinha === undefined) c.carteirinha = false; });
   if(d.carteirinhaSeed !== 3){
     (d.unidades||[]).forEach(u => {
       if(!Array.isArray(u.carteirinhaFuncoes)) u.carteirinhaFuncoes = [];
@@ -4757,12 +4756,47 @@ function migrarPrecos(d){
       const cargo = cargoDe(c && c.funcao);
       if(!cargo) return false;
       const u = (d.unidades||[]).find(x => x.id === e.unidadeId);
-      const porUnidade = !!(u && (u.carteirinhaFuncoes||[]).some(f => norm(f) === norm(cargo)));
-      const porCargo = (d.cargos||[]).some(x => x.carteirinha && norm(x.funcao) === norm(cargo));
-      return porUnidade || porCargo;
+      return !!(u && (u.carteirinhaFuncoes||[]).some(f => norm(f) === norm(cargo)));
     };
     (d.emissoes||[]).forEach(e => { e.carteirinha = exigeNaBase(e); });
     d.carteirinhaSeed = 3;
+  }
+
+  /* ─── FONTE ÚNICA DA CARTEIRINHA (2026-08-31) ───
+     Antes a exigência era `lista da unidade OU check no cargo`. O check valia em
+     TODAS as unidades, não podia ser excepcionado por sala nenhuma, e não
+     aparecia na tela da unidade — dava para uma função exigir carteirinha numa
+     sala sem constar na lista dela. Carteirinha sanitária é exigência do
+     ESTABELECIMENTO (vigilância municipal), não da profissão em abstrato, então
+     o eixo verdadeiro é unidade + função. Decisão da Jessica: a lista da sala é
+     a única fonte.
+
+     A migração não pode tirar exigência de sala que JÁ usa carteirinha. Por
+     isso, antes de apagar os checks, cada função marcada no cargo é copiada
+     para a lista das unidades que já usam carteirinha E têm gente naquela
+     função. Unidade que não usa continua sem — era ali que o check estava
+     exigindo demais. */
+  if(!d.carteirinhaFonteUnica){
+    const marcados = (d.cargos||[]).filter(c => c.carteirinha);
+    let copiadas = 0;
+    if(marcados.length){
+      (d.unidades||[]).forEach(u => {
+        const lista = u.carteirinhaFuncoes || (u.carteirinhaFuncoes = []);
+        if(!lista.length) return;
+        const tem = new Set(lista.map(x => norm(funcaoCanonica(x))));
+        marcados.forEach(c => {
+          const k = norm(funcaoCanonica(c.funcao));
+          const temGente = (d.colaboradores||[]).some(x => x.unidadeId === u.id &&
+                             norm(funcaoCanonica(x.funcao)) === k);
+          if(!tem.has(k) && temGente){ lista.push(c.funcao); tem.add(k); copiadas++; }
+        });
+      });
+      console.info('[carteirinha] fonte única: ' + marcados.length +
+                   ' cargo(s) tinham o check global; ' + copiadas +
+                   ' exigência(s) copiada(s) para a lista da unidade.');
+    }
+    (d.cargos||[]).forEach(c => { delete c.carteirinha; });
+    d.carteirinhaFonteUnica = true;
   }
 }
 
@@ -4843,24 +4877,38 @@ function funcoesForaCatalogo(){
   });
   return [...mapa.values()].sort((a,b) => b.n - a.n || a.nome.localeCompare(b.nome,'pt-BR'));
 }
+/* A etiqueta de carteirinha na lista de cargos deixou de ser um estado do
+   próprio cargo e passou a ser um REFLEXO: em quais unidades esta função exige.
+   Assim a informação continua visível de onde ela sempre foi consultada, mas
+   quem manda continua sendo a lista da unidade. */
+function unidadesComCarteirinha(funcao){
+  if(!funcao) return '';
+  const alvo = norm(funcaoCanonica(funcao));
+  const us = (DB.unidades||[]).filter(u =>
+    (u.carteirinhaFuncoes||[]).some(f => norm(funcaoCanonica(f)) === alvo));
+  if(!us.length) return '';
+  const nomes = us.map(u => u.sigla || uniNome(u.id));
+  return '<span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-teal-100 text-teal-700 font-normal whitespace-nowrap"' +
+         ' title="Exige carteirinha sanitária em: ' + esc(us.map(u => uniNome(u.id)).join(', ')) +
+         '. Quem define é a unidade, em Clientes e locais.">' +
+         '<i class="fa-solid fa-id-card mr-0.5"></i>carteirinha: ' + esc(nomes.join(', ')) + '</span>';
+}
+
 function unidadeExigeCarteirinha(unidadeId, funcao){
   const u = uni(unidadeId);
   if(!u || !funcao) return false;
   const alvo = norm(funcaoCanonica(funcao));
   return (u.carteirinhaFuncoes||[]).some(f => norm(funcaoCanonica(f)) === alvo);
 }
-function funcaoExigeCarteirinha(funcao){
-  if(!funcao) return false;
-  const alvo = norm(funcaoCanonica(funcao));
-  return (DB.cargos||[]).some(c => c.carteirinha && norm(c.funcao) === alvo);
-}
-/* motivo textual, para explicar na tela por que é exigida */
+/* FONTE ÚNICA: quem exige carteirinha é a lista da UNIDADE, e mais nada.
+   Existia também um check por cargo, valendo em todas as unidades — removido em
+   2026-08-31 porque não podia ser excepcionado por sala, não aparecia na tela da
+   unidade, e fazia sala nova herdar exigência sem ninguém decidir. Se voltar a
+   fazer falta, o lugar certo é um ATALHO que preenche a lista da unidade na
+   hora, não uma segunda fonte que decide por baixo. */
 function exigeCarteirinha(unidadeId, funcao){
-  const porUni = unidadeExigeCarteirinha(unidadeId, funcao);
-  const porFun = funcaoExigeCarteirinha(funcao);
-  if(!porUni && !porFun) return { exige:false, motivo:'' };
-  return { exige:true, motivo: porFun ? 'função ' + funcao + ' (todas as unidades)'
-                              : esc(funcao) + ' na ' + ((uni(unidadeId)||{}).sigla || '') };
+  if(!unidadeExigeCarteirinha(unidadeId, funcao)) return { exige:false, motivo:'' };
+  return { exige:true, motivo: esc(funcao) + ' na ' + ((uni(unidadeId)||{}).sigla || '') };
 }
 /* a emissão herda a exigência do colaborador cadastrado — respeitando o tipo do exame */
 function emissaoExigeCarteirinha(e){
@@ -7099,7 +7147,7 @@ function abaCargos(){
             <tr class="hover:bg-slate-50 align-top">
               <td class="px-4 py-3 font-mono text-xs text-slate-600 whitespace-nowrap">${esc(c.cbo||'—')}</td>
               <td class="px-4 py-3 font-medium text-slate-700">${esc(c.funcao)}
-                ${c.carteirinha ? '<span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-teal-100 text-teal-700 font-normal" title="Exige carteirinha sanitária"><i class="fa-solid fa-id-card mr-0.5"></i>carteirinha</span>' : ''}
+                ${unidadesComCarteirinha(c.funcao)}
                 ${c.importado?'<span class="block text-[10px] text-slate-400 font-normal">vindo do cadastro</span>':''}</td>
               <td class="px-4 py-3">
                 ${r.matriz
@@ -7125,8 +7173,8 @@ function editarCargo(id, pre){
     fields: [
       { name:'cbo', label:'CBO', ph:'0000-00' },
       { name:'funcao', label:'Função', req:true },
-      { name:'carteirinha', label:'Exige carteirinha sanitária', type:'checkbox', col:'sm:col-span-2',
-        hint:'vale em qualquer unidade — use para funções de manipulação de alimentos' },
+      /* NÃO recolocar "exige carteirinha" aqui: quem decide é a lista da
+         unidade (Clientes e locais → editar a unidade). Ver exigeCarteirinha. */
       { name:'descricao', label:'Descrição das atividades', type:'textarea', rows:4, col:'sm:col-span-2' }
     ],
     values: c || pre || {},
@@ -7142,7 +7190,6 @@ function editarCargo(id, pre){
           <i class="fa-solid fa-table-list mr-1"></i>${jaTem ? 'Salvar e editar matriz' : 'Salvar e definir matriz'}</button>`);
     },
     onSave: (v, extra) => {
-      v.carteirinha = !!v.carteirinha;
       let alvo;
       if(c){ Object.assign(c, v); alvo = c; }
       else { alvo = Object.assign({ id: uid('cg') }, v); DB.cargos.push(alvo); }
