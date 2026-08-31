@@ -4877,23 +4877,6 @@ function funcoesForaCatalogo(){
   });
   return [...mapa.values()].sort((a,b) => b.n - a.n || a.nome.localeCompare(b.nome,'pt-BR'));
 }
-/* A etiqueta de carteirinha na lista de cargos deixou de ser um estado do
-   próprio cargo e passou a ser um REFLEXO: em quais unidades esta função exige.
-   Assim a informação continua visível de onde ela sempre foi consultada, mas
-   quem manda continua sendo a lista da unidade. */
-function unidadesComCarteirinha(funcao){
-  if(!funcao) return '';
-  const alvo = norm(funcaoCanonica(funcao));
-  const us = (DB.unidades||[]).filter(u =>
-    (u.carteirinhaFuncoes||[]).some(f => norm(funcaoCanonica(f)) === alvo));
-  if(!us.length) return '';
-  const nomes = us.map(u => u.sigla || uniNome(u.id));
-  return '<span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-teal-100 text-teal-700 font-normal whitespace-nowrap"' +
-         ' title="Exige carteirinha sanitária em: ' + esc(us.map(u => uniNome(u.id)).join(', ')) +
-         '. Quem define é a unidade, em Clientes e locais.">' +
-         '<i class="fa-solid fa-id-card mr-0.5"></i>carteirinha: ' + esc(nomes.join(', ')) + '</span>';
-}
-
 function unidadeExigeCarteirinha(unidadeId, funcao){
   const u = uni(unidadeId);
   if(!u || !funcao) return false;
@@ -7146,8 +7129,12 @@ function abaCargos(){
             return `
             <tr class="hover:bg-slate-50 align-top">
               <td class="px-4 py-3 font-mono text-xs text-slate-600 whitespace-nowrap">${esc(c.cbo||'—')}</td>
+              <!-- NÃO voltar a pôr etiqueta de carteirinha aqui. Ela não é
+                   propriedade do cargo: quem exige é a unidade (Clientes e
+                   locais → editar a unidade → funções que exigem). Mostrar na
+                   lista de cargos, ainda que só como reflexo, faz parecer que o
+                   cargo decide — foi o que confundiu a Jessica em 31/08. -->
               <td class="px-4 py-3 font-medium text-slate-700">${esc(c.funcao)}
-                ${unidadesComCarteirinha(c.funcao)}
                 ${c.importado?'<span class="block text-[10px] text-slate-400 font-normal">vindo do cadastro</span>':''}</td>
               <td class="px-4 py-3">
                 ${r.matriz
