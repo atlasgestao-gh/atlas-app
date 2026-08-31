@@ -4264,7 +4264,8 @@ function editarLaudo(id, forcarVigente){
          é a ausência dele que faz a unidade contar como pendência */
       const versao = temLaudo
         ? { documentos:v.documentos, clinica:v.clinica, emissao:v.emissao,
-            vencimento: v.emissao ? addDays(v.emissao, 365) : v.vencimento,
+            /* sem entrega não há vencimento: a data é derivada, nunca digitada */
+            vencimento: v.emissao ? addDays(v.emissao, 365) : '',
             pagamento:v.pagamento, valor: Number(a.valor)||0,
             dataFaturamento: fatNovo }
         : { documentos:v.documentos, clinica:v.clinica, emissao:'', vencimento:'',
@@ -4285,12 +4286,17 @@ function ligarCamposLaudo(form){
   const status = form.elements['pagamento'], fat = form.elements['dataFaturamento'];
   const caixaFat = fat.closest('div');
   const sincronizar = () => {
-    if(emissao.value) venc.value = addDays(emissao.value, 365);
+    /* o vencimento é DERIVADO da entrega, sempre — inclusive para trás.
+       Antes só escrevia quando havia entrega e nunca limpava: apagar a data
+       deixava um vencimento fantasma na tela, que ia junto no Salvar e fazia
+       a unidade parecer coberta por um laudo que não existe. */
+    venc.value = emissao.value ? addDays(emissao.value, 365) : '';
     const entregue = status.value === 'Entregue';
     caixaFat.style.display = entregue ? '' : 'none';
     if(entregue && !fat.value) fat.value = emissao.value || isoToday();
   };
   emissao.addEventListener('change', sincronizar);
+  emissao.addEventListener('input', sincronizar);   /* limpar com o teclado não dispara change */
   status.addEventListener('change', sincronizar);
   venc.readOnly = true;
   venc.classList.add('bg-slate-50', 'text-slate-500');
@@ -4376,7 +4382,7 @@ function concluirRenovacao(id){
       if(fatNovo && barradoPorFechamento(fatNovo, 'Lançamento nesta competência')) return;
       if(l.atual && l.atual.emissao) l.historico = [l.atual].concat(l.historico || []);
       l.atual = { documentos:v.documentos, clinica:v.clinica, emissao:v.emissao,
-                  vencimento: v.emissao ? addDays(v.emissao, 365) : v.vencimento,
+                  vencimento: v.emissao ? addDays(v.emissao, 365) : '',
                   pagamento:v.pagamento, valor: 0,
                   dataFaturamento: fatNovo,
                   solicitadoEm: r.solicitadoEm };
