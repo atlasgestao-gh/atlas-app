@@ -4095,6 +4095,28 @@ function laudoSituacao(l){
 }
 function diasDesde(iso){ const d = diasPara(iso); return d === null ? null : -d; }
 
+/* Ordem da grade de laudos, em três grupos:
+   1. EM ELABORAÇÃO sempre no topo — é o que está em curso e o que você cobra
+      da clínica. Dentro do grupo, o que está parado há mais tempo vem antes.
+   2. SEM LAUDO — unidade descoberta e ninguém tratando ainda.
+   3. O resto por vencimento mais próximo: vencido, depois a vencer, depois em dia.
+   (A lista de alertas do Painel e da aba Acompanhamentos continua ordenada por
+   urgência pura, porque lá os laudos convivem com os ASOs.) */
+function ordemLaudo(l){
+  const s = laudoSituacao(l);
+  if(s.key === 'elaboracao'){
+    const d = diasDesde(l.renovacao && l.renovacao.solicitadoEm);
+    return { g:0, k: -(d === null ? 0 : d) };
+  }
+  if(s.key === 'sem') return { g:1, k: norm(uniNome(l.unidadeId)) };
+  return { g:2, k: s.dias === null ? 9e9 : s.dias };
+}
+function compararLaudos(a, b){
+  const x = ordemLaudo(a), y = ordemLaudo(b);
+  if(x.g !== y.g) return x.g - y.g;
+  return typeof x.k === 'string' ? x.k.localeCompare(y.k, 'pt-BR') : x.k - y.k;
+}
+
 const UILaudo = { q:'', uni:'', sem:'', page:1 };
 
 function laudosFiltrados(){
@@ -4105,12 +4127,7 @@ function laudosFiltrados(){
     return (!UILaudo.uni || l.unidadeId === UILaudo.uni) &&
            (!UILaudo.sem || s.key === UILaudo.sem) &&
            (!q || norm(uniNome(l.unidadeId) + docs.join(' ') + (l.atual&&l.atual.clinica||'') + l.localRaw).includes(q));
-  }).sort((a,b) => {
-    /* mesma regra da lista de alertas: sem laudo é o mais urgente, não o menos */
-    const peso = l => { const s = laudoSituacao(l);
-      return s.key === 'sem' ? -1e9 : (s.dias === null ? 9e9 : s.dias); };
-    return peso(a) - peso(b);
-  });
+  }).sort(compararLaudos);
 }
 function paginaLaudos(p){ UILaudo.page = p; viewLaudos(); }
 
@@ -4146,7 +4163,11 @@ function viewLaudos(){
       <div class="overflow-x-auto">
         <table class="w-full text-sm data">
           <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
-            <tr><th class="px-4 py-3">Unidade</th><th class="px-4 py-3">Documentos</th><th class="px-4 py-3">Clínica</th>
+            <!-- whitespace-nowrap: sem isso "Vencimento", "Dias" e "Faturamento"
+                 quebravam no meio da palavra e o cabeçalho virava um bloco. A
+                 tabela rola de lado no contêiner, que já tem overflow-x-auto. -->
+            <tr class="whitespace-nowrap">
+                <th class="px-4 py-3">Unidade</th><th class="px-4 py-3">Documentos</th><th class="px-4 py-3">Clínica</th>
                 <th class="px-4 py-3">Vencimento</th><th class="px-4 py-3">Dias</th>
                 <th class="px-4 py-3">Situação</th><th class="px-4 py-3">Status</th><th class="px-4 py-3">Faturamento</th>
                 <th class="px-4 py-3 text-right no-print">Ações</th></tr>
