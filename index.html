@@ -2941,16 +2941,23 @@ function alertasCriticos(){
       });
       return;
     }
-    if(s.key === 'vencido' || s.key === 'avencer'){
+    /* 'sem' entra junto: unidade que nunca teve laudo é a pendência mais
+       urgente que existe, e antes ela não aparecia em lugar nenhum */
+    if(s.key === 'vencido' || s.key === 'avencer' || s.key === 'sem'){
+      const primeiro = s.key === 'sem';
       linhas.push({
         tipo:'Laudo', ref:l.id, nome: a ? docsLabel(a.documentos) : 'Laudo', unidadeId:l.unidadeId,
-        detalhe:'Clínica: ' + ((a && a.clinica) || '—'),
+        detalhe: (primeiro ? 'Unidade ainda sem laudo · ' : '') +
+                 'Clínica: ' + ((a && a.clinica) || '—'),
         vencimento: a ? a.vencimento : '', dias:s.dias, sem:s,
-        acao:`solicitarRenovacao('${l.id}')`, acaoLabel:'Renovar laudo', acaoIcon:'fa-rotate'
+        acao:`solicitarRenovacao('${l.id}')`,
+        acaoLabel: primeiro ? 'Solicitar laudo' : 'Renovar laudo', acaoIcon:'fa-rotate'
       });
     }
   });
-  return linhas.sort((a,b) => (a.dias ?? 9e9) - (b.dias ?? 9e9));
+  /* sem laudo vai para o topo: `dias` é nulo e cairia no fim da lista */
+  const peso = x => (x.sem && x.sem.key === 'sem') ? -1e9 : (x.dias ?? 9e9);
+  return linhas.sort((a,b) => peso(a) - peso(b));
 }
 
 /* grid de alertas de um tipo (ASO ou Laudo) */
@@ -4062,9 +4069,15 @@ function migrarLaudoStatus(d){
 }
 
 /* situação exibida: em elaboração tem prioridade sobre o semáforo de validade */
+/* Unidade sem laudo é PENDÊNCIA, não é "nada a fazer".
+   Testar `l.atual` não bastava: o cadastro cria a versão mesmo sem data de
+   entrega, então o objeto existe vazio e a unidade ficava fora de tudo —
+   fora do vermelho na grade e fora dos acompanhamentos. O que decide é haver
+   VENCIMENTO, não haver objeto. */
+function semLaudoAinda(l){ return !(l && l.atual && l.atual.vencimento); }
 function laudoSituacao(l){
-  const base = l.atual ? semaforo(l.atual.vencimento)
-                       : { key:'sem', label:'Sem laudo', dias:null, cls:'bg-slate-100 text-slate-600' };
+  const base = !semLaudoAinda(l) ? semaforo(l.atual.vencimento)
+                       : { key:'sem', label:'Sem laudo', dias:null, cls:'bg-red-100 text-red-700' };
   if(l.renovacao){
     return { key:'elaboracao', label:'Em elaboração', cls:'bg-blue-100 text-blue-700',
              dias: base.dias, base, desde: l.renovacao.solicitadoEm };
@@ -4084,8 +4097,10 @@ function laudosFiltrados(){
            (!UILaudo.sem || s.key === UILaudo.sem) &&
            (!q || norm(uniNome(l.unidadeId) + docs.join(' ') + (l.atual&&l.atual.clinica||'') + l.localRaw).includes(q));
   }).sort((a,b) => {
-    const sa = laudoSituacao(a), sb = laudoSituacao(b);
-    return (sa.dias === null ? 9e9 : sa.dias) - (sb.dias === null ? 9e9 : sb.dias);
+    /* mesma regra da lista de alertas: sem laudo é o mais urgente, não o menos */
+    const peso = l => { const s = laudoSituacao(l);
+      return s.key === 'sem' ? -1e9 : (s.dias === null ? 9e9 : s.dias); };
+    return peso(a) - peso(b);
   });
 }
 function paginaLaudos(p){ UILaudo.page = p; viewLaudos(); }
@@ -4185,11 +4200,20 @@ function editarLaudo(id, forcarVigente){
   const a = (l && l.atual) || {};
   /* mesma regra dos exames: laudo já cobrado num mês fechado não se altera */
   if(a.dataFaturamento && barradoPorFechamento(a.dataFaturamento, 'Edição do laudo')) return;
+  /* Sala nova quase sempre entra SEM laudo — e o formulário levava a registrar
+     uma vigência que não existe. Quando ainda não há laudo, perguntamos antes:
+     "não" deixa a unidade como pendência (aparece em Acompanhamentos), "sim"
+     apenas registra a vigência para contar o vencimento. */
+  const perguntar = semLaudoAinda(l);
   openForm({
     title: l ? 'Editar laudo — ' + uniNome(l.unidadeId) : 'Nova unidade no controle de laudos',
     fields: [
       { name:'unidadeId', label:'Unidade / empresa', type:'select', options:opcoesUnidades().map(o=>({v:o.v,l:o.l})), req:true },
       { name:'clinica', label:'Clínica responsável' },
+      ...(perguntar ? [{ name:'temLaudo', label:'Esta unidade já tem laudo?', type:'select', col:'sm:col-span-2',
+        options:[{ v:'NAO', l:'Não — ainda precisa ser feito' },
+                 { v:'SIM', l:'Sim — vou registrar a vigência dele' }],
+        hint:'"Não" deixa a unidade marcada como pendência até o laudo ser entregue' }] : []),
       campoDocs(false),
       { name:'emissao', label:'Data de entrega', type:'date', hint:'em branco = ainda não entregue' },
       { name:'vencimento', label:'Data de vencimento', type:'date', hint:'calculada: 1 ano após a entrega' },
@@ -4198,23 +4222,48 @@ function editarLaudo(id, forcarVigente){
       { name:'dataFaturamento', label:'Data do faturamento', type:'date',
         hint:'o mês/ano desta data define em qual fechamento o laudo entra' }
     ],
-    values: Object.assign({ pagamento:'Solicitado', documentos:['PCMSO','PGR','LTCAT'] }, a,
+    values: Object.assign({ pagamento:'Solicitado', documentos:['PCMSO','PGR','LTCAT'], temLaudo:'NAO' }, a,
       { unidadeId: l ? l.unidadeId : '', email: l ? l.email : '' }),
-    afterRender: ligarCamposLaudo,
+    afterRender: form => {
+      ligarCamposLaudo(form);
+      if(!perguntar) return;
+      const sel = form.elements['temLaudo'];
+      const pintar = () => {
+        const sim = sel.value === 'SIM';
+        ['emissao','vencimento','pagamento','dataFaturamento'].forEach(n => {
+          const el = form.querySelector('[data-campo="' + n + '"]');
+          if(el) el.classList.toggle('hidden', !sim);
+        });
+      };
+      sel.addEventListener('change', pintar);
+      pintar();
+    },
     onSave: v => {
       if(!l && DB.laudos.some(x => x.unidadeId === v.unidadeId)){
         toast('Esta unidade já tem controle de laudo. Use "Solicitar renovação".', 'erro'); return;
       }
-      const fatNovo = v.pagamento === 'Entregue' ? v.dataFaturamento : '';
+      const temLaudo = !perguntar || v.temLaudo === 'SIM';
+      if(temLaudo && perguntar && !v.emissao && !v.vencimento){
+        toast('Informe a data de entrega do laudo que já existe — ou marque "Não".', 'erro'); return;
+      }
+      const fatNovo = (temLaudo && v.pagamento === 'Entregue') ? v.dataFaturamento : '';
       if(fatNovo && barradoPorFechamento(fatNovo, 'Lançamento nesta competência')) return;
-      const versao = { documentos:v.documentos, clinica:v.clinica, emissao:v.emissao,
-                       vencimento: v.emissao ? addDays(v.emissao, 365) : v.vencimento,
-                       pagamento:v.pagamento, valor: Number(a.valor)||0,
-                       dataFaturamento: fatNovo };
+      /* sem laudo: guarda quais documentos e qual clínica, mas SEM vencimento —
+         é a ausência dele que faz a unidade contar como pendência */
+      const versao = temLaudo
+        ? { documentos:v.documentos, clinica:v.clinica, emissao:v.emissao,
+            vencimento: v.emissao ? addDays(v.emissao, 365) : v.vencimento,
+            pagamento:v.pagamento, valor: Number(a.valor)||0,
+            dataFaturamento: fatNovo }
+        : { documentos:v.documentos, clinica:v.clinica, emissao:'', vencimento:'',
+            pagamento:'Solicitado', valor: Number(a.valor)||0, dataFaturamento:'' };
       if(l){ l.unidadeId = v.unidadeId; l.email = v.email; l.atual = versao; }
       else DB.laudos.push({ id: uid('ld'), unidadeId:v.unidadeId, localRaw:'', email:v.email,
                             atual: versao, renovacao:null, historico:[] });
-      save(); closeModal(); voltarParaTelaAtual(); toast('Laudo salvo.');
+      save(); closeModal(); voltarParaTelaAtual();
+      toast(temLaudo ? 'Laudo salvo.'
+        : 'Unidade registrada SEM laudo — ela entra como pendência em Acompanhamentos.',
+        temLaudo ? 'ok' : 'alerta');
     }
   });
 }
