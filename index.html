@@ -10245,13 +10245,22 @@ function dadosCorporativo(mes, unidadeIds){
     if(cid) mapa[k].cids[cid] = (mapa[k].cids[cid]||0) + 1;
     if(a.colaborador) mapa[k].colabs[a.colaborador] = (mapa[k].colabs[a.colaborador]||0) + 1;
   });
+  /* Unidade SEM atestado entra na conta com zero. Relatório é documento de
+     evidência: unidade ausente da tabela é ambígua — não dá para saber se ela
+     não foi analisada ou se não teve ocorrência. Com a linha zerada, o próprio
+     relatório afirma que no período não houve atestado ali. */
+  const escopo = filtra ? unidadeIds.slice() : (DB.unidades||[]).map(u => u.id);
+  escopo.forEach(id => {
+    if(!mapa[id]) mapa[id] = { unidadeId:id, qtd:0, dias:0, cids:{}, colabs:{} };
+  });
+
   const porUnidade = Object.values(mapa).map(u => Object.assign(u, {
     sigla: (uni(u.unidadeId)||{sigla:'—'}).sigla,
     nome: u.unidadeId==='—' ? 'Sem unidade' : uniNome(u.unidadeId),
     pct: total ? (u.qtd/total*100) : 0,
     topCids: Object.entries(u.cids).sort((a,b)=>b[1]-a[1]).slice(0,3),
     recorrentes: Object.entries(u.colabs).filter(x=>x[1]>1).sort((a,b)=>b[1]-a[1])
-  })).sort((a,b) => b.qtd - a.qtd);
+  })).sort((a,b) => b.qtd - a.qtd || a.nome.localeCompare(b.nome,'pt-BR'));
 
   /* série do ano corrente, para o comparativo temporal (mesmo recorte de unidades) */
   const ano = mes.slice(0,4);
@@ -10960,7 +10969,8 @@ function montarRelatorioNR01(comTimbrado, acao){
             <td ${td}>${esc(L?(CID_CAPITULO[L]||'—'):'—')}</td></tr>`; }).join('')}
       </tbody></table>`;
 
-  const secao = t => `<p style="font-size:12pt;font-weight:bold;text-transform:uppercase;border-bottom:1px solid #333;padding-bottom:3px;margin:22px 0 10px">${t}</p>`;
+  /* class="sec" para o CSS impedir título órfão no pé da página */
+  const secao = t => `<p class="sec" style="font-size:12pt;font-weight:bold;text-transform:uppercase;border-bottom:1px solid #333;padding-bottom:3px;margin:22px 0 10px;text-align:left">${t}</p>`;
 
   const html = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
     <title>Relatório NR-01 — ${esc(nomeUnidade)} — ${mesLabel(d.mes)}</title>
@@ -10970,7 +10980,20 @@ function montarRelatorioNR01(comTimbrado, acao){
       .folha { max-width:760px; margin:0 auto; padding:24px; }
       .cab { text-align:center; padding-bottom:10px; border-bottom:2px solid #b8912f; margin-bottom:20px; }
       .cab img { height:70px; object-fit:contain; }
-      p, li { text-align:justify; }
+      /* justificado em tudo que é texto corrido — inclusive dentro da caixa
+         legal e das listas, que herdavam alinhamento à esquerda */
+      p, li, td, .legal, .legal p, ul, ol { text-align:justify; text-justify:inter-word; }
+      td, th { text-align:left; }
+      /* Quebra de página: sem isto o gerador fatiava a folha numa altura fixa e
+         cortava a linha ao meio. orphans/widows seguram no mínimo três linhas
+         de cada lado, e break-inside mantém inteiros os blocos curtos.
+         ATENÇÃO: este CSS mora dentro de um template literal de JS — nada de
+         crase aqui, ela fecha a string e derruba o arquivo inteiro. */
+      p, li { orphans:3; widows:3; }
+      .legal, .kpi, img.g, table, tr, .rod { break-inside:avoid; page-break-inside:avoid; }
+      h1,h2,h3,.sec { break-after:avoid; page-break-after:avoid; }
+      /* respiro no fim do documento: a última linha não pode encostar no corte */
+      .fim { height:26px; }
       .legal { background:#f6f5f2; padding:12px 14px; border-left:4px solid #3f3f43; font-style:italic; }
       .kpi { display:flex; gap:10px; margin:10px 0 4px; }
       .kpi div { flex:1; border:1px solid #999; padding:8px; text-align:center; }
@@ -11021,6 +11044,7 @@ function montarRelatorioNR01(comTimbrado, acao){
     ${secao('6. Registros analisados')}
     ${tabela}
     ${comTimbrado ? `<div class="rod">${esc(ATLAS_ENDERECO)}<br>${esc(ATLAS_CONTATO)}</div>` : ''}
+    <div class="fim"></div>
     </div></body></html>`;
 
   entregarRelatorio(html, acao,
@@ -11034,11 +11058,20 @@ function montarRelatorioCorporativo(comTimbrado, unidadeIds, acao){
   const mes = UIAte.mes || mesAtestadoPadrao();
   const sel = (unidadeIds && unidadeIds.length) ? unidadeIds : null;
   const c = dadosCorporativo(mes, sel);
-  if(!c.total){ toast('Não há atestados para as unidades selecionadas neste período.', 'alerta'); return; }
+  /* Mês sem nenhum atestado GERA relatório: "não houve ocorrência" é evidência,
+     e é justamente o que a fiscalização quer ver documentado. */
   const parcial = !!sel && sel.length < DB.unidades.length;
 
   const pctF = c.total ? (c.mentais.length/c.total*100) : 0;
-  const lider = c.porUnidade[0];
+  const lider = c.porUnidade.find(u => u.qtd > 0) || null;
+  const semRegistro = c.porUnidade.filter(u => u.qtd === 0);
+  const comRegistro = c.porUnidade.filter(u => u.qtd > 0);
+  const listaSemRegistro = semRegistro.map(u => esc(u.nome) + ' (' + esc(u.sigla) + ')').join(', ');
+  const fraseSemRegistro = semRegistro.length
+    ? `<p><b>Unidades sem ocorrência no período:</b> não foram apresentados atestados médicos em
+       <b>${listaSemRegistro}</b>. A ausência de registro foi verificada e está documentada — não decorre
+       de falta de apuração.</p>`
+    : '';
 
   /* gráfico 1 — distribuição por unidade */
   const imgUnidades = graficoParaImagem({
@@ -11072,9 +11105,16 @@ function montarRelatorioCorporativo(comTimbrado, unidadeIds, acao){
     <table style="border-collapse:collapse;width:100%;margin:8px 0 4px">
       <thead><tr><th ${th}>Unidade</th><th ${thR}>Volume de atestados</th><th ${thR}>Dias</th><th ${thR}>% do total corporativo</th></tr></thead>
       <tbody>
-        ${c.porUnidade.map(u => `<tr>
-          <td ${td}>${esc(u.nome)} (${esc(u.sigla)})</td>
-          <td ${tdR}>${u.qtd}</td><td ${tdR}>${u.dias}</td><td ${tdR}>${pct(u.pct)}</td></tr>`).join('')}
+        ${c.porUnidade.map(u => u.qtd
+          ? `<tr>
+              <td ${td}>${esc(u.nome)} (${esc(u.sigla)})</td>
+              <td ${tdR}>${u.qtd}</td><td ${tdR}>${u.dias}</td><td ${tdR}>${pct(u.pct)}</td></tr>`
+          /* linha zerada dita por extenso: número 0 sozinho numa tabela se lê
+             como campo não preenchido */
+          : `<tr style="color:#555">
+              <td ${td}>${esc(u.nome)} (${esc(u.sigla)})</td>
+              <td ${tdR}>0</td><td ${tdR}>0</td>
+              <td ${td} colspan="1" style="padding:5px 7px;border:1px solid #999;font-size:10.5pt;text-align:right;font-style:italic">sem atestados</td></tr>`).join('')}
         <tr style="font-weight:bold;background:#f0ede4">
           <td ${td}>Total corporativo</td><td ${tdR}>${c.total}</td><td ${tdR}>${c.dias}</td><td ${tdR}>100,00%</td></tr>
       </tbody></table>`;
@@ -11127,7 +11167,8 @@ function montarRelatorioCorporativo(comTimbrado, unidadeIds, acao){
     .sort((a,b) => c.capitulos[b]-c.capitulos[a]).slice(0,3)
     .forEach(L => recs.push(`<li style="margin-bottom:7px"><b>CID ${L} — ${esc(CID_CAPITULO[L]||'')}:</b> ${CID_BIBLIOTECA[L]}</li>`));
 
-  const secao = t => `<p style="font-size:12pt;font-weight:bold;text-transform:uppercase;border-bottom:1px solid #333;padding-bottom:3px;margin:22px 0 10px">${t}</p>`;
+  /* class="sec" para o CSS impedir título órfão no pé da página */
+  const secao = t => `<p class="sec" style="font-size:12pt;font-weight:bold;text-transform:uppercase;border-bottom:1px solid #333;padding-bottom:3px;margin:22px 0 10px;text-align:left">${t}</p>`;
 
   const html = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
     <title>Relatório Corporativo NR-01 — ${mesLabel(mes)}</title>
@@ -11137,7 +11178,20 @@ function montarRelatorioCorporativo(comTimbrado, unidadeIds, acao){
       .folha { max-width:760px; margin:0 auto; padding:24px; }
       .cab { text-align:center; padding-bottom:10px; border-bottom:2px solid #b8912f; margin-bottom:20px; }
       .cab img { height:70px; object-fit:contain; }
-      p, li { text-align:justify; }
+      /* justificado em tudo que é texto corrido — inclusive dentro da caixa
+         legal e das listas, que herdavam alinhamento à esquerda */
+      p, li, td, .legal, .legal p, ul, ol { text-align:justify; text-justify:inter-word; }
+      td, th { text-align:left; }
+      /* Quebra de página: sem isto o gerador fatiava a folha numa altura fixa e
+         cortava a linha ao meio. orphans/widows seguram no mínimo três linhas
+         de cada lado, e break-inside mantém inteiros os blocos curtos.
+         ATENÇÃO: este CSS mora dentro de um template literal de JS — nada de
+         crase aqui, ela fecha a string e derruba o arquivo inteiro. */
+      p, li { orphans:3; widows:3; }
+      .legal, .kpi, img.g, table, tr, .rod { break-inside:avoid; page-break-inside:avoid; }
+      h1,h2,h3,.sec { break-after:avoid; page-break-after:avoid; }
+      /* respiro no fim do documento: a última linha não pode encostar no corte */
+      .fim { height:26px; }
       .legal { background:#f6f5f2; padding:12px 14px; border-left:4px solid #3f3f43; font-style:italic; }
       .kpi { display:flex; gap:10px; margin:10px 0 4px; }
       .kpi div { flex:1; border:1px solid #999; padding:8px; text-align:center; }
@@ -11152,13 +11206,18 @@ function montarRelatorioCorporativo(comTimbrado, unidadeIds, acao){
     <p style="text-align:center;margin:0 0 18px">Gestão de Riscos Psicossociais e Ocupacionais — NR-01</p>
     <p style="margin:0 0 3px"><b>Período de análise:</b> ${mesLabel(mes)}</p>
     <p style="margin:0 0 3px"><b>Abrangência:</b> ${c.porUnidade.length} unidade(s) operacional(is)${
-      parcial ? ' — recorte selecionado: ' + esc(c.porUnidade.map(u=>u.sigla).join(', ')) : ' (todas as unidades com registro)'}</p>
+      parcial ? ' — recorte selecionado: ' + esc(c.porUnidade.map(u=>u.sigla).join(', ')) : ' (todas as unidades)'}
+      — ${comRegistro.length} com ocorrência e ${semRegistro.length} sem ocorrência no período.</p>
 
     ${secao('1. Panorama corporativo de afastamentos')}
     <p>O volume total de atestados médicos processados no período foi de <b>${c.total} registro(s)</b>,
     totalizando <b>${c.dias} dia(s)</b> de afastamento.
     ${lider ? `A distribuição por unidade operativa apresenta a <b>${esc(lider.nome)} (${esc(lider.sigla)})</b>
       como o principal polo de absenteísmo corporativo, concentrando <b>${pct(lider.pct)}</b> das ocorrências totais.` : ''}</p>
+    ${!c.total ? `<p><b>Não houve apresentação de atestados médicos em nenhuma das unidades analisadas
+      no período.</b> O monitoramento foi realizado e o resultado nulo está registrado para fins de
+      comprovação junto ao PGR.</p>` : ''}
+    ${fraseSemRegistro}
     ${tabUnidades}
     <img class="g" src="${imgUnidades}" alt="Distribuição por unidade">
 
@@ -11186,8 +11245,9 @@ function montarRelatorioCorporativo(comTimbrado, unidadeIds, acao){
     ${c.semCid ? `<p><b>Qualidade do registro ocupacional:</b> foram identificados <b>${c.semCid} registro(s)</b>
       sem codificação de CID (${pct(c.semCid/c.total*100)} do total). Esse fator prejudica o mapeamento
       epidemiológico de nexo causal em escala corporativa, exigindo auditoria médica para a manutenção técnica do PGR.</p>` : ''}
-    <p><b>Focos críticos e dinâmicas locais:</b></p>
-    <ul>${focos}</ul>
+    ${focos ? `<p><b>Focos críticos e dinâmicas locais:</b></p><ul>${focos}</ul>`
+            : '<p>Nenhuma unidade apresentou ocorrência no período — não há foco crítico a reportar.</p>'}
+    ${fraseSemRegistro && focos ? fraseSemRegistro : ''}
     ${recorrencias ? `<p><b>Recorrências individuais:</b> evidenciou-se reincidência de afastamento por
       colaboradores específicos em seus respectivos postos — ${recorrencias}.</p>` : ''}
 
@@ -11205,6 +11265,7 @@ function montarRelatorioCorporativo(comTimbrado, unidadeIds, acao){
       adoecimento ocupacional.</p>
     </div>
     ${comTimbrado ? `<div class="rod">${esc(ATLAS_ENDERECO)}<br>${esc(ATLAS_CONTATO)}</div>` : ''}
+    <div class="fim"></div>
     </div></body></html>`;
 
   const abrangencia = parcial ? c.porUnidade.map(u=>u.sigla).join(', ') : c.porUnidade.length+' unidade(s) — todas';
@@ -11275,8 +11336,13 @@ function configPDF(nomePdf){
     image: { type:'jpeg', quality:0.95 },
     html2canvas: { scale:2, useCORS:true, backgroundColor:'#ffffff', logging:false },
     jsPDF: { unit:'mm', format:'a4', orientation:'portrait', compress:true },
-    /* não parte tabelas no meio de uma linha nem os cartões de indicadores */
-    pagebreak: { mode:['css','legacy'], avoid:['tr','.kpi','.legal'] }
+    /* 'avoid-all' é o que impede o corte no meio da frase: sem ele o gerador
+       fatia a folha numa altura fixa, sem olhar onde o texto está, e a linha
+       sai partida ao meio na virada da página. Com ele, cada elemento é
+       empurrado inteiro para a página seguinte.
+       Os seletores de `avoid` seguem listados porque `avoid-all` não cobre
+       linha de tabela em todas as versões da biblioteca. */
+    pagebreak: { mode:['css','legacy','avoid-all'], avoid:['tr','p','li','.kpi','.legal','img','table'] }
   };
 }
 async function baixarRelatorioPDF(html, nomeArquivo){
