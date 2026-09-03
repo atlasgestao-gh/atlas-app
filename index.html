@@ -11286,83 +11286,54 @@ function nomeArquivoRelatorio(tipo, abrangencia, mes, comTimbrado){
   return `Relatório de Monitoramento - NR-01 - ${limpo} - ${mmaaaa}.pdf`;
 }
 
-/* ---- geração do PDF ----
-   A biblioteca só é baixada quando o primeiro PDF é pedido: não pesa no arranque
-   e, se a rede falhar, o relatório ainda sai em .html como antes. */
-const HTML2PDF_CDN = 'https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.14.0/html2pdf.bundle.min.js';
-let _html2pdfProm = null;
-function carregarHtml2Pdf(){
-  if(window.html2pdf) return Promise.resolve(true);
-  if(_html2pdfProm) return _html2pdfProm;
-  _html2pdfProm = new Promise(res => {
-    const s = document.createElement('script');
-    s.src = HTML2PDF_CDN;
-    s.onload  = () => res(!!window.html2pdf);
-    s.onerror = () => { _html2pdfProm = null; res(false); };
-    document.head.appendChild(s);
-  });
-  return _html2pdfProm;
-}
-/* o relatório é um documento A4 completo: renderiza dentro de um iframe isolado
-   (o CSS dele não pode vazar para a tela do sistema) e converte esse conteúdo */
-function palcoRelatorio(html){
-  return new Promise(resolve => {
-    const fr = document.createElement('iframe');
-    /* 660px ≈ a largura útil do A4 com as margens abaixo: mantém o corpo em 11pt */
-    fr.setAttribute('aria-hidden','true');
-    fr.style.cssText = 'position:fixed;left:-10000px;top:0;width:660px;height:1200px;border:0;visibility:hidden';
-    fr.onload = async () => {
-      const doc = fr.contentDocument;
-      /* um iframe recém-inserido dispara "load" do about:blank antes do srcdoc */
-      if(!doc || !doc.querySelector('.folha')) return;
-      const ajuste = doc.createElement('style');
-      ajuste.textContent = `body{background:#fff!important;padding:0!important;margin:0!important}
-        .folha{max-width:none!important;width:100%!important;padding:0!important;margin:0!important;box-shadow:none!important}`;
-      doc.head.appendChild(ajuste);
-      try{ await doc.fonts.ready; }catch(e){}
-      /* espera as imagens dos gráficos (data URI, mas o decode não é instantâneo) */
-      await Promise.all([...doc.images].map(im => im.complete ? null :
-        new Promise(r => { im.onload = im.onerror = r; })));
-      resolve({ fr, alvo: doc.querySelector('.folha') });
-    };
-    fr.srcdoc = html;
-    document.body.appendChild(fr);
-  });
-}
-function configPDF(nomePdf){
-  return {
-    margin: [20, 18, 24, 18],                       /* mm — o mesmo @page do relatório */
-    filename: nomePdf,
-    image: { type:'jpeg', quality:0.95 },
-    html2canvas: { scale:2, useCORS:true, backgroundColor:'#ffffff', logging:false },
-    jsPDF: { unit:'mm', format:'a4', orientation:'portrait', compress:true },
-    /* 'avoid-all' é o que impede o corte no meio da frase: sem ele o gerador
-       fatia a folha numa altura fixa, sem olhar onde o texto está, e a linha
-       sai partida ao meio na virada da página. Com ele, cada elemento é
-       empurrado inteiro para a página seguinte.
-       Os seletores de `avoid` seguem listados porque `avoid-all` não cobre
-       linha de tabela em todas as versões da biblioteca. */
-    pagebreak: { mode:['css','legacy','avoid-all'], avoid:['tr','p','li','.kpi','.legal','img','table'] }
-  };
-}
+/* ---- html2canvas / html2pdf: REMOVIDO em 31/08/2026, não recolocar ----
+   Foi o gerador de PDF dos relatórios e produzia documento errado: rasteriza a
+   página e a fatia numa altura fixa, ignorando justificação, viúvas/órfãs e
+   break-inside. Resultado: texto alinhado à esquerda e frase cortada ao meio na
+   virada de página e no fim.
+   Isso foi MEDIDO, não suposto: getComputedStyle no HTML renderizado devolve
+   text-align:justify, orphans:3 e break-inside:avoid. O HTML estava certo o
+   tempo todo — quem descartava era o conversor.
+   Os relatórios saem pelo motor de impressão do navegador (ver
+   baixarRelatorioPDF), que respeita @page e ainda gera texto selecionável. */
+/* ---- PDF pelo motor de impressão do NAVEGADOR ----
+   Antes o PDF saía do html2canvas, e ele descartava metade do documento:
+   MEDI o HTML renderizado e o navegador computa text-align:justify, orphans:3
+   e break-inside:avoid corretamente — quem jogava fora era o conversor, que
+   rasteriza a página e a fatia numa altura fixa. Daí o texto vinha alinhado à
+   esquerda (justificação não é implementada por ele) e a frase saía cortada ao
+   meio na virada e no fim.
+   O motor do próprio Chrome respeita @page, justificação, viúvas/órfãs e
+   quebra, e ainda gera PDF com texto selecionável em vez de imagem.
+   Custo: em vez do download automático, abre a caixa de impressão e a pessoa
+   escolhe "Salvar como PDF". O nome do arquivo já vai sugerido pelo <title>. */
 async function baixarRelatorioPDF(html, nomeArquivo){
-  const nomePdf = nomeArquivo.replace(/\.(html?|pdf)$/i, '') + '.pdf';
-  const ok = await carregarHtml2Pdf();
-  if(!ok){
-    baixar(nomePdf.replace(/\.pdf$/i, '.html'), html, 'text/html');
-    toast('Não consegui carregar o gerador de PDF (sem internet?). Baixei o .html — abra e use Ctrl+P.', 'alerta');
+  const nomeLimpo = nomeArquivo.replace(/\.(html?|pdf)$/i, '');
+  const w = window.open('', '_blank');
+  if(!w){
+    toast('Permita pop-ups para gerar o PDF — ou use "Abrir na tela" e Ctrl+P.', 'erro');
     return;
   }
-  toast('Gerando o PDF — leva alguns segundos.');
-  const { fr, alvo } = await palcoRelatorio(html);
+  /* o título é o nome que o Chrome sugere em "Salvar como PDF" */
+  w.document.write(html.replace(/<title>[\s\S]*?<\/title>/, '<title>' + esc(nomeLimpo) + '</title>'));
+  w.document.close();
+  toast('Escolha "Salvar como PDF" na janela de impressão.');
+  /* os gráficos são data URI, mas o decode não é instantâneo — imprimir antes
+     deles prontos sai com espaço em branco no lugar do gráfico */
   try{
-    await html2pdf().set(configPDF(nomePdf)).from(alvo).save();
-    toast('PDF baixado.');
-  }catch(e){
-    baixar(nomePdf.replace(/\.pdf$/i, '.html'), html, 'text/html');
-    toast('Falha ao montar o PDF (' + e.message + '). Baixei o .html como alternativa.', 'erro');
-  }finally{
-    fr.remove();
+    await new Promise(r => {
+      const pronto = () => {
+        const imgs = [...w.document.images];
+        Promise.all(imgs.map(im => im.complete ? null :
+          new Promise(res => { im.onload = im.onerror = res; }))).then(r);
+      };
+      if(w.document.readyState === 'complete') pronto();
+      else w.addEventListener('load', pronto, { once:true });
+      setTimeout(r, 4000);   /* nunca travar esperando */
+    });
+  }catch(e){}
+  try{ w.focus(); w.print(); }catch(e){
+    toast('Não consegui abrir a impressão — use Ctrl+P na janela do relatório.', 'alerta');
   }
 }
 
