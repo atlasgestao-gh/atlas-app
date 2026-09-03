@@ -8862,7 +8862,9 @@ function abaFechamentoMes(){
         <div class="px-5 py-4 border-b border-slate-200 flex items-center gap-2">
           <h3 class="font-semibold text-sm text-slate-700">Exames a cobrar — ${mesLabel(d.mes)}</h3>
           <span id="selFatResumo" class="text-xs px-2 py-1 rounded-full bg-emerald-50 text-emerald-700 hidden no-print"></span>
-          <button onclick="limparSelecaoFat()" id="selFatLimpar" class="text-[11px] underline text-slate-500 hover:text-slate-700 hidden no-print">limpar seleção</button>
+          <!-- Não existe "limpar seleção" aqui, de propósito: a marcação é
+               trabalho acumulado e desmarcar em lote é o tipo de clique que só
+               se percebe depois. Para desmarcar, é caixa por caixa. -->
           <div class="ml-auto flex items-center gap-2 flex-wrap justify-end">
             <span id="fatConta" class="text-xs text-accent font-medium hidden no-print"></span>
             <div class="relative no-print">
@@ -9305,14 +9307,12 @@ function recalcularSelecaoFat(){
   const margemSel  = receitaSel - custoSel;
 
   const resumo = document.getElementById('selFatResumo');
-  const limpar = document.getElementById('selFatLimpar');
   if(resumo){
     resumo.classList.toggle('hidden', !n);
     resumo.innerHTML = n
       ? `<i class="fa-solid fa-check-double mr-1"></i><b>${n}</b> selecionado(s) · custo <b>${fmtMoney(custoSel)}</b> · cobrança <b>${fmtMoney(receitaSel)}</b> · margem <b>${fmtMoney(margemSel)}</b>`
       : '';
   }
-  if(limpar) limpar.classList.toggle('hidden', !n);
 
   const cCusto = document.getElementById('cardCustoSel');
   if(cCusto) cCusto.innerHTML = n
@@ -9323,15 +9323,10 @@ function recalcularSelecaoFat(){
     ? `<span class="${margemSel>=0?'text-accent':'text-warning'} font-semibold">${fmtMoney(margemSel)}</span> nos ${n} selecionado(s)`
     : esc(cMargem.dataset.original || '');
 }
-/* Limpa o que está renderizado. O filtro de UNIDADE tira linhas do HTML, então
-   o que está fora dele não é tocado. Já a busca por nome apenas esconde as
-   linhas — de propósito —, então ela NÃO protege nada: "limpar seleção" com uma
-   busca aberta limpa o mês inteiro, que é o comportamento honesto (o resumo ao
-   lado também conta o mês inteiro). */
-function limparSelecaoFat(){
-  document.querySelectorAll('.selFat:checked').forEach(el => { el.checked = false; });
-  recalcularSelecaoFat();
-}
+/* NÃO recolocar um "limpar seleção" em lote. A marcação é trabalho acumulado —
+   o que já foi conferido no mês —, e um botão que apaga tudo de uma vez é o
+   tipo de clique cujo estrago só aparece dias depois. Desmarcar é caixa por
+   caixa, de propósito. Decisão da Jessica em 31/08/2026. */
 function setValorEmissao(id, v){
   const e = DB.emissoes.find(x => x.id === id);
   if(barradoPorFechamento(e.fechamento, 'Alteração de valor')){ viewFaturamento(); return; }
