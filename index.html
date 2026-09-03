@@ -6342,6 +6342,45 @@ function definirContatoEmLote(){
   });
 }
 
+/* ═════════ ÚLTIMO ASO PELA FICHA ═════════
+   O ASO da ficha e o ASO do exame são o MESMO registro. A diferença é a origem:
+   o que veio de um exame carrega `origemEmissaoId` e não se edita aqui — mexer
+   nele pela ficha quebraria o vínculo com a emissão, o faturamento e o
+   histórico. Nesses casos a ficha mostra e manda editar o exame. */
+function asoDaFichaTravado(c){
+  const a = c && asoVigente(c.id);
+  return !!(a && a.origemEmissaoId);
+}
+function valoresAsoDaFicha(c){
+  const a = c && asoVigente(c.id);
+  return a ? { asoTipo: a.tipo || '', asoData: a.dataExame || '' }
+           : { asoTipo:'', asoData:'' };
+}
+/* Aplica o que veio da ficha. Devolve o que mudou, para o aviso final. */
+function aplicarAsoDaFicha(c, v){
+  if(asoDaFichaTravado(c)) return '';           /* veio de exame: a ficha não mexe */
+  const tipo = String(v.asoTipo || '').trim();
+  const data = String(v.asoData || '').trim();
+  const a = asoVigente(c.id);
+
+  if(!tipo || !data){
+    /* limpou: volta a ser "sem ASO", que é o estado que ela já conhece */
+    if(a){ DB.asos = DB.asos.filter(x => x !== a); return 'ASO removido da ficha'; }
+    return '';
+  }
+  const vencimento = addDays(data, 365);
+  if(a){
+    if(a.tipo === tipo && a.dataExame === data) return '';
+    a.tipo = tipo; a.dataExame = data; a.vencimento = vencimento;
+    a.unidadeId = c.unidadeId || a.unidadeId;
+    return 'ASO atualizado (vence ' + fmtDate(vencimento) + ')';
+  }
+  DB.asos.push({ id: uid('as'), colaboradorId: c.id, unidadeId: c.unidadeId || '',
+                 tipo, dataExame: data, vencimento, resultado:'', medico:'',
+                 s2220:'', s2240:'', origemFicha:true, historico:[] });
+  return 'ASO registrado (vence ' + fmtDate(vencimento) + ')';
+}
+
 function editarColab(id, pre){
   const c = id ? colab(id) : null;
   const cargos = cargosOrdenados();
@@ -6382,9 +6421,25 @@ function editarColab(id, pre){
       { name:'admissao', label:'Data de admissão', type:'date' },
       { name:'status', label:'Status', type:'select', options:['Ativo','Afastado','Desligado','Inativo'].map(s=>({v:s,l:s})) },
       { name:'afastamento', label:'Observação de afastamento', col:'sm:col-span-2' },
+
+      /* Último ASO direto na ficha — para quem já chega com exame feito (veio de
+         outra gestora, admissão anterior ao sistema). Sem isto, a única forma de
+         dar um ASO a alguém era criar uma emissão retroativa.
+         Não é campo decorativo: grava no MESMO registro de DB.asos que o exame
+         gera, então vencimento, semáforo, alertas e estatísticas passam a contar
+         com ele. Em branco = "sem ASO", como já era. */
+      { type:'sep', name:'sepAso', label:'Último ASO emitido' },
+      { name:'asoTipo', label:'Tipo', type:'select',
+        options:[{ v:'', l:'— sem ASO registrado —' }].concat(
+          Object.keys(TIPOS).map(t => ({ v:t, l:TIPOS[t] }))) },
+      { name:'asoData', label:'Data do exame', type:'date',
+        hint:'o vencimento é calculado 1 ano depois' },
+      { type:'painel', name:'painelAso', col:'sm:col-span-2' },
+
       { type:'painel', name:'painelExames' }
     ],
-    values: c ? Object.assign({}, c, { funcao: funcaoAtual }) : Object.assign({ status:'Ativo' }, pre || {}),
+    values: c ? Object.assign({}, c, { funcao: funcaoAtual }, valoresAsoDaFicha(c))
+              : Object.assign({ status:'Ativo' }, pre || {}),
     afterRender: form => {
       const sel = form.elements['funcao'], selSexo = form.elements['sexo'], selUni = form.elements['unidadeId'];
       const alvo = form.querySelector('#painelExames');
@@ -6395,6 +6450,43 @@ function editarColab(id, pre){
       selSexo.addEventListener('change', pintar);
       selUni.addEventListener('change', pintar);
       pintar();
+
+      /* painel do último ASO: mostra o vencimento que vai sair, ou explica por
+         que os campos estão travados quando o ASO veio de um exame */
+      const tAso = form.elements['asoTipo'], dAso = form.elements['asoData'];
+      const boxAso = form.querySelector('#painelAso');
+      const travado = asoDaFichaTravado(c);
+      const pintarAso = () => {
+        if(travado){
+          const a = asoVigente(c.id);
+          tAso.disabled = dAso.disabled = true;
+          tAso.classList.add('bg-slate-50','text-slate-500');
+          dAso.classList.add('bg-slate-50','text-slate-500');
+          boxAso.innerHTML = `<div class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+            <i class="fa-solid fa-lock mr-1"></i>Este ASO veio do exame registrado em
+            <b>${esc(fmtDate(a.dataExame))}</b> e vence em <b>${esc(fmtDate(a.vencimento))}</b>.
+            Para corrigir, edite o exame em Agendamento de exames — assim o histórico
+            e o faturamento continuam batendo.</div>`;
+          return;
+        }
+        if(tAso.value && dAso.value){
+          const venc = addDays(dAso.value, 365);
+          const s = semaforo(venc);
+          boxAso.innerHTML = `<div class="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600">
+            Vencimento: <b>${esc(fmtDate(venc))}</b> ${badge(s.label, s.cls)}</div>`;
+        }else if(tAso.value || dAso.value){
+          boxAso.innerHTML = `<div class="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+            <i class="fa-solid fa-triangle-exclamation mr-1"></i>Preencha o tipo <b>e</b> a data —
+            com só um dos dois a pessoa continua contando como sem ASO.</div>`;
+        }else{
+          boxAso.innerHTML = `<p class="text-[11px] text-slate-400">Em branco, a pessoa aparece como
+            <b>sem ASO</b> nos alertas e no painel — que é o comportamento de sempre.</p>`;
+        }
+      };
+      tAso.addEventListener('change', pintarAso);
+      dAso.addEventListener('change', pintarAso);
+      dAso.addEventListener('input', pintarAso);
+      pintarAso();
       /* avisa já na digitação do CPF, antes de a pessoa preencher a ficha inteira */
       const inpCpf = form.elements['cpf'], boxCpf = form.querySelector('#avisoCpf');
       let tocouCpf = false;
@@ -6446,6 +6538,10 @@ function editarColab(id, pre){
       if(critica){ toast(critica.charAt(0).toUpperCase() + critica.slice(1) + '. Corrija para salvar a ficha.', 'erro'); return; }
       /* o mesmo CPF em duas fichas divide exames, ASOs e faturamento — barra antes */
       if(barradoPorCpfDuplicado(v, c ? c.id : null)) return;
+      /* o último ASO não é campo do colaborador: vive em DB.asos. Tira daqui
+         antes do Object.assign, senão viraria lixo dentro da ficha. */
+      const vAso = { asoTipo: v.asoTipo, asoData: v.asoData };
+      delete v.asoTipo; delete v.asoData;
       let eco = '';
       const eraNovo = !c;
       if(c){
@@ -6458,6 +6554,8 @@ function editarColab(id, pre){
         DB.colaboradores.push(Object.assign({ id: uid('cl'), local:'' }, v));
       }
       const alvo = c || DB.colaboradores[DB.colaboradores.length - 1];
+      const ecoAso = aplicarAsoDaFicha(alvo, vAso);
+      if(ecoAso) eco += ' ' + ecoAso + '.';
       save();
       /* "Salvar e solicitar ASO": cria a emissão já como Solicitado */
       if(extra === 'solicitarAso'){
