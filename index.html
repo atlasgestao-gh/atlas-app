@@ -8450,7 +8450,37 @@ function abaEsocial(){
 }
 
 /* ═══════════════════════════ 7. FATURAMENTO ═══════════════════════════ */
-const UIFat = { unidade:'', mes:'', valorPadrao:'', aba:'fechamento' };
+const UIFat = { unidade:'', mes:'', valorPadrao:'', aba:'fechamento', q:'' };
+
+/* ═══════ Busca da grade "Exames a cobrar" ═══════
+   Ela ESCONDE as linhas em vez de deixar de renderizá-las, e isso é de
+   propósito. A marcação de trabalho é lida do DOM por recalcularSelecaoFat()
+   ("o que está na tela manda"): linha ausente sairia da conta, e o resumo
+   diria "3 selecionados · R$ 120" com vinte marcados. Pior, "limpar seleção"
+   limparia só o que estivesse à vista.
+   Escondendo, todas as caixas continuam no DOM: seleção, resumo e totais do
+   rodapé seguem falando do mês inteiro, e a busca é só um jeito de achar
+   alguém no meio da lista. */
+function filtrarFatGrade(termo){
+  UIFat.q = termo || '';
+  const q = norm(UIFat.q);
+  const corpo = document.getElementById('corpoFat');
+  if(!corpo) return;
+  let vis = 0, tot = 0;
+  corpo.querySelectorAll('tr[data-busca]').forEach(tr => {
+    tot++;
+    const bate = !q || tr.dataset.busca.indexOf(q) >= 0;
+    tr.classList.toggle('hidden', !bate);
+    if(bate) vis++;
+  });
+  const nada = document.getElementById('fatSemResultado');
+  if(nada) nada.classList.toggle('hidden', !(tot && q && !vis));
+  const cont = document.getElementById('fatConta');
+  if(cont){
+    cont.textContent = q ? vis + ' de ' + tot : '';
+    cont.classList.toggle('hidden', !q);
+  }
+}
 
 /* ═══════════ FECHAMENTO DE MÊS (competência cobrada) ═══════════
    Fechar o mês declara que aquilo já foi cobrado do cliente. A partir daí o
@@ -8833,7 +8863,16 @@ function abaFechamentoMes(){
           <h3 class="font-semibold text-sm text-slate-700">Exames a cobrar — ${mesLabel(d.mes)}</h3>
           <span id="selFatResumo" class="text-xs px-2 py-1 rounded-full bg-emerald-50 text-emerald-700 hidden no-print"></span>
           <button onclick="limparSelecaoFat()" id="selFatLimpar" class="text-[11px] underline text-slate-500 hover:text-slate-700 hidden no-print">limpar seleção</button>
-          <span class="ml-auto text-xs text-slate-500">${d.exValidos.length} exame(s)${d.carts.length?' · '+d.carts.length+' carteirinha(s)':''}</span>
+          <div class="ml-auto flex items-center gap-2 flex-wrap justify-end">
+            <span id="fatConta" class="text-xs text-accent font-medium hidden no-print"></span>
+            <div class="relative no-print">
+              <i class="fa-solid fa-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
+              <input id="bFat" value="${esc(UIFat.q)}" oninput="filtrarFatGrade(this.value)"
+                placeholder="Buscar nesta grade..." autocomplete="off"
+                class="pl-8 pr-3 py-1.5 w-56 text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-accent/40">
+            </div>
+            <span class="text-xs text-slate-500">${d.exValidos.length} exame(s)${d.carts.length?' · '+d.carts.length+' carteirinha(s)':''}</span>
+          </div>
         </div>
         <div class="overflow-x-auto max-h-[460px] overflow-y-auto">
           <table class="w-full text-sm data">
@@ -8842,14 +8881,15 @@ function abaFechamentoMes(){
                   <th class="px-4 py-3">Colaborador</th><th class="px-4 py-3">Unidade</th><th class="px-4 py-3">Exame</th>
                   <th class="px-4 py-3">Data</th><th class="px-4 py-3 text-right">Custo</th>
                   <th class="px-4 py-3 text-right">Cobrança unidade</th><th class="px-4 py-3 text-right">Total da linha</th></tr></thead>
-            <tbody class="divide-y divide-slate-100">
+            <tbody class="divide-y divide-slate-100" id="corpoFat">
               ${d.ems.length ? d.ems.map(e => {
                 const temCart = !naoCompareceu(e) && e.carteirinha && tipoAceitaCarteirinha(e.tipoExame);
                 const vCart = temCart ? precoCarteirinha(e.unidadeId, d.mes) : 0;
                 const cCart = temCart ? custoCarteirinha(d.mes) : 0;
                 const vExame = naoCompareceu(e) ? 0 : (Number(e.valor)||0);
                 return `
-                <tr class="hover:bg-slate-50 ${naoCompareceu(e)?'bg-red-50/40':''}">
+                <tr class="hover:bg-slate-50 ${naoCompareceu(e)?'bg-red-50/40':''}"
+                  data-busca="${esc(norm([e.colaborador, uniNome(e.unidadeId), tipoLabel(e.tipoExame)].filter(Boolean).join(' ')))}">
                   <td class="px-4 py-3 text-center">
                     <input type="checkbox" class="selFat align-middle accent-emerald-600" onchange="recalcularSelecaoFat()"
                       data-id="${e.id}" ${selecionadoFat(e.id)?'checked':''}
@@ -8874,6 +8914,10 @@ function abaFechamentoMes(){
                   <td class="px-4 py-3 text-right text-xs font-medium ${naoCompareceu(e)?'text-slate-300':'text-slate-700'}">
                     ${naoCompareceu(e)?'—':fmtMoney(vExame + vCart)}</td>
                 </tr>`; }).join('') : vazio('Nenhum exame no mês selecionado.')}
+              <tr id="fatSemResultado" class="hidden"><td colspan="8" class="px-4 py-8 text-center text-sm text-slate-500">
+                Nenhum exame com esse nome neste mês.
+                <button onclick="filtrarFatGrade('');document.getElementById('bFat').value='';"
+                  class="ml-1 underline text-accent">limpar a busca</button></td></tr>
             </tbody>
             ${d.ems.length ? `<tfoot class="bg-slate-50 font-semibold text-sm sticky bottom-0 shadow-[0_-1px_0_rgba(0,0,0,.08)]">
               <tr><td colspan="5" class="px-4 py-3 text-right bg-slate-50">Totais <span class="font-normal text-xs text-slate-500">(faltas não somam${d.carts.length?'; inclui carteirinhas':''})</span></td>
@@ -8946,6 +8990,8 @@ function abaFechamentoMes(){
 
   /* a seleção guardada volta marcada — os cartões já abrem com o subtotal dela */
   recalcularSelecaoFat();
+  /* e a busca que estava aberta continua valendo depois de redesenhar */
+  filtrarFatGrade(UIFat.q);
 }
 
 /* ═══════ Emissão de notas e boletos ═══════
@@ -9277,7 +9323,11 @@ function recalcularSelecaoFat(){
     ? `<span class="${margemSel>=0?'text-accent':'text-warning'} font-semibold">${fmtMoney(margemSel)}</span> nos ${n} selecionado(s)`
     : esc(cMargem.dataset.original || '');
 }
-/* limpa só o que está na tela — o que está fora do filtro não é tocado */
+/* Limpa o que está renderizado. O filtro de UNIDADE tira linhas do HTML, então
+   o que está fora dele não é tocado. Já a busca por nome apenas esconde as
+   linhas — de propósito —, então ela NÃO protege nada: "limpar seleção" com uma
+   busca aberta limpa o mês inteiro, que é o comportamento honesto (o resumo ao
+   lado também conta o mês inteiro). */
 function limparSelecaoFat(){
   document.querySelectorAll('.selFat:checked').forEach(el => { el.checked = false; });
   recalcularSelecaoFat();
