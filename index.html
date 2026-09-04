@@ -6347,9 +6347,23 @@ function definirContatoEmLote(){
    o que veio de um exame carrega `origemEmissaoId` e não se edita aqui — mexer
    nele pela ficha quebraria o vínculo com a emissão, o faturamento e o
    histórico. Nesses casos a ficha mostra e manda editar o exame. */
+/* A ficha só mexe no ASO que ELA PRÓPRIA criou (origemFicha).
+   Qualquer outro — vindo de exame, de importação ou da migração — é somente
+   leitura aqui.
+
+   Isto é correção de um estrago meu, em 31/08/2026: a regra anterior travava só
+   o que tinha `origemEmissaoId`. ASO importado não tem esse campo, e muitos
+   também não têm `dataExame` (só `vencimento`). O formulário abria em branco por
+   isso, e ao salvar a ficha por qualquer motivo — trocar um e-mail — o código
+   lia "campo vazio = a pessoa apagou" e REMOVIA o ASO. Colaboradores da Sala
+   João Pessoa perderam o ASO assim.
+
+   A regra segura é esta: campo em branco nunca apaga nada que a ficha não tenha
+   criado. Se um dia precisar editar ASO importado por aqui, o caminho é marcar
+   explicitamente, não afrouxar esta trava. */
 function asoDaFichaTravado(c){
   const a = c && asoVigente(c.id);
-  return !!(a && a.origemEmissaoId);
+  return !!(a && !a.origemFicha);
 }
 function valoresAsoDaFicha(c){
   const a = c && asoVigente(c.id);
@@ -6358,14 +6372,19 @@ function valoresAsoDaFicha(c){
 }
 /* Aplica o que veio da ficha. Devolve o que mudou, para o aviso final. */
 function aplicarAsoDaFicha(c, v){
-  if(asoDaFichaTravado(c)) return '';           /* veio de exame: a ficha não mexe */
+  if(asoDaFichaTravado(c)) return '';           /* não nasceu aqui: a ficha não mexe */
   const tipo = String(v.asoTipo || '').trim();
   const data = String(v.asoData || '').trim();
   const a = asoVigente(c.id);
 
   if(!tipo || !data){
-    /* limpou: volta a ser "sem ASO", que é o estado que ela já conhece */
-    if(a){ DB.asos = DB.asos.filter(x => x !== a); return 'ASO removido da ficha'; }
+    /* só apaga o que a própria ficha criou E que estava preenchido na tela —
+       campo que abriu vazio jamais significa "apague o registro" */
+    const mostrava = a && a.tipo && a.dataExame;
+    if(a && a.origemFicha && mostrava){
+      DB.asos = DB.asos.filter(x => x !== a);
+      return 'ASO removido da ficha';
+    }
     return '';
   }
   const vencimento = addDays(data, 365);
@@ -6462,11 +6481,14 @@ function editarColab(id, pre){
           tAso.disabled = dAso.disabled = true;
           tAso.classList.add('bg-slate-50','text-slate-500');
           dAso.classList.add('bg-slate-50','text-slate-500');
+          const doExame = !!a.origemEmissaoId;
           boxAso.innerHTML = `<div class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
-            <i class="fa-solid fa-lock mr-1"></i>Este ASO veio do exame registrado em
-            <b>${esc(fmtDate(a.dataExame))}</b> e vence em <b>${esc(fmtDate(a.vencimento))}</b>.
-            Para corrigir, edite o exame em Agendamento de exames — assim o histórico
-            e o faturamento continuam batendo.</div>`;
+            <i class="fa-solid fa-lock mr-1"></i>${esc(tipoLabel(a.tipo) || 'ASO')} registrado${
+              a.dataExame ? ' em <b>' + esc(fmtDate(a.dataExame)) + '</b>' : ''}, vence em
+            <b>${esc(fmtDate(a.vencimento) || '—')}</b>.
+            ${doExame
+              ? 'Veio do exame — para corrigir, edite o exame em Agendamento de exames, assim o histórico e o faturamento continuam batendo.'
+              : 'Veio da importação da planilha. Esta ficha não altera nem apaga esse registro; para trocá-lo, registre um exame realizado em Agendamento de exames.'}</div>`;
           return;
         }
         if(tAso.value && dAso.value){
@@ -11395,8 +11417,50 @@ function renderBanner(){
     </div>`;
 }
 
+/* ═════════ REPARO: ASO que sumiu da ficha ═════════
+   Reconstrói o ASO de quem está sem nenhum, a partir do exame REALIZADO do
+   próprio colaborador — que é a fonte da verdade e não foi tocada.
+   Existe por causa de um defeito meu em 31/08/2026 (ver aplicarAsoDaFicha):
+   salvar a ficha de quem tinha ASO importado apagava o registro. Serve também
+   para qualquer outro descompasso entre exame realizado e ASO. */
+function candidatosReparoAso(){
+  return DB.colaboradores.filter(c => !asoVigente(c.id)).map(c => {
+    const ems = DB.emissoes.filter(e => e.status === 'REALIZADO' &&
+      norm(e.colaborador) === norm(c.nome));
+    ems.sort((a,b) => (b.dataAso||b.dataClinico||b.dataLab||'')
+                 .localeCompare(a.dataAso||a.dataClinico||a.dataLab||''));
+    return { c, em: ems[0] || null };
+  });
+}
+async function repararAsosPerdidos(){
+  const cand = candidatosReparoAso();
+  const comExame = cand.filter(x => x.em);
+  const semExame = cand.filter(x => !x.em);
+  if(!cand.length){ toast('Nenhum colaborador está sem ASO — nada a reparar.', 'info'); return; }
+  if(!comExame.length){
+    openInfo('Reparo de ASO', `<p class="text-sm text-slate-700">Há
+      <b>${cand.length} colaborador(es)</b> sem ASO, mas nenhum deles tem exame realizado
+      registrado — não há de onde reconstruir. O caminho é um ponto de retorno abaixo,
+      ou registrar o exame em Agendamento de exames.</p>`);
+    return;
+  }
+  if(!confirm('Reconstruir o ASO de ' + comExame.length + ' colaborador(es) a partir do exame ' +
+              'realizado de cada um?\n\n' +
+              (semExame.length ? semExame.length + ' continuarão sem ASO por não terem exame registrado.\n\n' : '') +
+              'Um ponto de retorno será guardado antes.')) return;
+  await guardarSnapshotLocal('antes de reparar ASOs sem registro');
+  let n = 0;
+  comExame.forEach(x => { const r = sincronizarAsoDeEmissao(x.em); if(r && r.aso) n++; });
+  save();
+  go('backup');
+  toast(n + ' ASO(s) reconstruído(s) a partir dos exames.' +
+        (semExame.length ? ' ' + semExame.length + ' segue(m) sem exame de origem.' : ''), 'ok');
+}
+
 async function viewBackup(){
   const snaps = await listarSnapshots();
+  const repAso = candidatosReparoAso();
+  const repComExame = repAso.filter(x => x.em).length;
   const tamanho = (JSON.stringify(DB).length / 1024).toFixed(0);
   const registros = ['colaboradores','asos','emissoes','laudos','unidades','cargos','matriz']
     .map(k => `${(DB[k]||[]).length} ${k}`).join(' · ');
@@ -11420,6 +11484,20 @@ async function viewBackup(){
 
   $('#view').innerHTML = `
   <div class="space-y-5 max-w-5xl">
+    ${repAso.length ? `
+    <div class="rounded-xl border-2 border-amber-300 bg-amber-50 p-5">
+      <p class="font-bold text-sm text-amber-900"><i class="fa-solid fa-heart-pulse mr-1"></i>
+        ${repAso.length} colaborador(es) sem ASO registrado</p>
+      <p class="text-xs text-amber-900 mt-1">
+        ${repComExame ? `<b>${repComExame}</b> tem exame realizado no sistema — dá para reconstruir o ASO a partir dele,
+          com a data e o vencimento corretos.` : 'Nenhum deles tem exame realizado registrado, então não há de onde reconstruir.'}
+        ${repAso.length - repComExame ? ` Os outros ${repAso.length - repComExame} não têm exame de origem.` : ''}</p>
+      <p class="text-[11px] text-amber-800 mt-1">Se isso apareceu depois de você editar fichas em 31/08/2026,
+        foi um defeito no campo de último ASO — já corrigido. Um ponto de retorno é guardado antes do reparo.</p>
+      ${repComExame ? `<button onclick="repararAsosPerdidos()"
+        class="mt-3 px-4 py-2 rounded-lg text-sm bg-amber-600 text-white hover:bg-amber-700">
+        <i class="fa-solid fa-wand-magic-sparkles mr-1"></i>Reconstruir ${repComExame} ASO(s) pelos exames</button>` : ''}
+    </div>` : ''}
     <div class="rounded-xl border-2 ${protegido?'border-success bg-emerald-50':'border-danger bg-red-50'} p-5">
       <div class="flex flex-wrap items-center gap-4">
         <div class="w-14 h-14 rounded-xl ${protegido?'bg-success':'bg-danger'} text-white flex items-center justify-center text-2xl shrink-0">
