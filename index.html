@@ -2762,7 +2762,74 @@ function card({ titulo, valor, sub, icon, cor, onClick }){
 }
 /* Célula de 4 colunas na barra de filtros em grid de 12 — três por linha no
    desktop, empilhadas no celular. */
-const COL4 = 'col-span-12 md:col-span-4';
+/* ═════════ BARRA DE FILTROS ═════════
+   Uma peça só para todas as telas. Antes cada uma montava a sua num flex-wrap:
+   em meia tela os campos quebravam em larguras diferentes, a barra ficava torta
+   e o "Limpar filtros" — quando existia — sumia no fim da fila.
+
+   Grade de 12 colunas, com a escada que a Jessica pediu:
+     celular  (<640px)  → 1 campo por linha
+     meia tela (≥640)   → 2 por linha
+     tela cheia (≥1024) → 3 por linha
+   Os botões vêm sempre numa linha própria abaixo, e o "Limpar filtros" aparece
+   em âmbar só quando há filtro ativo — assim ele é sinal, não enfeite. */
+const COL4 = 'col-span-12 sm:col-span-6 lg:col-span-4';
+const COL6 = 'col-span-12 sm:col-span-6';
+function barraFiltros(filtros, botoes, limpar){
+  const cs = (filtros || []).filter(Boolean);
+  const bs = (botoes || []).filter(Boolean);
+  if(limpar && limpar.ativo){
+    bs.push(botao('Limpar filtros', 'fa-filter-circle-xmark', limpar.onClick,
+      'bg-white border border-amber-300 text-amber-700 hover:bg-amber-50'));
+  }
+  return `<div class="px-4 py-3 border-b border-slate-200 space-y-2 no-print">
+    ${cs.length ? `<div class="grid grid-cols-12 gap-2">${cs.join('')}</div>` : ''}
+    ${bs.length ? `<div class="flex flex-wrap gap-2 items-center">${bs.join('')}</div>` : ''}
+  </div>`;
+}
+/* ── Limpar filtros, um par por tela ──
+   `filtrosAtivosX` decide se o botão aparece; `limparFiltrosX` zera o recorte,
+   volta para a página 1 e redesenha. Nenhum deles mexe na aba selecionada nem
+   na competência escolhida — mês é contexto de trabalho, não filtro de lista. */
+function filtrosAtivosEx(){ return !!(UIEx.q||UIEx.uni||UIEx.status||UIEx.drive||UIEx.fech||UIEx.cart||UIEx.verFechados); }
+function limparFiltrosEx(){ Object.assign(UIEx, { q:'', uni:'', status:'', comp:'', drive:'', fech:'', cart:'', page:1, verFechados:false }); viewExames(); }
+
+function filtrosAtivosAso(){ return !!(UIAso.q||UIAso.uni||UIAso.tipo||UIAso.sem||UIAso.status !== 'Ativo'); }
+function limparFiltrosAso(){ Object.assign(UIAso, { q:'', uni:'', tipo:'', sem:'', status:'Ativo', page:1 }); viewAsos(); }
+
+function filtrosAtivosLaudo(){ return !!(UILaudo.q||UILaudo.uni||UILaudo.sem); }
+function limparFiltrosLaudo(){ Object.assign(UILaudo, { q:'', uni:'', sem:'', page:1 }); viewLaudos(); }
+
+function filtrosAtivosVis(){ return !!(UIVis.q||UIVis.uni||UIVis.status); }
+function limparFiltrosVis(){ Object.assign(UIVis, { q:'', uni:'', status:'', page:1 }); viewVisitas(); }
+
+function filtrosAtivosDoc(){ return !!(UIDoc.q||UIDoc.tipo); }
+function limparFiltrosDoc(){ Object.assign(UIDoc, { q:'', tipo:'', page:1 }); viewDocumentos(); }
+
+function filtrosAtivosAte(){ return !!(UIAte.q||UIAte.uni); }
+function limparFiltrosAte(){ Object.assign(UIAte, { q:'', uni:'', page:1 }); viewAtestados(); }
+
+function filtrosAtivosRel(){ return !!(UIRel.q||UIRel.tipo); }
+function limparFiltrosRel(){ Object.assign(UIRel, { q:'', tipo:'', page:1 }); viewAtestados(); }
+
+function filtrosAtivosCargo(){ return !!UICargo.q; }
+function limparFiltrosCargo(){ Object.assign(UICargo, { q:'', page:1 }); viewCadastros(); }
+
+function filtrosAtivosMatriz(){ return !!(UIMatriz.q||UIMatriz.pend); }
+function limparFiltrosMatriz(){ Object.assign(UIMatriz, { q:'', pend:'', page:1 }); viewCadastros(); }
+
+function filtrosAtivosExame(){ return !!UIExame.q; }
+function limparFiltrosExame(){ Object.assign(UIExame, { q:'', page:1 }); viewCadastros(); }
+
+function filtrosAtivosEmp(){ return !!(UIEmp.q||UIEmp.empresa); }
+function limparFiltrosEmp(){ Object.assign(UIEmp, { q:'', empresa:'', page:1 }); viewEmpresas(); }
+
+function filtrosAtivosCli(){ return !!UICli.q; }
+function limparFiltrosCli(){ Object.assign(UICli, { q:'', page:1 }); viewEmpresas(); }
+
+function filtrosAtivosPre(){ return !!UIPre.q; }
+function limparFiltrosPre(){ Object.assign(UIPre, { q:'', page:1 }); viewEmpresas(); }
+
 /* cls sobrescreve a largura padrão (flex) quando a barra é montada em grid */
 function inputBusca(id, ph, oninput, valor, cls){
   return `<div class="relative ${cls || 'flex-1 min-w-[180px]'}">
@@ -3615,12 +3682,13 @@ function abaUnidades(){
   $('#abaEmp').innerHTML = `
   <div class="space-y-5">
     <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
-      <div class="px-4 py-3 border-b border-slate-200 flex flex-wrap gap-2 items-center no-print">
-        ${inputBusca('bEmp','Buscar unidade, CNPJ, cidade ou clínica...','UIEmp.q=this.value;UIEmp.page=1;viewEmpresas();focarBusca(&quot;bEmp&quot;)', UIEmp.q)}
-        ${selectFiltro('fEmp','Todas as empresas', opcoesEmpresas(), 'UIEmp.empresa=this.value;UIEmp.page=1;viewEmpresas()', UIEmp.empresa)}
-        ${botao('Nova unidade','fa-plus','editarUnidade()')}
-        ${botao('CSV','fa-file-csv','exportarUnidades()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
-      </div>
+      ${barraFiltros([
+        inputBusca('bEmp','Buscar unidade, CNPJ, cidade ou clínica...','UIEmp.q=this.value;UIEmp.page=1;viewEmpresas();focarBusca(&quot;bEmp&quot;)', UIEmp.q, COL6),
+        selectFiltro('fEmp','Todas as empresas', opcoesEmpresas(), 'UIEmp.empresa=this.value;UIEmp.page=1;viewEmpresas()', UIEmp.empresa, COL6)
+      ], [
+        botao('Nova unidade','fa-plus','editarUnidade()'),
+        botao('CSV','fa-file-csv','exportarUnidades()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')
+      ], { ativo: filtrosAtivosEmp(), onClick: 'limparFiltrosEmp()' })}
       <div class="overflow-x-auto">
         <table class="w-full text-sm data">
           <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
@@ -3667,11 +3735,12 @@ function abaClinicas(){
 
   $('#abaEmp').innerHTML = `
   <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
-    <div class="px-4 py-3 border-b border-slate-200 flex flex-wrap gap-2 items-center no-print">
-      ${inputBusca('bCli','Buscar clínica, cidade ou gestora...','UICli.q=this.value;UICli.page=1;viewEmpresas();focarBusca(&quot;bCli&quot;)', UICli.q)}
-      ${botao('Nova clínica','fa-plus','editarClinica()')}
-      ${botao('CSV','fa-file-csv','exportarClinicas()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
-    </div>
+    ${barraFiltros([
+      inputBusca('bCli','Buscar clínica, cidade ou gestora...','UICli.q=this.value;UICli.page=1;viewEmpresas();focarBusca(&quot;bCli&quot;)', UICli.q, COL6)
+    ], [
+      botao('Nova clínica','fa-plus','editarClinica()'),
+      botao('CSV','fa-file-csv','exportarClinicas()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')
+    ], { ativo: filtrosAtivosCli(), onClick: 'limparFiltrosCli()' })}
     <div class="overflow-x-auto">
       <table class="w-full text-sm data">
         <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
@@ -3744,10 +3813,11 @@ function abaPrestadores(){
     <p>A gestora (ex.: <b>Arys</b>) administra as clínicas credenciadas e é quem recebe o pagamento. As clínicas servem só para saber onde o colaborador fez o exame. Cadastre outra gestora aqui se passar a trabalhar com uma nova (ex.: Aryz).</p>
   </div>
   <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
-    <div class="px-4 py-3 border-b border-slate-200 flex flex-wrap gap-2 items-center no-print">
-      ${inputBusca('bPre','Buscar gestora...','UIPre.q=this.value;UIPre.page=1;viewEmpresas();focarBusca(&quot;bPre&quot;)', UIPre.q)}
-      ${botao('Nova gestora','fa-plus','editarPrestador()')}
-    </div>
+    ${barraFiltros([
+      inputBusca('bPre','Buscar gestora...','UIPre.q=this.value;UIPre.page=1;viewEmpresas();focarBusca(&quot;bPre&quot;)', UIPre.q, COL6)
+    ], [
+      botao('Nova gestora','fa-plus','editarPrestador()')
+    ], { ativo: filtrosAtivosPre(), onClick: 'limparFiltrosPre()' })}
     <div class="overflow-x-auto">
       <table class="w-full text-sm data">
         <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
@@ -4153,13 +4223,14 @@ function viewLaudos(){
     </div>
 
     <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
-      <div class="px-4 py-3 border-b border-slate-200 flex flex-wrap gap-2 items-center no-print">
-        ${inputBusca('bLau','Buscar unidade, documento ou clínica...','UILaudo.q=this.value;UILaudo.page=1;viewLaudos();focarBusca(&quot;bLau&quot;)', UILaudo.q)}
-        ${selectFiltro('fLauU','Todas as unidades', opcoesUnidades(), 'UILaudo.uni=this.value;UILaudo.page=1;viewLaudos()', UILaudo.uni)}
-        ${selectFiltro('fLauS','Todas as situações', [{v:'vencido',l:'Vencidos'},{v:'avencer',l:'A vencer (30d)'},{v:'emdia',l:'Em dia'},{v:'elaboracao',l:'Em elaboração'},{v:'sem',l:'Sem laudo'}], 'UILaudo.sem=this.value;UILaudo.page=1;viewLaudos()', UILaudo.sem)}
-        ${botao('Nova unidade','fa-plus','editarLaudo()')}
-        ${botao('CSV','fa-file-csv','exportarLaudos()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
-      </div>
+      ${barraFiltros([
+        inputBusca('bLau','Buscar unidade, documento ou clínica...','UILaudo.q=this.value;UILaudo.page=1;viewLaudos();focarBusca(&quot;bLau&quot;)', UILaudo.q, COL4),
+        selectFiltro('fLauU','Todas as unidades', opcoesUnidades(), 'UILaudo.uni=this.value;UILaudo.page=1;viewLaudos()', UILaudo.uni, COL4),
+        selectFiltro('fLauS','Todas as situações', [{v:'vencido',l:'Vencidos'},{v:'avencer',l:'A vencer (30d)'},{v:'emdia',l:'Em dia'},{v:'elaboracao',l:'Em elaboração'},{v:'sem',l:'Sem laudo'}], 'UILaudo.sem=this.value;UILaudo.page=1;viewLaudos()', UILaudo.sem, COL4)
+      ], [
+        botao('Nova unidade','fa-plus','editarLaudo()'),
+        botao('CSV','fa-file-csv','exportarLaudos()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')
+      ], { ativo: filtrosAtivosLaudo(), onClick: 'limparFiltrosLaudo()' })}
       <div class="overflow-x-auto">
         <table class="w-full text-sm data">
           <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
@@ -5566,8 +5637,18 @@ function mensagemVazioColabs(){
   if(total && !visiveis) return `Nenhum colaborador com os filtros atuais (${total} cadastrado(s) no total). Clique em "Limpar filtros".`;
   return 'Nenhum colaborador encontrado.';
 }
+/* 'Ativo' é o estado em que a tela ABRE, não uma escolha da pessoa — contá-lo
+   como filtro fazia o botão "Limpar" nascer aceso em toda visita, e botão que
+   está sempre aceso deixa de ser sinal. */
+function filtrosAtivosColabs(){
+  return !!(UIColab.q||UIColab.emp||UIColab.uni||UIColab.cargos.length||
+            (UIColab.status && UIColab.status !== 'Ativo')||
+            UIColab.sexo||UIColab.revisar||UIColab.semCpf||UIColab.foraCat);
+}
 function limparFiltrosColabs(){
-  UIColab.emp=''; UIColab.uni=''; UIColab.cargos=[]; UIColab.cargoAberto=false; UIColab.cargoBusca='';
+  /* a busca entra junto: o botão só aparece quando há algum filtro ativo, e a
+     busca é um deles — deixá-la de fora fazia o botão sumir sem limpar a lista */
+  UIColab.q=''; UIColab.emp=''; UIColab.uni=''; UIColab.cargos=[]; UIColab.cargoAberto=false; UIColab.cargoBusca='';
   UIColab.status=''; UIColab.sexo=''; UIColab.revisar=false; UIColab.semCpf=false;
   UIColab.foraCat=false; UIColab.page=1;
   viewCadastros();
@@ -5812,37 +5893,30 @@ function abaColaboradores(){
         <i class="fa-solid fa-filter mr-1"></i>${UIColab.revisar?'Mostrar todos':'Ver só os pendentes'}</button>
     </div>` : ''}
   <div class="bg-white rounded-xl border border-slate-200">
-    <div class="px-4 py-3 border-b border-slate-200 space-y-2 no-print">
-      <!-- filtros em duas linhas de três colunas (4/12 cada); no celular empilham -->
-      <div class="grid grid-cols-12 gap-2">
-      ${inputBusca('bCol','Buscar por nome, CPF, função ou e-mail...','UIColab.q=this.value;UIColab.page=1;viewCadastros();focarBusca(&quot;bCol&quot;)', UIColab.q, COL4)}
-      ${selectFiltro('fColE','Todas as empresas', opcoesEmpresas(), 'setEmpresaColab(this.value)', UIColab.emp, COL4)}
-      ${selectFiltro('fColU','Todas as unidades',
+    ${barraFiltros([
+      inputBusca('bCol','Buscar por nome, CPF, função ou e-mail...','UIColab.q=this.value;UIColab.page=1;viewCadastros();focarBusca(&quot;bCol&quot;)', UIColab.q, COL4),
+      selectFiltro('fColE','Todas as empresas', opcoesEmpresas(), 'setEmpresaColab(this.value)', UIColab.emp, COL4),
+      selectFiltro('fColU','Todas as unidades',
         opcoesUnidades().filter(o => !UIColab.emp || (uni(o.v)||{}).empresaId===UIColab.emp)
           .concat(semUni.length ? [{ v:'SEM', l:'Sem unidade (' + semUni.length + ')' }] : []),
-        'setUnidadeColab(this.value)', UIColab.uni, COL4)}
-      ${filtroMulti({ id:'fColC', label:'Todos os cargos', plural:'cargos', icon:'fa-id-badge', cls:COL4,
+        'setUnidadeColab(this.value)', UIColab.uni, COL4),
+      filtroMulti({ id:'fColC', label:'Todos os cargos', plural:'cargos', icon:'fa-id-badge', cls:COL4,
         opcoes:opcoesCargosColabs(), selecionados:UIColab.cargos,
         aberto:UIColab.cargoAberto, busca:UIColab.cargoBusca, phBusca:'Filtrar cargos...',
         onAbrir:'abrirCargosFiltro(' + (UIColab.cargoAberto?'false':'true') + ')',
         onFechar:'abrirCargosFiltro(false)', onMarcar:'marcarCargoFiltro',
-        onLimpar:'limparCargosFiltro()', onBuscar:'buscarCargoFiltro(this.value)' })}
-      ${selectFiltro('fColS','Todos os status', ['Ativo','Afastado','Desligado','Inativo'].map(s=>({v:s,l:s})), 'UIColab.status=this.value;UIColab.page=1;viewCadastros()', UIColab.status, COL4)}
-      ${selectFiltro('fColX','Todos os sexos', [{v:'F',l:'Feminino'},{v:'M',l:'Masculino'},{v:'SEM',l:'Sexo não informado'}], 'UIColab.sexo=this.value;UIColab.page=1;viewCadastros()', UIColab.sexo, COL4)}
-      </div>
-      <div class="flex flex-wrap gap-2 items-center">
-      ${botao('Novo colaborador','fa-user-plus','editarColab()')}
-      ${DB.colaboradores.some(c => !c.sexo)
+        onLimpar:'limparCargosFiltro()', onBuscar:'buscarCargoFiltro(this.value)' }),
+      selectFiltro('fColS','Todos os status', ['Ativo','Afastado','Desligado','Inativo'].map(s=>({v:s,l:s})), 'UIColab.status=this.value;UIColab.page=1;viewCadastros()', UIColab.status, COL4),
+      selectFiltro('fColX','Todos os sexos', [{v:'F',l:'Feminino'},{v:'M',l:'Masculino'},{v:'SEM',l:'Sexo não informado'}], 'UIColab.sexo=this.value;UIColab.page=1;viewCadastros()', UIColab.sexo, COL4)
+    ], [
+      botao('Novo colaborador','fa-user-plus','editarColab()'),
+      DB.colaboradores.some(c => !c.sexo)
         ? botao('Definir sexo pelo nome ('+DB.colaboradores.filter(c=>!c.sexo).length+')','fa-venus-mars','preencherSexoPorNome()',
                 'bg-white border border-amber-300 text-amber-700 hover:bg-amber-50')
-        : ''}
-      ${(UIColab.emp||UIColab.uni||UIColab.cargos.length||UIColab.status||UIColab.sexo||UIColab.revisar||UIColab.semCpf||UIColab.foraCat)
-        ? botao('Limpar filtros','fa-filter-circle-xmark','limparFiltrosColabs()','bg-white border border-amber-300 text-amber-700 hover:bg-amber-50')
-        : ''}
-      ${botao('Definir contato em lote','fa-address-book','definirContatoEmLote()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
-      ${botao('CSV','fa-file-csv','exportarColabs()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
-      </div>
-    </div>
+        : '',
+      botao('Definir contato em lote','fa-address-book','definirContatoEmLote()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50'),
+      botao('CSV','fa-file-csv','exportarColabs()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')
+    ], { ativo: filtrosAtivosColabs(), onClick: 'limparFiltrosColabs()' })}
     <div class="overflow-x-auto rounded-b-xl">
       <table class="w-full text-sm data">
         <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
@@ -7232,11 +7306,12 @@ function abaCargos(){
   const semMatriz = DB.cargos.filter(c => !matrizDaFuncao(c.funcao).matriz).length;
   $('#abaCad').innerHTML = `
   <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
-    <div class="px-4 py-3 border-b border-slate-200 flex flex-wrap gap-2 items-center no-print">
-      ${inputBusca('bCar','Buscar função, CBO ou atividade...','UICargo.q=this.value;UICargo.page=1;viewCadastros();focarBusca(&quot;bCar&quot;)', UICargo.q)}
-      ${botao('Novo cargo','fa-plus','editarCargo()')}
-      ${botao('CSV','fa-file-csv','exportCSV(\'cargos-cbo\',[\'CBO\',\'Função\',\'Descrição das atividades\'],DB.cargos.map(c=>[c.cbo,c.funcao,c.descricao]))','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
-    </div>
+    ${barraFiltros([
+      inputBusca('bCar','Buscar função, CBO ou atividade...','UICargo.q=this.value;UICargo.page=1;viewCadastros();focarBusca(&quot;bCar&quot;)', UICargo.q, COL6)
+    ], [
+      botao('Novo cargo','fa-plus','editarCargo()'),
+      botao('CSV','fa-file-csv','exportCSV(\'cargos-cbo\',[\'CBO\',\'Função\',\'Descrição das atividades\'],DB.cargos.map(c=>[c.cbo,c.funcao,c.descricao]))','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')
+    ], { ativo: filtrosAtivosCargo(), onClick: 'limparFiltrosCargo()' })}
     <div class="overflow-x-auto">
       <table class="w-full text-sm data">
         <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
@@ -7368,11 +7443,12 @@ function abaMatriz(){
     </div>
 
     <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
-      <div class="px-4 py-3 border-b border-slate-200 flex flex-wrap gap-2 items-center no-print">
-        ${inputBusca('bMtz','Buscar função, CBO ou exame...','UIMatriz.q=this.value;UIMatriz.page=1;viewCadastros();focarBusca(&quot;bMtz&quot;)', UIMatriz.q)}
-        ${selectFiltro('fMtz','Todas as situações', [{v:'completa',l:'Completas'},{v:'parcial',l:'Parciais'},{v:'pendente',l:'Pendentes'}], 'UIMatriz.pend=this.value;UIMatriz.page=1;viewCadastros()', UIMatriz.pend)}
-        ${botao('CSV','fa-file-csv','exportarMatriz()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
-      </div>
+      ${barraFiltros([
+        inputBusca('bMtz','Buscar função, CBO ou exame...','UIMatriz.q=this.value;UIMatriz.page=1;viewCadastros();focarBusca(&quot;bMtz&quot;)', UIMatriz.q, COL6),
+        selectFiltro('fMtz','Todas as situações', [{v:'completa',l:'Completas'},{v:'parcial',l:'Parciais'},{v:'pendente',l:'Pendentes'}], 'UIMatriz.pend=this.value;UIMatriz.page=1;viewCadastros()', UIMatriz.pend, COL6)
+      ], [
+        botao('CSV','fa-file-csv','exportarMatriz()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')
+      ], { ativo: filtrosAtivosMatriz(), onClick: 'limparFiltrosMatriz()' })}
       <div class="overflow-x-auto">
         <table class="w-full text-sm data">
           <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
@@ -7488,11 +7564,12 @@ function abaExamesCatalogo(){
 
   $('#abaCad').innerHTML = `
   <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
-    <div class="px-4 py-3 border-b border-slate-200 flex flex-wrap gap-2 items-center no-print">
-      ${inputBusca('bExC','Buscar exame...','UIExame.q=this.value;UIExame.page=1;viewCadastros();focarBusca(&quot;bExC&quot;)', UIExame.q)}
-      ${botao('Novo exame','fa-plus','editarExameCatalogo()')}
-      ${botao('CSV','fa-file-csv','exportCSV(\'catalogo-exames\',[\'Exame\',\'Grupo\',\'Custo (R$)\',\'Restrição de sexo\'],examesOrdenados().map(e=>[e.nome,GRUPOS_EXAME[e.grupo]||e.grupo,Number(e.custo)||0,SEXOS[e.sexo||\'\']]))','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
-    </div>
+    ${barraFiltros([
+      inputBusca('bExC','Buscar exame...','UIExame.q=this.value;UIExame.page=1;viewCadastros();focarBusca(&quot;bExC&quot;)', UIExame.q, COL6)
+    ], [
+      botao('Novo exame','fa-plus','editarExameCatalogo()'),
+      botao('CSV','fa-file-csv','exportCSV(\'catalogo-exames\',[\'Exame\',\'Grupo\',\'Custo (R$)\',\'Restrição de sexo\'],examesOrdenados().map(e=>[e.nome,GRUPOS_EXAME[e.grupo]||e.grupo,Number(e.custo)||0,SEXOS[e.sexo||\'\']]))','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')
+    ], { ativo: filtrosAtivosExame(), onClick: 'limparFiltrosExame()' })}
     <div class="overflow-x-auto">
       <table class="w-full text-sm data">
         <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
@@ -7631,27 +7708,28 @@ function viewExames(){
     </div>
 
     <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
-      <div class="px-4 py-3 border-b border-slate-200 flex flex-wrap gap-2 items-center no-print">
-        ${inputBusca('bEx','Buscar colaborador, médico, laboratório...','UIEx.q=this.value;UIEx.page=1;viewExames();focarBusca(&quot;bEx&quot;)', UIEx.q)}
-        ${selectFiltro('fExU','Todas as unidades', opcoesUnidades(), 'UIEx.uni=this.value;UIEx.page=1;viewExames()', UIEx.uni)}
-        ${selectFiltro('fExS','Todo o fluxo', FLUXO.map(f=>({v:f,l:FLUXO_LABEL[f]})), 'UIEx.status=this.value;UIEx.page=1;viewExames()', UIEx.status)}
-        ${selectFiltro('fExD','Drive: todos', [{v:'SIM',l:'Arquivado'},{v:'NAO',l:'Não arquivado'}], 'UIEx.drive=this.value;UIEx.page=1;viewExames()', UIEx.drive)}
-        ${selectFiltro('fExF','Fechamento: todos', [{v:'SIM',l:'Com mês'},{v:'NAO',l:'Sem mês'}], 'UIEx.fech=this.value;UIEx.page=1;viewExames()', UIEx.fech)}
-        ${selectFiltro('fExCart','Carteirinha: todas', [{v:'SIM',l:'Emitida (ok)'},{v:'PEND',l:'Pendente'},{v:'NAO',l:'Sem carteirinha'}], 'UIEx.cart=this.value;UIEx.page=1;viewExames()', UIEx.cart)}
-        ${botao('Nova emissão','fa-plus','novaEmissao()')}
-        ${(() => { const n = emissoesSemCadastro().length; return n
+      ${barraFiltros([
+        inputBusca('bEx','Buscar colaborador, médico, laboratório...','UIEx.q=this.value;UIEx.page=1;viewExames();focarBusca(&quot;bEx&quot;)', UIEx.q, COL4),
+        selectFiltro('fExU','Todas as unidades', opcoesUnidades(), 'UIEx.uni=this.value;UIEx.page=1;viewExames()', UIEx.uni, COL4),
+        selectFiltro('fExS','Todo o fluxo', FLUXO.map(f=>({v:f,l:FLUXO_LABEL[f]})), 'UIEx.status=this.value;UIEx.page=1;viewExames()', UIEx.status, COL4),
+        selectFiltro('fExD','Drive: todos', [{v:'SIM',l:'Arquivado'},{v:'NAO',l:'Não arquivado'}], 'UIEx.drive=this.value;UIEx.page=1;viewExames()', UIEx.drive, COL4),
+        selectFiltro('fExF','Fechamento: todos', [{v:'SIM',l:'Com mês'},{v:'NAO',l:'Sem mês'}], 'UIEx.fech=this.value;UIEx.page=1;viewExames()', UIEx.fech, COL4),
+        selectFiltro('fExCart','Carteirinha: todas', [{v:'SIM',l:'Emitida (ok)'},{v:'PEND',l:'Pendente'},{v:'NAO',l:'Sem carteirinha'}], 'UIEx.cart=this.value;UIEx.page=1;viewExames()', UIEx.cart, COL4)
+      ], [
+        botao('Nova emissão','fa-plus','novaEmissao()'),
+        (() => { const n = emissoesSemCadastro().length; return n
           ? `<button onclick="conciliarSemCadastro()" class="inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm bg-white border border-amber-300 text-amber-700 hover:bg-amber-50"><i class="fa-solid fa-wand-magic-sparkles"></i>Conciliar sem cadastro <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700">${n}</span></button>`
-          : ''; })()}
-        ${(() => { const n = DB.emissoes.filter(emissaoTravada).length; return n
+          : ''; })(),
+        (() => { const n = DB.emissoes.filter(emissaoTravada).length; return n
           ? `<button onclick="UIEx.verFechados=${UIEx.verFechados?'false':'true'};UIEx.page=1;viewExames()"
                class="inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm ${UIEx.verFechados?'bg-slate-700 text-white':'bg-white border border-slate-300 text-slate-600 hover:bg-slate-50'}"
                title="Exames de meses já fechados (cobrados) ficam fora da operação">
                <i class="fa-solid fa-lock"></i>${UIEx.verFechados?'Ocultar':'Ver'} meses fechados
                <span class="text-[10px] px-1.5 py-0.5 rounded-full ${UIEx.verFechados?'bg-white/20':'bg-slate-100'}">${n}</span></button>`
-          : ''; })()}
-        ${botao('Diagnosticar vínculo','fa-stethoscope','abrirDiagnostico()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
-        ${botao('CSV','fa-file-csv','exportarExames()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
-      </div>
+          : ''; })(),
+        botao('Diagnosticar vínculo','fa-stethoscope','abrirDiagnostico()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50'),
+        botao('CSV','fa-file-csv','exportarExames()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')
+      ], { ativo: filtrosAtivosEx(), onClick: 'limparFiltrosEx()' })}
       <div class="overflow-x-auto">
         <table class="w-full text-sm data">
           <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
@@ -8386,14 +8464,15 @@ function abaAsos(){
     </div>
 
     <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
-      <div class="px-4 py-3 border-b border-slate-200 flex flex-wrap gap-2 items-center no-print">
-        ${inputBusca('bAso','Buscar colaborador, CPF ou função...','UIAso.q=this.value;UIAso.page=1;viewAsos();focarBusca(&quot;bAso&quot;)', UIAso.q)}
-        ${selectFiltro('fAsoU','Todas as unidades', opcoesUnidades(), 'UIAso.uni=this.value;UIAso.page=1;viewAsos()', UIAso.uni)}
-        ${selectFiltro('fAsoT','Todos os tipos', Object.keys(TIPOS).map(k=>({v:k,l:TIPOS[k]})), 'UIAso.tipo=this.value;UIAso.page=1;viewAsos()', UIAso.tipo)}
-        ${selectFiltro('fAsoV','Todas as situações', [{v:'vencido',l:'Vencidos'},{v:'avencer',l:'A vencer (30d)'},{v:'emdia',l:'Em dia'}], 'UIAso.sem=this.value;UIAso.page=1;viewAsos()', UIAso.sem)}
-        ${selectFiltro('fAsoS','Todos os status', ['Ativo','Afastado','Desligado','Inativo'].map(s=>({v:s,l:s})), 'UIAso.status=this.value;UIAso.page=1;viewAsos()', UIAso.status)}
-        ${botao('CSV','fa-file-csv','exportarAsos()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
-      </div>
+      ${barraFiltros([
+        inputBusca('bAso','Buscar colaborador, CPF ou função...','UIAso.q=this.value;UIAso.page=1;viewAsos();focarBusca(&quot;bAso&quot;)', UIAso.q, COL4),
+        selectFiltro('fAsoU','Todas as unidades', opcoesUnidades(), 'UIAso.uni=this.value;UIAso.page=1;viewAsos()', UIAso.uni, COL4),
+        selectFiltro('fAsoT','Todos os tipos', Object.keys(TIPOS).map(k=>({v:k,l:TIPOS[k]})), 'UIAso.tipo=this.value;UIAso.page=1;viewAsos()', UIAso.tipo, COL4),
+        selectFiltro('fAsoV','Todas as situações', [{v:'vencido',l:'Vencidos'},{v:'avencer',l:'A vencer (30d)'},{v:'emdia',l:'Em dia'}], 'UIAso.sem=this.value;UIAso.page=1;viewAsos()', UIAso.sem, COL4),
+        selectFiltro('fAsoS','Todos os status', ['Ativo','Afastado','Desligado','Inativo'].map(s=>({v:s,l:s})), 'UIAso.status=this.value;UIAso.page=1;viewAsos()', UIAso.status, COL4)
+      ], [
+        botao('CSV','fa-file-csv','exportarAsos()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')
+      ], { ativo: filtrosAtivosAso(), onClick: 'limparFiltrosAso()' })}
       <p class="px-4 pt-3 text-[11px] text-slate-400 no-print">
         <i class="fa-solid fa-circle-info mr-1"></i>Os ASOs aparecem aqui automaticamente quando um exame é marcado como
         <b>Realizado</b> no módulo <b>Exames</b>. Neste módulo você registra apenas os dados do <b>eSocial</b> (S-2220 / S-2240) e o resultado.</p>
@@ -9836,13 +9915,14 @@ function viewVisitas(){
     </div>
 
     <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
-      <div class="px-4 py-3 border-b border-slate-200 flex flex-wrap gap-2 items-center no-print">
-        ${inputBusca('bVis','Buscar unidade ou observação...','UIVis.q=this.value;UIVis.page=1;viewVisitas();focarBusca(&quot;bVis&quot;)', UIVis.q)}
-        ${selectFiltro('fVisU','Todas as unidades', opcoesUnidades(), 'UIVis.uni=this.value;UIVis.page=1;viewVisitas()', UIVis.uni)}
-        ${selectFiltro('fVisS','Todo o fluxo', VIS_FLUXO.map(f=>({v:f,l:FLUXO_LABEL[f]})), 'UIVis.status=this.value;UIVis.page=1;viewVisitas()', UIVis.status)}
-        ${botao('Nova visita','fa-plus','editarVisita()')}
-        ${botao('CSV','fa-file-csv','exportarVisitas()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
-      </div>
+      ${barraFiltros([
+        inputBusca('bVis','Buscar unidade ou observação...','UIVis.q=this.value;UIVis.page=1;viewVisitas();focarBusca(&quot;bVis&quot;)', UIVis.q, COL4),
+        selectFiltro('fVisU','Todas as unidades', opcoesUnidades(), 'UIVis.uni=this.value;UIVis.page=1;viewVisitas()', UIVis.uni, COL4),
+        selectFiltro('fVisS','Todo o fluxo', VIS_FLUXO.map(f=>({v:f,l:FLUXO_LABEL[f]})), 'UIVis.status=this.value;UIVis.page=1;viewVisitas()', UIVis.status, COL4)
+      ], [
+        botao('Nova visita','fa-plus','editarVisita()'),
+        botao('CSV','fa-file-csv','exportarVisitas()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')
+      ], { ativo: filtrosAtivosVis(), onClick: 'limparFiltrosVis()' })}
       <div class="overflow-x-auto">
         <table class="w-full text-sm data">
           <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
@@ -9983,11 +10063,12 @@ function viewDocumentos(){
     </div>
 
     <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
-      <div class="px-4 py-3 border-b border-slate-200 flex flex-wrap gap-2 items-center no-print">
-        ${inputBusca('bDoc','Buscar número, destinatário ou assunto...','UIDoc.q=this.value;UIDoc.page=1;viewDocumentos();focarBusca(&quot;bDoc&quot;)', UIDoc.q)}
-        ${selectFiltro('fDoc','Todos os tipos', Object.keys(DOC_TIPO).map(t=>({v:t,l:DOC_TIPO[t]})), 'UIDoc.tipo=this.value;UIDoc.page=1;viewDocumentos()', UIDoc.tipo)}
-        ${botao('Novo documento','fa-plus','editarDoc()')}
-      </div>
+      ${barraFiltros([
+        inputBusca('bDoc','Buscar número, destinatário ou assunto...','UIDoc.q=this.value;UIDoc.page=1;viewDocumentos();focarBusca(&quot;bDoc&quot;)', UIDoc.q, COL6),
+        selectFiltro('fDoc','Todos os tipos', Object.keys(DOC_TIPO).map(t=>({v:t,l:DOC_TIPO[t]})), 'UIDoc.tipo=this.value;UIDoc.page=1;viewDocumentos()', UIDoc.tipo, COL6)
+      ], [
+        botao('Novo documento','fa-plus','editarDoc()')
+      ], { ativo: filtrosAtivosDoc(), onClick: 'limparFiltrosDoc()' })}
       <div class="overflow-x-auto">
         <table class="w-full text-sm data">
           <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
@@ -10426,10 +10507,13 @@ function abaAtestadosLista(){
     </div>
 
     <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
-      <div class="px-4 py-3 border-b border-slate-200 flex flex-wrap gap-2 items-center no-print">
-        ${inputBusca('bAte','Buscar colaborador, CID ou motivo...','UIAte.q=this.value;UIAte.page=1;viewAtestados();focarBusca(&quot;bAte&quot;)', UIAte.q)}
-        ${botao('CSV','fa-file-csv','exportarAtestados()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
-      </div>
+      <!-- a unidade e o mês ficam no cabeçalho da tela (fAteU), não aqui:
+           são o recorte do relatório inteiro, não filtro só desta grade -->
+      ${barraFiltros([
+        inputBusca('bAte','Buscar colaborador, CID ou motivo...','UIAte.q=this.value;UIAte.page=1;viewAtestados();focarBusca(&quot;bAte&quot;)', UIAte.q, COL6)
+      ], [
+        botao('CSV','fa-file-csv','exportarAtestados()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')
+      ], { ativo: filtrosAtivosAte(), onClick: 'limparFiltrosAte()' })}
       <div class="overflow-x-auto">
         <table class="w-full text-sm data">
           <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
@@ -10505,12 +10589,13 @@ function abaRelatorios(){
     </div>
 
     <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
-      <div class="px-4 py-3 border-b border-slate-200 flex flex-wrap gap-2 items-center no-print">
-        ${inputBusca('bRel','Buscar por unidade ou período...','UIRel.q=this.value;UIRel.page=1;viewAtestados();focarBusca(&quot;bRel&quot;)', UIRel.q)}
-        ${selectFiltro('fRelT','Todos os tipos', [{v:'UNIDADE',l:'Por unidade'},{v:'CORPORATIVO',l:'Corporativo'}], 'UIRel.tipo=this.value;UIRel.page=1;viewAtestados()', UIRel.tipo)}
-        ${botao('Gerar relatório NR-01','fa-file-contract','gerarRelatorioNR01()')}
-        ${botao('CSV','fa-file-csv','exportarRelatorios()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
-      </div>
+      ${barraFiltros([
+        inputBusca('bRel','Buscar por unidade ou período...','UIRel.q=this.value;UIRel.page=1;viewAtestados();focarBusca(&quot;bRel&quot;)', UIRel.q, COL6),
+        selectFiltro('fRelT','Todos os tipos', [{v:'UNIDADE',l:'Por unidade'},{v:'CORPORATIVO',l:'Corporativo'}], 'UIRel.tipo=this.value;UIRel.page=1;viewAtestados()', UIRel.tipo, COL6)
+      ], [
+        botao('Gerar relatório NR-01','fa-file-contract','gerarRelatorioNR01()'),
+        botao('CSV','fa-file-csv','exportarRelatorios()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')
+      ], { ativo: filtrosAtivosRel(), onClick: 'limparFiltrosRel()' })}
       <div class="overflow-x-auto">
         <table class="w-full text-sm data">
           <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
