@@ -3315,7 +3315,7 @@ function agendarDeAlerta(colaboradorId){
    junta os exames parados no fornecedor com os alertas de ASO num só painel,
    pesquisável por nome — separado do painel geral a pedido da Jessica */
 /* cada grade da tela tem a sua própria busca — filtrar uma não mexe nas outras */
-const UIAcomp = { pedidos:'', fazer:'', acompanhar:'', afastados:'', laudos:'' };
+const UIAcomp = { pedidos:'', fazer:'', acompanhar:'', afastados:'', laudos:'', recusados:'' };
 const chaveAcomp = (nome, uni) => norm(nome) + '|' + (uni||'');
 /* busca ampla: nome, unidade, função, tipo e status entram no mesmo saco */
 function filtrarAcomp(lista, termo){
@@ -3705,7 +3705,7 @@ function viewAcompanhamentos(){
 
   const corpo =
     aba === 'pedidos'    ? gridAcompanhamento(it.pedidos, 'Pedidos das gerentes', 'fa-inbox', 'pedidos',
-                             'Nenhum pedido em aberto.')
+                             'Nenhum pedido em aberto.') + gridRecusadosAtlas()
   : aba === 'fazer'      ? gridAcompanhamento(it.aFazer, 'Agendamentos a fazer', 'fa-calendar-plus', 'fazer',
                              'Nenhum exame a agendar — tudo em dia!', true)
   : aba === 'acompanhar' ? gridAcompanhamento(it.acompanhar, 'Acompanhar agendamentos', 'fa-truck-medical',
@@ -3723,6 +3723,68 @@ function viewAcompanhamentos(){
       </div>
       ${alertaSemCadastro()}
       ${corpo}
+    </div>`;
+}
+
+/* ── o outro lado do laço: o que a Atlas recusou ──
+   Recusar tirava o pedido da tela da Atlas para sempre: a gerente ficava com o
+   motivo na tela dela e quem escreveu o motivo não tinha onde reler. Quando ela
+   liga perguntando "por que recusaram o da Fulana?", é aqui que se olha.
+   Fica embaixo da fila de pedidos, na mesma aba, porque é a mesma conversa —
+   e não vira aba nova para não sugerir que é trabalho a fazer: não é, é
+   consulta.
+   Escopo: só as unidades que este login enxerga. O recorte de acesso vale aqui
+   como vale no resto da tela. */
+const LIMITE_RECUSADOS = 30;
+function pedidosRecusadosAtlas(){
+  const vis = new Set((DB.unidades||[]).map(u => u.id));
+  return solicitacoes().filter(s => s.status === 'recusado' && vis.has(s.unidadeId))
+    .sort((a,b) => (b.resolvidoEm||b.pedidoEm||'').localeCompare(a.resolvidoEm||a.pedidoEm||''));
+}
+function gridRecusadosAtlas(){
+  const todos = pedidosRecusadosAtlas();
+  if(!todos.length) return '';
+  const termo = norm(UIAcomp.recusados);
+  const achados = termo
+    ? todos.filter(s => norm([s.nome, uniNome(s.unidadeId), tipoLabel(s.tipoExame),
+                              s.motivoRecusa, s.pedidoPor, s.resolvidoPor]
+                             .filter(Boolean).join(' ')).includes(termo))
+    : todos;
+  const lista = achados.slice(0, LIMITE_RECUSADOS);
+  const linhas = lista.map(s => `<tr class="hover:bg-slate-50 align-top">
+    <td class="px-4 py-3">
+      <p class="font-medium text-slate-700">${esc(s.nome)}</p>
+      <p class="text-[11px] text-slate-500">${esc(uniNome(s.unidadeId))}</p></td>
+    <td class="px-4 py-3 text-xs text-slate-600">${esc(tipoLabel(s.tipoExame))}</td>
+    <td class="px-4 py-3 text-xs text-slate-500">${esc(s.pedidoPor||'—')}
+      <p class="text-[11px] text-slate-400 whitespace-nowrap">${esc(fmtDate((s.pedidoEm||'').slice(0,10)))}</p></td>
+    <td class="px-4 py-3 text-xs text-slate-500 whitespace-nowrap">${esc(fmtDate((s.resolvidoEm||'').slice(0,10)))}
+      ${s.resolvidoPor ? `<p class="text-[11px] text-slate-400">${esc(s.resolvidoPor)}</p>` : ''}</td>
+    <td class="px-4 py-3 text-xs text-slate-700 min-w-[240px]">${
+      s.motivoRecusa ? esc(s.motivoRecusa)
+        : '<span class="text-slate-400 italic">recusado sem motivo registrado</span>'}</td>
+  </tr>`).join('');
+
+  return `
+    <div class="bg-white rounded-xl border border-slate-200 overflow-hidden print-block">
+      <div class="px-5 py-4 border-b border-slate-200 flex items-center gap-2 flex-wrap">
+        <i class="fa-solid fa-ban text-slate-400"></i>
+        <h3 class="font-semibold text-sm text-slate-700">Pedidos que você recusou</h3>
+        <span class="text-xs text-slate-500">${achados.length}${termo ? ` <span class="text-accent">de ${todos.length}</span>` : ''}</span>
+        <div class="ml-auto no-print">${buscaGrade('recusados', 'Buscar nome, unidade ou motivo...')}</div>
+      </div>
+      <div class="overflow-x-auto max-h-[420px] overflow-y-auto"><table class="w-full text-sm data">
+        <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
+          <tr class="whitespace-nowrap">
+            <th class="px-4 py-3">Colaborador</th><th class="px-4 py-3">Exame</th>
+            <th class="px-4 py-3">Pedido por</th><th class="px-4 py-3">Recusado em</th>
+            <th class="px-4 py-3">Motivo que a gerente vê</th></tr></thead>
+        <tbody class="divide-y divide-slate-100">
+          ${lista.length ? linhas : vazio('Nenhuma recusa encontrada com esse termo.')}
+        </tbody></table></div>
+      ${achados.length > lista.length
+        ? `<p class="px-5 py-3 text-[11px] text-slate-400 border-t border-slate-100">Mostrando as ${LIMITE_RECUSADOS} mais recentes de ${achados.length} — use a busca para chegar nas antigas.</p>`
+        : ''}
     </div>`;
 }
 
