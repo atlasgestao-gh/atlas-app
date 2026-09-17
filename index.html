@@ -5649,7 +5649,7 @@ function temExameRestrito(matriz, tipos){
 /* ═══════════════════════════ 4. CADASTROS ═══════════════════════════ */
 const UICad = { aba:'colaboradores' };
 const UIColab = { q:'', emp:'', uni:'', cargos:[], cargoAberto:false, cargoBusca:'',
-                  status:'Ativo', sexo:'', page:1, revisar:false, semCpf:false, foraCat:false };
+                  status:'Ativo', sexo:'', asoTipo:'', page:1, revisar:false, semCpf:false, foraCat:false };
 
 function viewCadastros(){
   const abas = [
@@ -5667,6 +5667,16 @@ function viewCadastros(){
 }
 
 /* ---- 4a. colaboradores ---- */
+/* Filtro por tipo de ASO. O tipo considerado é o do ASO VIGENTE — é o que a
+   coluna "ASO vence" mostra e o que vale hoje para a pessoa; o histórico fica
+   de fora de propósito, senão quase todo mundo cairia em quase todo tipo.
+   'SEM' é o outro lado da mesma pergunta: quem não tem ASO nenhum. */
+function colabDoTipoAso(c, tipo){
+  if(!tipo) return true;
+  const a = asoVigente(c.id);
+  if(tipo === 'SEM') return !a;
+  return !!(a && a.tipo === tipo);
+}
 function colabsFiltrados(ignorarCargo){
   const q = norm(UIColab.q);
   const oficiais = UIColab.foraCat ? catalogoOficial() : null;
@@ -5680,6 +5690,7 @@ function colabsFiltrados(ignorarCargo){
            (!UIColab.foraCat || colabForaCatalogo(c, oficiais)) &&
            (!UIColab.status || c.status === UIColab.status) &&
            (!UIColab.sexo || (UIColab.sexo === 'SEM' ? !c.sexo : c.sexo === UIColab.sexo)) &&
+           colabDoTipoAso(c, UIColab.asoTipo) &&
            (!q || norm(c.nome + c.cpf + c.funcao + c.email).includes(q));
   })
   /* mais recentes primeiro, pela data do último exame realizado */
@@ -5791,13 +5802,13 @@ function mensagemVazioColabs(){
 function filtrosAtivosColabs(){
   return !!(UIColab.q||UIColab.emp||UIColab.uni||UIColab.cargos.length||
             (UIColab.status && UIColab.status !== 'Ativo')||
-            UIColab.sexo||UIColab.revisar||UIColab.semCpf||UIColab.foraCat);
+            UIColab.sexo||UIColab.asoTipo||UIColab.revisar||UIColab.semCpf||UIColab.foraCat);
 }
 function limparFiltrosColabs(){
   /* a busca entra junto: o botão só aparece quando há algum filtro ativo, e a
      busca é um deles — deixá-la de fora fazia o botão sumir sem limpar a lista */
   UIColab.q=''; UIColab.emp=''; UIColab.uni=''; UIColab.cargos=[]; UIColab.cargoAberto=false; UIColab.cargoBusca='';
-  UIColab.status=''; UIColab.sexo=''; UIColab.revisar=false; UIColab.semCpf=false;
+  UIColab.status=''; UIColab.sexo=''; UIColab.asoTipo=''; UIColab.revisar=false; UIColab.semCpf=false;
   UIColab.foraCat=false; UIColab.page=1;
   viewCadastros();
 }
@@ -6055,7 +6066,10 @@ function abaColaboradores(){
         onFechar:'abrirCargosFiltro(false)', onMarcar:'marcarCargoFiltro',
         onLimpar:'limparCargosFiltro()', onBuscar:'buscarCargoFiltro(this.value)' }),
       selectFiltro('fColS','Todos os status', ['Ativo','Afastado','Desligado','Inativo'].map(s=>({v:s,l:s})), 'UIColab.status=this.value;UIColab.page=1;viewCadastros()', UIColab.status, COL4),
-      selectFiltro('fColX','Todos os sexos', [{v:'F',l:'Feminino'},{v:'M',l:'Masculino'},{v:'SEM',l:'Sexo não informado'}], 'UIColab.sexo=this.value;UIColab.page=1;viewCadastros()', UIColab.sexo, COL4)
+      selectFiltro('fColX','Todos os sexos', [{v:'F',l:'Feminino'},{v:'M',l:'Masculino'},{v:'SEM',l:'Sexo não informado'}], 'UIColab.sexo=this.value;UIColab.page=1;viewCadastros()', UIColab.sexo, COL4),
+      selectFiltro('fColA','Todos os tipos de ASO',
+        Object.keys(TIPOS).map(k=>({v:k,l:TIPOS[k]})).concat([{v:'SEM',l:'Sem ASO'}]),
+        'UIColab.asoTipo=this.value;UIColab.page=1;viewCadastros()', UIColab.asoTipo, COL4)
     ], [
       botao('Novo colaborador','fa-user-plus','editarColab()'),
       DB.colaboradores.some(c => !c.sexo)
@@ -6102,7 +6116,12 @@ function abaColaboradores(){
                        title="Editar a data do último exame (recalcula o vencimento em +1 ano)"
                        class="px-2 py-1 border border-slate-200 rounded text-xs bg-white hover:border-accent focus:border-accent focus:ring-1 focus:ring-accent focus:outline-none">`
                   : '<span class="text-slate-300">—</span>'}</td>
-              <td class="px-4 py-3 text-xs whitespace-nowrap">${a ? fmtDate(a.vencimento) + ' ' + badge(s.label, s.cls) : '<span class="text-slate-400">sem ASO</span>'}</td>
+              <!-- o tipo vem embaixo do vencimento: sem ele, filtrar por tipo
+                   devolveria uma lista sem como conferir o critério -->
+              <td class="px-4 py-3 text-xs whitespace-nowrap">${a
+                  ? fmtDate(a.vencimento) + ' ' + badge(s.label, s.cls) +
+                    `<p class="text-[11px] text-slate-500">${esc(tipoLabel(a.tipo))}</p>`
+                  : '<span class="text-slate-400">sem ASO</span>'}</td>
               <td class="px-4 py-3">${badgeStatusColab(c.status)}</td>
               <td class="px-4 py-3 text-right whitespace-nowrap no-print">
                 <button onclick="fichaColab('${c.id}')" class="text-slate-400 hover:text-accent px-1.5" title="Ficha"><i class="fa-solid fa-eye"></i></button>
@@ -7433,13 +7452,14 @@ function baixarHistoricoColab(id){
 function abrirHistoricoColab(id){ abrirRelatorio(historicoColabHTML(id)); }
 
 function exportarColabs(){
-  exportCSV('colaboradores', ['Nome','CPF','RG','Nascimento','Sexo','Celular','Telefone','E-mail','Empresa','Unidade','Função','CBO','Admissão','Status','ASO vencimento','Dias p/ vencer','Carteirinha sanitária'],
+  exportCSV('colaboradores', ['Nome','CPF','RG','Nascimento','Sexo','Celular','Telefone','E-mail','Empresa','Unidade','Função','CBO','Admissão','Status','Tipo do ASO','ASO vencimento','Dias p/ vencer','Carteirinha sanitária'],
     colabsFiltrados().map(c => { const a = asoVigente(c.id); const s = a ? semaforo(a.vencimento) : null; const u = uni(c.unidadeId);
       const { matriz } = matrizDaFuncao(c.funcao);
       return [c.nome, c.cpf, c.rg, fmtDate(c.nascimento),
               c.sexo==='F'?'Feminino':(c.sexo==='M'?'Masculino':''), c.celular, c.telefone||'', c.email,
               u ? (emp(u.empresaId)||{}).nome : '', u ? u.nome : '', c.funcao, matriz ? matriz.cbo : '',
               fmtDate(c.admissao), c.status,
+              a ? tipoLabel(a.tipo) : 'Sem ASO',
               a ? fmtDate(a.vencimento) : '', s && s.dias !== null ? s.dias : '',
               exigeCarteirinha(c.unidadeId, c.funcao).exige ? 'Exige' : '']; }));
 }
