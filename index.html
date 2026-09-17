@@ -2081,9 +2081,47 @@ function unidadeGer(){
 }
 function daUnidadeGer(unidadeId){ const u = unidadeGer(); return !u || unidadeId === u; }
 function verUnidadeGer(id){ UIGer.uni = id; UIGer.q = ''; viewMinhaUnidade(); renderNav(); }
-function colabsDaGerente(){ return DB.colaboradores.filter(c => daUnidadeGer(c.unidadeId)); }
+/* ── Até quando um desligado continua visível para a gerente ──
+   Regra da Jessica (17/09/2026): até o exame DEMISSIONAL estar encerrado —
+   Realizado ou Não compareceu.
+
+   Enquanto esse exame não existir, a pessoa CONTINUA aparecendo, e isso é de
+   propósito: quem costuma pedir o demissional é a própria gerente, e sumir
+   com ela no instante do desligamento tiraria da tela justamente o que falta
+   pedir. Depois do demissional encerrado, a pessoa deixa de ser assunto da
+   unidade e sai — sem apagar nada: o cadastro segue inteiro para a Atlas.
+
+   O vínculo da emissão com a pessoa é pelo NOME, que é como o resto do
+   sistema liga as duas pontas (ver colabDaEmissao). */
+function demissionalEncerrado(c){
+  if(!c) return false;
+  const a = asoVigente(c.id);
+  if(a && a.tipo === 'DEMISSIONAL') return true;   /* ASO demissional já emitido */
+  /* "não compareceu" não gera ASO — só a emissão registra esse desfecho */
+  return DB.emissoes.some(e => e.tipoExame === 'DEMISSIONAL' && exameEncerrado(e) &&
+                               norm(e.colaborador || '') === norm(c.nome || ''));
+}
+function visivelParaGerente(c){ return !colabInativo(c) || !demissionalEncerrado(c); }
+
+function colabsDaGerente(){
+  return DB.colaboradores.filter(c => daUnidadeGer(c.unidadeId) && visivelParaGerente(c));
+}
 function ativosDaGerente(){ return colabsDaGerente().filter(c => c.status === 'Ativo'); }
 function pedidosDaGerente(){ return solicitacoes().filter(s => daUnidadeGer(s.unidadeId)); }
+/* os recusados saem da grade de pedidos e ganham grade própria: lá a
+   justificativa é coluna, não rodapé de uma linha no meio das outras */
+function pedidosRecusados(){
+  return pedidosDaGerente().filter(s => s.status === 'recusado')
+    .sort((a,b) => (b.resolvidoEm||b.pedidoEm||'').localeCompare(a.resolvidoEm||a.pedidoEm||''));
+}
+/* Recusa dos últimos 7 dias é notícia — depois disso vira histórico e o
+   contador para de gritar. Sem esse corte a aba ficaria vermelha para sempre,
+   porque "recusado" é estado final e nunca sai da lista. */
+const DIAS_RECUSA_NOVA = 7;
+function recusaNova(s){
+  const d = diasDesde((s.resolvidoEm || '').slice(0,10));
+  return d !== null && d <= DIAS_RECUSA_NOVA;
+}
 
 const SIT_PEDIDO = {
   aberto:    { l:'Aguardando a Atlas', c:'bg-indigo-100 text-indigo-700' },
@@ -2100,6 +2138,9 @@ function viewMinhaUnidade(){
     { id:'pedidos',      label:'Pedidos',        icon:'fa-paper-plane',
       n: pedidosDaGerente().filter(s => s.status === 'aberto').length, tom:'alerta' },
     { id:'acompanhar',   label:'Acompanhamento', icon:'fa-list-check', n: emissoesDaGerente().length },
+    { id:'recusados',    label:'Recusados',      icon:'fa-ban',
+      n: pedidosRecusados().length,
+      tom: pedidosRecusados().some(recusaNova) ? 'alerta' : '' },
     { id:'estatisticas', label:'Estatísticas',   icon:'fa-chart-pie' }
   ];
   if(!abas.some(a => a.id === UIGer.aba)) UIGer.aba = 'pedidos';
@@ -2119,7 +2160,8 @@ function viewMinhaUnidade(){
       ${barraAbas(abas, UIGer.aba, id => `abaGer('${id}')`)}
       <div id="abaGer"></div>
     </div>`;
-  ({ pedidos:gerPedidos, acompanhar:gerAcompanhar, estatisticas:gerEstatisticas })[UIGer.aba]();
+  ({ pedidos:gerPedidos, acompanhar:gerAcompanhar, recusados:gerRecusados,
+     estatisticas:gerEstatisticas })[UIGer.aba]();
 }
 
 function emissoesDaGerente(){
@@ -2133,7 +2175,10 @@ function emissoesDaGerente(){
    evita as duas pedirem a mesma coisa. Só o próprio autor pode cancelar. */
 function meuPedido(s){ return chaveEmail(s.pedidoPor) === chaveEmail(SESSAO.email); }
 function gerPedidos(){
-  const meus = pedidosDaGerente().slice().sort((a,b) => (b.pedidoEm||'').localeCompare(a.pedidoEm||''));
+  /* os recusados moram na aba Recusados — aqui fica só o que ainda anda */
+  const meus = pedidosDaGerente().filter(s => s.status !== 'recusado')
+    .sort((a,b) => (b.pedidoEm||'').localeCompare(a.pedidoEm||''));
+  const novasRecusas = pedidosRecusados().filter(recusaNova);
   const linhas = meus.map(s => {
     const sit = SIT_PEDIDO[s.status] || SIT_PEDIDO.aberto;
     const em = s.emissaoId ? DB.emissoes.find(e => e.id === s.emissaoId) : null;
@@ -2145,9 +2190,7 @@ function gerPedidos(){
         ${!meuPedido(s) ? `<div class="text-[11px] text-slate-400">${esc(s.pedidoPor||'')}</div>` : ''}</td>
       <td class="px-4 py-3">${badge(sit.l, sit.c)}
         ${em ? `<div class="text-[11px] text-slate-500 mt-1">exame: ${esc(FLUXO_LABEL[em.status]||em.status)}${
-          em.dataClinico ? ' · ' + esc(fmtDate(em.dataClinico)) : ''}</div>` : ''}
-        ${s.status === 'recusado' && s.motivoRecusa
-          ? `<div class="text-[11px] text-red-700 mt-1"><b>Motivo:</b> ${esc(s.motivoRecusa)}</div>` : ''}</td>
+          em.dataClinico ? ' · ' + esc(fmtDate(em.dataClinico)) : ''}</div>` : ''}</td>
       <td class="px-4 py-3 text-right whitespace-nowrap no-print">
         ${s.status === 'aberto' && meuPedido(s)
           ? `<button onclick="cancelarPedido('${s.id}')" class="px-2.5 py-1.5 rounded-lg text-xs bg-white border border-slate-300 text-slate-600 hover:bg-slate-50">
@@ -2161,6 +2204,14 @@ function gerPedidos(){
         <div><b>Peça o exame aqui.</b> A Atlas confere e abre o agendamento — a partir daí você acompanha
           o andamento nesta mesma tela. Cadastro, datas e resultados continuam com a Atlas.</div>
       </div>
+      ${novasRecusas.length ? `<div class="rounded-xl border border-red-200 bg-red-50 px-5 py-4 text-sm text-red-900 flex items-start gap-3">
+        <i class="fa-solid fa-ban mt-0.5"></i>
+        <div class="flex-1"><b>${novasRecusas.length} pedido(s) recusado(s) nos últimos ${DIAS_RECUSA_NOVA} dias.</b>
+          A Atlas escreveu o motivo de cada um — vale ler antes de pedir de novo.</div>
+        <button onclick="abaGer('recusados')"
+          class="px-3 py-1.5 rounded-lg text-xs bg-red-500 text-white hover:opacity-90 whitespace-nowrap shrink-0">
+          Ver os motivos</button>
+      </div>` : ''}
       <div class="flex justify-end no-print">
         <button onclick="pedirExame()" class="px-4 py-2 rounded-lg text-sm bg-accent text-white hover:bg-blue-700">
           <i class="fa-solid fa-plus mr-1"></i>Pedir exame</button>
@@ -2178,6 +2229,59 @@ function gerPedidos(){
                 <th class="px-4 py-3 no-print"></th></tr></thead>
           <tbody class="divide-y divide-slate-100">
             ${meus.length ? linhas : vazio('Você ainda não pediu nenhum exame.')}
+          </tbody></table></div>
+      </div>
+    </div>`;
+}
+
+/* ── aba: os pedidos que a Atlas recusou ──
+   Grade própria porque a JUSTIFICATIVA é o conteúdo, não um detalhe: no meio
+   da lista de pedidos ela virava uma linha de rodapé que ninguém lia, e o
+   pedido voltava igual dias depois. Aqui o motivo é coluna, com largura.
+   Recusa é estado final — não há botão de reabrir. Se o motivo não se aplica,
+   o caminho é pedir de novo na aba Pedidos, agora sabendo o que falta. */
+function gerRecusados(){
+  const lista = pedidosRecusados();
+  const linhas = lista.map(s => {
+    const nova = recusaNova(s);
+    const dias = diasDesde((s.resolvidoEm || '').slice(0,10));
+    return `<tr class="align-top ${nova ? 'bg-red-50/60' : 'hover:bg-slate-50'}">
+      <td class="px-4 py-3 font-medium text-slate-700">${esc(s.nome)}
+        ${nova ? '<span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 whitespace-nowrap">novo</span>' : ''}
+        ${s.funcao ? `<p class="text-[11px] text-slate-500">${esc(s.funcao)}</p>` : ''}</td>
+      <td class="px-4 py-3 text-xs text-slate-600">${esc(tipoLabel(s.tipoExame))}</td>
+      <td class="px-4 py-3 text-xs text-slate-500 whitespace-nowrap">${esc(fmtDate((s.pedidoEm||'').slice(0,10)))}
+        ${!meuPedido(s) ? `<div class="text-[11px] text-slate-400">${esc(s.pedidoPor||'')}</div>` : ''}</td>
+      <td class="px-4 py-3 text-xs text-slate-500 whitespace-nowrap">${esc(fmtDate((s.resolvidoEm||'').slice(0,10)))}
+        ${dias !== null ? `<div class="text-[11px] text-slate-400">há ${dias} dia(s)</div>` : ''}</td>
+      <td class="px-4 py-3 text-xs text-slate-700 min-w-[260px]">${
+        s.motivoRecusa
+          ? esc(s.motivoRecusa)
+          : '<span class="text-slate-400 italic">sem motivo registrado — fale com a Atlas</span>'}</td>
+    </tr>`;
+  }).join('');
+
+  $('#abaGer').innerHTML = `
+    <div class="space-y-4">
+      <div class="rounded-xl border border-slate-200 bg-slate-50 px-5 py-4 text-sm text-slate-700 flex items-start gap-3">
+        <i class="fa-solid fa-circle-info mt-0.5 text-slate-400"></i>
+        <div><b>Aqui ficam os pedidos que a Atlas não abriu.</b> O motivo de cada um está na última coluna.
+          Se o motivo não se aplicar ao seu caso, peça de novo na aba <b>Pedidos</b> — nada aqui se reabre sozinho.</div>
+      </div>
+      <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
+        <div class="px-5 py-4 border-b border-slate-200 flex items-center gap-2">
+          <i class="fa-solid fa-ban text-danger"></i>
+          <h3 class="font-semibold text-sm text-slate-700">Pedidos recusados</h3>
+          <span class="text-xs text-slate-500">${lista.length}</span>
+        </div>
+        <div class="overflow-x-auto"><table class="w-full text-sm data">
+          <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
+            <tr class="whitespace-nowrap">
+              <th class="px-4 py-3">Colaborador</th><th class="px-4 py-3">Exame</th>
+              <th class="px-4 py-3">Pedido em</th><th class="px-4 py-3">Recusado em</th>
+              <th class="px-4 py-3">Motivo da Atlas</th></tr></thead>
+          <tbody class="divide-y divide-slate-100">
+            ${lista.length ? linhas : vazio('Nenhum pedido seu foi recusado.')}
           </tbody></table></div>
       </div>
     </div>`;
@@ -2336,8 +2440,9 @@ function gerEstatisticas(){
           </tbody></table></div>
       </div>
 
-      ${desligados ? `<p class="text-xs text-slate-400 text-center">${desligados} desligado(s) no histórico —
-        não entram nos números acima, mas aparecem na busca ao pedir exame.</p>` : ''}
+      ${desligados ? `<p class="text-xs text-slate-400 text-center">${desligados} desligado(s) aguardando o exame demissional —
+        não entram nos números acima, mas continuam na busca ao pedir exame.
+        Assim que o demissional for realizado (ou marcado como não compareceu), eles saem desta tela.</p>` : ''}
     </div>`;
 }
 
