@@ -7634,12 +7634,186 @@ function exportarColabs(){
 /* ---- 4b. cargos ---- */
 const UICargo = { q:'', page:1 };
 function paginaCargos(p){ UICargo.page = p; viewCadastros(); }
+/* ══════════ GRAFIAS DUPLICADAS NO CATÁLOGO ══════════
+   A mesma função escrita de dois jeitos ("AUX. DE LIMPEZA" e "Auxiliar de
+   Limpeza") vira dois cargos — e daí duas matrizes de exames. Quem está
+   cadastrado com uma das grafias NUNCA enxerga a matriz da outra, porque
+   matrizDaFuncao casa pela grafia exata antes de tentar o sinônimo. O estrago
+   é silencioso e aparece longe daqui: no agendamento, que para de sugerir os
+   exames certos sem dizer por quê.
+
+   A comparação é por RAIZ: sem acento, sem caixa, sem pontuação, sem
+   conectivo, com as abreviações de planilha de RH expandidas e o plural
+   desfeito. Isso é o que faz "AUX. DE LIMPEZA", "Aux Limpeza" e "Auxiliar de
+   Limpeza" caírem no mesmo lugar. */
+const ABREV_CARGO = {
+  AUX:'AUXILIAR', AUXIL:'AUXILIAR', ASSIST:'ASSISTENTE', ASSIS:'ASSISTENTE',
+  OPER:'OPERADOR', TEC:'TECNICO', TECN:'TECNICO', SUP:'SUPERVISOR', SUPERV:'SUPERVISOR',
+  AJUD:'AJUDANTE', ENC:'ENCARREGADO', ENCARR:'ENCARREGADO', ATEND:'ATENDENTE',
+  RECEP:'RECEPCIONISTA', MOT:'MOTORISTA', SERV:'SERVENTE', COORD:'COORDENADOR',
+  ADM:'ADMINISTRATIVO', GER:'GERENTE'
+};
+const CONECTIVOS_CARGO = ['DE','DA','DO','DAS','DOS','E','EM'];
+/* Diferenças que NÃO são erro de digitação — são cargos distintos de propósito.
+   A vaga PCD tem cargo próprio e matriz própria (é o caso da Auxiliar de
+   Limpeza PCD), aprendiz e estagiário também, e "Auxiliar I" / "Auxiliar II"
+   são níveis. Sem esta lista o alerta mandaria unificar justamente o que
+   precisa ficar separado. */
+const QUALIF_CARGO = ['PCD','APRENDIZ','ESTAGIARIO','TRAINEE','JUNIOR','PLENO','SENIOR',
+                      'NOTURNO','DIURNO','I','II','III','IV'];
+
+/* singular tosco, e de propósito: só serve para comparar duas grafias entre si */
+function singularCargo(p){
+  if(/OES$/.test(p)) return p.slice(0,-3) + 'AO';    /* operações → operação */
+  if(/AES$/.test(p)) return p.slice(0,-3) + 'AO';    /* capitães  → capitão  */
+  if(/S$/.test(p) && p.length > 3) return p.slice(0,-1);
+  return p;
+}
+function tokensCargo(funcao){
+  return String(funcao || '')
+    .normalize('NFD').replace(/[̀-ͯ]/g,'')
+    .toUpperCase().replace(/[^A-Z0-9]+/g,' ')
+    .split(' ').filter(Boolean)
+    .map(p => ABREV_CARGO[p] || p)
+    .map(singularCargo)
+    .filter(p => CONECTIVOS_CARGO.indexOf(p) < 0);
+}
+function raizCargo(funcao){ return tokensCargo(funcao).join(''); }
+function semQualificador(toks){ return toks.filter(p => QUALIF_CARGO.indexOf(p) < 0).join(''); }
+function difereSoNoQualificador(ta, tb){
+  return semQualificador(ta) === semQualificador(tb) && ta.join('') !== tb.join('');
+}
+/* Levenshtein em duas linhas de trabalho — o catálogo tem dezenas de cargos,
+   não milhares, então o custo é irrelevante */
+function distEdicao(a, b){
+  if(a === b) return 0;
+  const m = a.length, n = b.length;
+  if(!m || !n) return m || n;
+  let linha = Array.from({ length:n+1 }, (_, j) => j);
+  for(let i = 1; i <= m; i++){
+    let ant = linha[0]; linha[0] = i;
+    for(let j = 1; j <= n; j++){
+      const tmp = linha[j];
+      linha[j] = Math.min(linha[j] + 1, linha[j-1] + 1, ant + (a[i-1] === b[j-1] ? 0 : 1));
+      ant = tmp;
+    }
+  }
+  return linha[n];
+}
+/* '' quando não há suspeita; senão o motivo, que vira a etiqueta na tela */
+function parecidasComTokens(f1, t1, f2, t2){
+  const r1 = t1.join(''), r2 = t2.join('');
+  if(!r1 || !r2) return '';
+  if(difereSoNoQualificador(t1, t2)) return '';
+  if(r1 === r2) return 'mesma raiz';
+  const idx = sinonimoIdx();
+  const c1 = idx[norm(f1)] || f1, c2 = idx[norm(f2)] || f2;
+  if(norm(c1) === norm(c2)) return 'sinônimo conhecido';
+  const maior = Math.max(r1.length, r2.length);
+  /* 0,85 é conservador de propósito: alerta com falso positivo demais deixa de
+     ser lido, e aqui o custo de errar para menos é só não avisar desta vez */
+  if(maior >= 5 && (1 - distEdicao(r1, r2) / maior) >= 0.85) return 'muito parecidas';
+  return '';
+}
+function grafiasParecidas(f1, f2){
+  return parecidasComTokens(f1, tokensCargo(f1), f2, tokensCargo(f2));
+}
+function matrizIgual(m1, m2){
+  if(!m1 || !m2) return false;
+  return TIPOS_MTZ.every(t =>
+    (m1[t]||[]).slice().sort().join('|') === (m2[t]||[]).slice().sort().join('|'));
+}
+function infoCargoDup(c){
+  const r = matrizDaFuncao(c.funcao);
+  return { cargo:c, id:c.id, funcao:c.funcao,
+           n: DB.colaboradores.filter(x => norm(x.funcao) === norm(c.funcao)).length,
+           matriz:r.matriz, via:r.via,
+           rotulo: !r.matriz ? 'sem matriz' : (r.via ? 'via ' + r.via : 'matriz própria') };
+}
+function cargosDuplicados(){
+  const cs = cargosOrdenados().map(c => ({ c, t: tokensCargo(c.funcao) }));
+  const out = [];
+  for(let i = 0; i < cs.length; i++){
+    for(let j = i + 1; j < cs.length; j++){
+      const motivo = parecidasComTokens(cs[i].c.funcao, cs[i].t, cs[j].c.funcao, cs[j].t);
+      if(!motivo) continue;
+      const a = infoCargoDup(cs[i].c), b = infoCargoDup(cs[j].c);
+      /* o caso que realmente morde: cada grafia com a SUA matriz — e diferentes.
+         Aí são duas listas de exames para a mesma função, e ninguém percebe. */
+      const duasMatrizes = !!(a.matriz && !a.via && b.matriz && !b.via);
+      out.push({ a, b, motivo, duasMatrizes,
+                 divergem: duasMatrizes && !matrizIgual(a.matriz, b.matriz) });
+    }
+  }
+  return out.sort((x, y) => (y.divergem - x.divergem) || (y.duasMatrizes - x.duasMatrizes) ||
+                            ((y.a.n + y.b.n) - (x.a.n + x.b.n)));
+}
+/* usado no Salvar do cargo: evitar a duplicata nascer é melhor do que achá-la depois */
+function cargoParecido(funcao, ignorarId){
+  return DB.cargos.find(c => c.id !== ignorarId && grafiasParecidas(funcao, c.funcao)) || null;
+}
+
+function verCargosDuplicados(){
+  const dups = cargosDuplicados();
+  const lado = x => `
+    <div class="flex items-center gap-2 flex-wrap py-1.5">
+      <span class="font-medium text-slate-700 text-sm">${esc(x.funcao)}</span>
+      <span class="text-[11px] text-slate-500">${x.n} colaborador(es)</span>
+      ${badge(x.rotulo, x.matriz ? (x.via ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-700')
+                                 : 'bg-red-100 text-red-700')}
+      <span class="ml-auto whitespace-nowrap">
+        <button onclick="closeModal();editarCargo('${x.id}')" class="text-slate-400 hover:text-accent px-1.5" title="Editar o cargo"><i class="fa-solid fa-pen"></i></button>
+        <button onclick="closeModal();editarMatriz('${x.id}')" class="text-slate-400 hover:text-accent px-1.5" title="Ver a matriz de exames"><i class="fa-solid fa-table-list"></i></button>
+      </span>
+    </div>`;
+  const bloco = d => `
+    <div class="border ${d.divergem ? 'border-red-300 bg-red-50' : 'border-slate-200'} rounded-lg px-4 py-3">
+      <div class="flex items-center gap-2 mb-1">
+        ${badge(d.motivo, 'bg-slate-200 text-slate-600')}
+        ${d.divergem ? badge('matrizes diferentes', 'bg-red-100 text-red-700') : ''}
+      </div>
+      ${lado(d.a)}
+      <div class="border-t border-slate-200/70"></div>
+      ${lado(d.b)}
+      ${d.divergem ? `<p class="text-[11px] text-red-800 mt-1">
+        As duas têm matriz própria e as listas de exames <b>não são iguais</b> — a mesma função
+        pede exames diferentes conforme a grafia da ficha.</p>` : ''}
+    </div>`;
+  openInfo('Grafias duplicadas no catálogo', `
+    <div class="space-y-3">
+      <p class="text-xs text-slate-600">Cada par abaixo parece ser a <b>mesma função escrita de dois jeitos</b>.
+        Enquanto as duas existirem, quem estiver cadastrado com uma grafia usa a matriz dela e ignora a da outra.</p>
+      <p class="text-xs text-slate-500">Para resolver: escolha qual grafia fica, corrija a matriz dela, e só então
+        apague a outra. Apagar primeiro joga os colaboradores daquela grafia para fora do catálogo.</p>
+      ${dups.length ? dups.map(bloco).join('')
+        : '<p class="text-sm text-slate-400 text-center py-6">Nenhuma grafia duplicada no catálogo.</p>'}
+    </div>`, 'max-w-2xl');
+}
+
 function abaCargos(){
   const q = norm(UICargo.q);
   const todos = cargosOrdenados().filter(c => !q || norm(c.funcao + c.cbo + c.descricao).includes(q));
   const { itens:lista, p } = paginar(todos, UICargo.page);
   const semMatriz = DB.cargos.filter(c => !matrizDaFuncao(c.funcao).matriz).length;
+  const dups = cargosDuplicados();
+  const nDiverg = dups.filter(d => d.divergem).length;
   $('#abaCad').innerHTML = `
+  ${dups.length ? `<div class="mb-4 rounded-xl border border-amber-300 bg-amber-50 px-5 py-4 flex items-start gap-3">
+      <i class="fa-solid fa-clone text-amber-500 mt-0.5"></i>
+      <div class="text-sm text-amber-900 flex-1">
+        <p class="font-semibold">${dups.length} possível(is) grafia(s) duplicada(s) no catálogo${
+          nDiverg ? ` — ${nDiverg} com matrizes de exames diferentes` : ''}</p>
+        <p class="text-xs mt-1">${dups.slice(0,3).map(d =>
+          esc(d.a.funcao) + ' × ' + esc(d.b.funcao)).join(' · ')}${
+          dups.length > 3 ? ' · e mais ' + (dups.length - 3) : ''}</p>
+        <p class="text-xs mt-1">A mesma função escrita de dois jeitos vira <b>duas matrizes de exames</b>.
+          Quem está cadastrado com uma grafia não enxerga a matriz da outra — e o agendamento deixa de
+          sugerir os exames certos, sem avisar.</p>
+      </div>
+      <button onclick="verCargosDuplicados()"
+        class="px-3 py-1.5 rounded-lg text-xs bg-amber-500 text-white hover:opacity-90 whitespace-nowrap shrink-0">
+        <i class="fa-solid fa-list-ul mr-1"></i>Ver quais</button>
+    </div>` : ''}
   <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
     ${barraFiltros([
       inputBusca('bCar','Buscar função, CBO ou atividade...','UICargo.q=this.value;UICargo.page=1;viewCadastros();focarBusca(&quot;bCar&quot;)', UICargo.q, COL6)
@@ -7707,6 +7881,16 @@ function editarCargo(id, pre){
           <i class="fa-solid fa-table-list mr-1"></i>${jaTem ? 'Salvar e editar matriz' : 'Salvar e definir matriz'}</button>`);
     },
     onSave: (v, extra) => {
+      /* impedir a duplicata de nascer vale mais do que achá-la depois: aqui
+         ainda dá para desistir, e a pessoa tem na frente o nome da que já
+         existe. Não bloqueia — há casos legítimos que a raiz não distingue. */
+      const dup = cargoParecido(v.funcao, c ? c.id : '');
+      if(dup && !confirm(
+        'Já existe "' + dup.funcao + '" no catálogo.\n\n' +
+        'A mesma função escrita de dois jeitos vira duas matrizes de exames: quem estiver ' +
+        'cadastrado com uma grafia não enxerga a matriz da outra, e o agendamento para de ' +
+        'sugerir os exames certos sem avisar.\n\n' +
+        'Cadastrar "' + v.funcao + '" assim mesmo?')) return;
       let alvo;
       if(c){ Object.assign(c, v); alvo = c; }
       else { alvo = Object.assign({ id: uid('cg') }, v); DB.cargos.push(alvo); }
