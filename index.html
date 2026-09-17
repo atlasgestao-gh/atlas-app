@@ -2965,7 +2965,7 @@ function dadosDashboard(){
   const st = { emdia:0, avencer:0, vencido:0, sem:0 };
   vigentes.forEach(v => st[semaforo(v.aso.vencimento).key]++);
 
-  const laudosSt = { emdia:0, avencer:0, vencido:0, sem:0, elaboracao:0 };
+  const laudosSt = { emdia:0, avencer:0, vencido:0, sem:0, elaboracao:0, dispensa:0 };
   DB.laudos.forEach(l => laudosSt[laudoSituacao(l).key]++);
 
   return {
@@ -3113,7 +3113,7 @@ function viewDashboard(){
               icon:'fa-circle-check', cor:'bg-emerald-50 text-success', onClick:"irParaAsos('','emdia')"})}
       ${card({titulo:'Laudos vencidos', valor:d.laudosSt.vencido, sub:'PCMSO / PGR / LTCAT',
               icon:'fa-file-circle-xmark', cor:'bg-red-50 text-danger', onClick:"irParaLaudos('vencido')"})}
-      ${card({titulo:'Laudos a vencer (30 dias)', valor:d.laudosSt.avencer, sub:`${d.laudosSt.emdia} em dia · ${d.laudosSt.elaboracao} em elaboração`,
+      ${card({titulo:'Laudos a vencer (30 dias)', valor:d.laudosSt.avencer, sub:`${d.laudosSt.emdia} em dia · ${d.laudosSt.elaboracao} em elaboração${d.laudosSt.dispensa?' · '+d.laudosSt.dispensa+' dispensada(s)':''}`,
               icon:'fa-file-shield', cor:'bg-amber-50 text-warning', onClick:"irParaLaudos('avencer')"})}
     </div>
 
@@ -4067,9 +4067,17 @@ function exportarUnidades(){
 /* Um registro por unidade. Cada entrega vira uma versão; as anteriores vão
    para o histórico. A contagem de dias olha apenas a versão vigente.        */
 
+/* A declaração de dispensa NÃO é um laudo a mais: ela é o que a unidade
+   entrega NO LUGAR do PGR e do PCMSO quando se enquadra na dispensa
+   (ME/EPP de grau de risco 1 e 2 sem risco na avaliação preliminar).
+   Por isso é exclusiva — não convive com nenhum outro documento — e não tem
+   vencimento: vale ENQUANTO o enquadramento durar. Quem a encerra é o
+   desenquadramento, que é um ato, não uma data. */
+const DOC_DISPENSA = 'Declaração de Dispensa PGR/PCMSO';
 const DOC_TIPOS = [
   'PCMSO', 'PGR', 'LTCAT', 'AET', 'PCA', 'PPR',
-  'Laudo de Insalubridade', 'Laudo de Periculosidade', 'Ordem de Serviço', 'Relatório Analítico'
+  'Laudo de Insalubridade', 'Laudo de Periculosidade', 'Ordem de Serviço', 'Relatório Analítico',
+  DOC_DISPENSA
 ];
 const DOC_DESCR = {
   'PCMSO':'Programa de Controle Médico de Saúde Ocupacional',
@@ -4077,7 +4085,8 @@ const DOC_DESCR = {
   'LTCAT':'Laudo Técnico das Condições Ambientais do Trabalho',
   'AET':'Análise Ergonômica do Trabalho',
   'PCA':'Programa de Conservação Auditiva',
-  'PPR':'Programa de Proteção Respiratória'
+  'PPR':'Programa de Proteção Respiratória',
+  [DOC_DISPENSA]:'Declaração de dispensa do PGR e do PCMSO — sem validade, vale enquanto a empresa se enquadrar'
 };
 function parseDocs(s){
   if(Array.isArray(s)) return s.slice();
@@ -4085,6 +4094,13 @@ function parseDocs(s){
     .map(x => DOC_TIPOS.find(t => norm(t) === norm(x)) || x);
 }
 function docsLabel(a){ return (parseDocs(a)).join(' + ') || '—'; }
+/* a versão é uma declaração de dispensa? (aceita a versão ou a lista crua) */
+function ehDispensa(v){
+  if(!v) return false;
+  const docs = Array.isArray(v) || typeof v === 'string' ? v : v.documentos;
+  return parseDocs(docs).some(d => norm(d) === norm(DOC_DISPENSA));
+}
+function laudoDispensado(l){ return !!(l && l.atual && ehDispensa(l.atual)); }
 
 /* migra o formato antigo (uma linha por entrega) para o novo (histórico por unidade) */
 function migrarLaudos(d){
@@ -4153,10 +4169,15 @@ function migrarLaudoStatus(d){
    entrega, então o objeto existe vazio e a unidade ficava fora de tudo —
    fora do vermelho na grade e fora dos acompanhamentos. O que decide é haver
    VENCIMENTO, não haver objeto. */
-function semLaudoAinda(l){ return !(l && l.atual && l.atual.vencimento); }
+/* A dispensa cobre a unidade sem ter vencimento — por isso ela entra aqui:
+   sem esta linha, uma unidade dispensada apareceria como "Sem laudo", que é
+   justamente o contrário do que ela é. */
+function semLaudoAinda(l){ return !(l && l.atual && (l.atual.vencimento || ehDispensa(l.atual))); }
 function laudoSituacao(l){
-  const base = !semLaudoAinda(l) ? semaforo(l.atual.vencimento)
-                       : { key:'sem', label:'Sem laudo', dias:null, cls:'bg-red-100 text-red-700' };
+  const base = ehDispensa(l && l.atual)
+    ? { key:'dispensa', label:'Dispensada', dias:null, cls:'bg-indigo-100 text-indigo-700' }
+    : (!semLaudoAinda(l) ? semaforo(l.atual.vencimento)
+                       : { key:'sem', label:'Sem laudo', dias:null, cls:'bg-red-100 text-red-700' });
   if(l.renovacao){
     return { key:'elaboracao', label:'Em elaboração', cls:'bg-blue-100 text-blue-700',
              dias: base.dias, base, desde: l.renovacao.solicitadoEm };
@@ -4170,6 +4191,8 @@ function diasDesde(iso){ const d = diasPara(iso); return d === null ? null : -d;
       da clínica. Dentro do grupo, o que está parado há mais tempo vem antes.
    2. SEM LAUDO — unidade descoberta e ninguém tratando ainda.
    3. O resto por vencimento mais próximo: vencido, depois a vencer, depois em dia.
+   4. DISPENSADAS por último — não têm prazo e não pedem nada de ninguém;
+      ficam na lista só para você ver quem está sob declaração de dispensa.
    (A lista de alertas do Painel e da aba Acompanhamentos continua ordenada por
    urgência pura, porque lá os laudos convivem com os ASOs.) */
 function ordemLaudo(l){
@@ -4179,6 +4202,7 @@ function ordemLaudo(l){
     return { g:0, k: -(d === null ? 0 : d) };
   }
   if(s.key === 'sem') return { g:1, k: norm(uniNome(l.unidadeId)) };
+  if(s.key === 'dispensa') return { g:3, k: norm(uniNome(l.unidadeId)) };
   return { g:2, k: s.dias === null ? 9e9 : s.dias };
 }
 function compararLaudos(a, b){
@@ -4204,13 +4228,13 @@ function paginaLaudos(p){ UILaudo.page = p; viewLaudos(); }
 function viewLaudos(){
   const todos = laudosFiltrados();
   const { itens:lista, p } = paginar(todos, UILaudo.page);
-  const st = { vencido:0, avencer:0, emdia:0, sem:0, elaboracao:0 };
+  const st = { vencido:0, avencer:0, emdia:0, sem:0, elaboracao:0, dispensa:0 };
   DB.laudos.forEach(l => st[laudoSituacao(l).key]++);
   const pendPag = DB.laudos.filter(l => l.atual && l.atual.pagamento !== 'Entregue').length;
 
   $('#view').innerHTML = `
   <div class="space-y-5">
-    <div class="grid grid-cols-2 lg:grid-cols-5 gap-3">
+    <div class="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3">
       ${card({titulo:'Unidades com laudo', valor:DB.laudos.length, icon:'fa-file-shield', cor:'bg-slate-100 text-slate-600',
               onClick:"UILaudo.sem='';UILaudo.page=1;viewLaudos()"})}
       ${card({titulo:'Vencidos', valor:st.vencido, sub:'sem renovação aberta', icon:'fa-file-circle-xmark', cor:'bg-red-50 text-danger',
@@ -4219,6 +4243,8 @@ function viewLaudos(){
               onClick:"UILaudo.sem='avencer';UILaudo.page=1;viewLaudos()"})}
       ${card({titulo:'Em elaboração', valor:st.elaboracao, sub:'aguardando a clínica', icon:'fa-hourglass-half', cor:'bg-stone-100 text-accent',
               onClick:"UILaudo.sem='elaboracao';UILaudo.page=1;viewLaudos()"})}
+      ${card({titulo:'Dispensadas', valor:st.dispensa, sub:'sem PGR/PCMSO por enquadramento', icon:'fa-file-circle-check', cor:'bg-indigo-50 text-indigo-600',
+              onClick:"UILaudo.sem='dispensa';UILaudo.page=1;viewLaudos()"})}
       ${card({titulo:'Aguardando entrega', valor:pendPag, icon:'fa-money-bill-wave', cor:'bg-stone-100 text-stone-500'})}
     </div>
 
@@ -4226,7 +4252,7 @@ function viewLaudos(){
       ${barraFiltros([
         inputBusca('bLau','Buscar unidade, documento ou clínica...','UILaudo.q=this.value;UILaudo.page=1;viewLaudos();focarBusca(&quot;bLau&quot;)', UILaudo.q, COL4),
         selectFiltro('fLauU','Todas as unidades', opcoesUnidades(), 'UILaudo.uni=this.value;UILaudo.page=1;viewLaudos()', UILaudo.uni, COL4),
-        selectFiltro('fLauS','Todas as situações', [{v:'vencido',l:'Vencidos'},{v:'avencer',l:'A vencer (30d)'},{v:'emdia',l:'Em dia'},{v:'elaboracao',l:'Em elaboração'},{v:'sem',l:'Sem laudo'}], 'UILaudo.sem=this.value;UILaudo.page=1;viewLaudos()', UILaudo.sem, COL4)
+        selectFiltro('fLauS','Todas as situações', [{v:'vencido',l:'Vencidos'},{v:'avencer',l:'A vencer (30d)'},{v:'emdia',l:'Em dia'},{v:'elaboracao',l:'Em elaboração'},{v:'sem',l:'Sem laudo'},{v:'dispensa',l:'Dispensadas (sem validade)'}], 'UILaudo.sem=this.value;UILaudo.page=1;viewLaudos()', UILaudo.sem, COL4)
       ], [
         botao('Nova unidade','fa-plus','editarLaudo()'),
         botao('CSV','fa-file-csv','exportarLaudos()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')
@@ -4259,7 +4285,8 @@ function viewLaudos(){
                 </td>
                 <td class="px-4 py-3 text-xs text-slate-600">${esc((r && r.clinica) || (a && a.clinica) || '—')}
                   ${r ? `<p class="text-[11px] text-accent">solicitado ${fmtDate(r.solicitadoEm)}</p>` : ''}</td>
-                <td class="px-4 py-3 whitespace-nowrap text-xs font-medium">${a ? fmtDate(a.vencimento) : '—'}</td>
+                <td class="px-4 py-3 whitespace-nowrap text-xs font-medium">${
+                  a ? (ehDispensa(a) ? '<span class="text-indigo-600 font-normal">sem validade</span>' : fmtDate(a.vencimento)) : '—'}</td>
                 <td class="px-4 py-3 font-semibold text-xs ${s.dias===null?'text-slate-400':s.dias<0?'text-danger':s.dias<=30?'text-warning':'text-slate-600'}">
                   ${s.dias===null?'—':(s.dias<0?Math.abs(s.dias)+' atrás':s.dias+' d')}</td>
                 <td class="px-4 py-3">${badge(s.label, s.cls)}
@@ -4271,6 +4298,11 @@ function viewLaudos(){
                     ? `<button onclick="concluirRenovacao('${l.id}')" class="px-2.5 py-1.5 rounded-lg text-xs bg-success text-white hover:bg-emerald-600 whitespace-nowrap" title="Registrar entrega">
                          <i class="fa-solid fa-check mr-1"></i>Registrar entrega</button>
                        <button onclick="cancelarRenovacao('${l.id}')" class="text-slate-400 hover:text-danger px-1.5" title="Cancelar renovação"><i class="fa-solid fa-xmark"></i></button>`
+                    : laudoDispensado(l)
+                    /* dispensa não se renova — o que existe é o desenquadramento,
+                       e é ele que abre a porta para pedir PGR e PCMSO */
+                    ? `<button onclick="desenquadrarLaudo('${l.id}')" class="text-slate-400 hover:text-warning px-1.5"
+                         title="Desenquadrar — a unidade deixou de se enquadrar na dispensa"><i class="fa-solid fa-triangle-exclamation"></i></button>`
                     : `<button onclick="solicitarRenovacao('${l.id}')" class="text-slate-400 hover:text-accent px-1.5" title="Solicitar renovação"><i class="fa-solid fa-rotate"></i></button>`}
                   <button onclick="historicoLaudo('${l.id}')" class="text-slate-400 hover:text-accent px-1.5" title="Histórico"><i class="fa-solid fa-clock-rotate-left"></i></button>
                   <button onclick="editarLaudo('${l.id}')" class="text-slate-400 hover:text-accent px-1.5"
@@ -4313,8 +4345,9 @@ function editarLaudo(id, forcarVigente){
       { name:'clinica', label:'Clínica responsável' },
       ...(perguntar ? [{ name:'temLaudo', label:'Esta unidade já tem laudo?', type:'select', col:'sm:col-span-2',
         options:[{ v:'NAO', l:'Não — ainda precisa ser feito' },
-                 { v:'SIM', l:'Sim — vou registrar a vigência dele' }],
-        hint:'"Não" deixa a unidade marcada como pendência até o laudo ser entregue' }] : []),
+                 { v:'SIM', l:'Sim — vou registrar a vigência dele' },
+                 { v:'DISPENSA', l:'Dispensada — declaração de dispensa de PGR e PCMSO' }],
+        hint:'"Não" deixa a unidade marcada como pendência até o laudo ser entregue · "Dispensada" registra a declaração, que não tem validade' }] : []),
       campoDocs(false),
       { name:'emissao', label:'Data de entrega', type:'date', hint:'em branco = ainda não entregue' },
       { name:'vencimento', label:'Data de vencimento', type:'date', hint:'calculada: 1 ano após a entrega' },
@@ -4330,11 +4363,23 @@ function editarLaudo(id, forcarVigente){
       if(!perguntar) return;
       const sel = form.elements['temLaudo'];
       const pintar = () => {
-        const sim = sel.value === 'SIM';
-        ['emissao','vencimento','pagamento','dataFaturamento'].forEach(n => {
+        const modo = sel.value;                       /* NAO · SIM · DISPENSA */
+        const temData = modo !== 'NAO';
+        ['emissao','pagamento','dataFaturamento'].forEach(n => {
           const el = form.querySelector('[data-campo="' + n + '"]');
-          if(el) el.classList.toggle('hidden', !sim);
+          if(el) el.classList.toggle('hidden', !temData);
         });
+        /* o vencimento é escondido pela regra da dispensa (ligarCamposLaudo)
+           e também quando ainda não há laudo nenhum */
+        const venc = form.querySelector('[data-campo="vencimento"]');
+        if(venc) venc.classList.toggle('hidden', !temData);
+        /* na dispensa o documento é um só e é ele — não faz sentido escolher */
+        const docs = form.querySelector('[data-campo="documentos"]');
+        if(docs){
+          docs.classList.toggle('hidden', modo === 'DISPENSA');
+          if(modo === 'DISPENSA') form.querySelectorAll('input[name="documentos"]')
+            .forEach(i => { i.checked = norm(i.value) === norm(DOC_DISPENSA); });
+        }
       };
       sel.addEventListener('change', pintar);
       pintar();
@@ -4343,8 +4388,20 @@ function editarLaudo(id, forcarVigente){
       if(!l && DB.laudos.some(x => x.unidadeId === v.unidadeId)){
         toast('Esta unidade já tem controle de laudo. Use "Solicitar renovação".', 'erro'); return;
       }
-      const temLaudo = !perguntar || v.temLaudo === 'SIM';
-      if(temLaudo && perguntar && !v.emissao && !v.vencimento){
+      /* a escolha "Dispensada" define o documento sozinha */
+      if(perguntar && v.temLaudo === 'DISPENSA') v.documentos = [DOC_DISPENSA];
+      const docs = parseDocs(v.documentos);
+      const dispensa = ehDispensa(docs);
+      /* a declaração é o que substitui o PGR e o PCMSO — se a unidade precisa
+         de qualquer outro documento, ela não está dispensada */
+      if(dispensa && docs.length > 1){
+        toast('A declaração de dispensa substitui o PGR e o PCMSO — registre-a sozinha.', 'erro'); return;
+      }
+      const temLaudo = !perguntar || v.temLaudo !== 'NAO';
+      if(dispensa && !v.emissao){
+        toast('Informe a data em que a declaração de dispensa foi emitida.', 'erro'); return;
+      }
+      if(temLaudo && !dispensa && perguntar && !v.emissao && !v.vencimento){
         toast('Informe a data de entrega do laudo que já existe — ou marque "Não".', 'erro'); return;
       }
       const fatNovo = (temLaudo && v.pagamento === 'Entregue') ? v.dataFaturamento : '';
@@ -4352,18 +4409,20 @@ function editarLaudo(id, forcarVigente){
       /* sem laudo: guarda quais documentos e qual clínica, mas SEM vencimento —
          é a ausência dele que faz a unidade contar como pendência */
       const versao = temLaudo
-        ? { documentos:v.documentos, clinica:v.clinica, emissao:v.emissao,
-            /* sem entrega não há vencimento: a data é derivada, nunca digitada */
-            vencimento: v.emissao ? addDays(v.emissao, 365) : '',
+        ? { documentos:docs, clinica:v.clinica, emissao:v.emissao,
+            /* sem entrega não há vencimento: a data é derivada, nunca digitada.
+               A dispensa nunca tem: ela vale enquanto o enquadramento durar. */
+            vencimento: (!dispensa && v.emissao) ? addDays(v.emissao, 365) : '',
             pagamento:v.pagamento, valor: Number(a.valor)||0,
             dataFaturamento: fatNovo }
-        : { documentos:v.documentos, clinica:v.clinica, emissao:'', vencimento:'',
+        : { documentos:docs, clinica:v.clinica, emissao:'', vencimento:'',
             pagamento:'Solicitado', valor: Number(a.valor)||0, dataFaturamento:'' };
       if(l){ l.unidadeId = v.unidadeId; l.email = v.email; l.atual = versao; }
       else DB.laudos.push({ id: uid('ld'), unidadeId:v.unidadeId, localRaw:'', email:v.email,
                             atual: versao, renovacao:null, historico:[] });
       save(); closeModal(); voltarParaTelaAtual();
-      toast(temLaudo ? 'Laudo salvo.'
+      toast(dispensa ? 'Declaração de dispensa registrada — sem validade, vale enquanto a unidade se enquadrar.'
+        : temLaudo ? 'Laudo salvo.'
         : 'Unidade registrada SEM laudo — ela entra como pendência em Acompanhamentos.',
         temLaudo ? 'ok' : 'alerta');
     }
@@ -4374,12 +4433,22 @@ function ligarCamposLaudo(form){
   const emissao = form.elements['emissao'], venc = form.elements['vencimento'];
   const status = form.elements['pagamento'], fat = form.elements['dataFaturamento'];
   const caixaFat = fat.closest('div');
+  const caixaVenc = form.querySelector('[data-campo="vencimento"]') || venc.closest('div');
+  const modo = form.elements['temLaudo'];            /* só existe na primeira vez */
+  /* a declaração de dispensa não vence — nem pelo select, nem pela lista de
+     documentos. O campo de vencimento some e nada é derivado dele. */
+  const ehDispensaNoForm = () =>
+    (modo && modo.value === 'DISPENSA') ||
+    [...form.querySelectorAll('input[name="documentos"]:checked')]
+      .some(i => norm(i.value) === norm(DOC_DISPENSA));
   const sincronizar = () => {
+    const disp = ehDispensaNoForm();
+    caixaVenc.style.display = disp ? 'none' : '';
     /* o vencimento é DERIVADO da entrega, sempre — inclusive para trás.
        Antes só escrevia quando havia entrega e nunca limpava: apagar a data
        deixava um vencimento fantasma na tela, que ia junto no Salvar e fazia
        a unidade parecer coberta por um laudo que não existe. */
-    venc.value = emissao.value ? addDays(emissao.value, 365) : '';
+    venc.value = (!disp && emissao.value) ? addDays(emissao.value, 365) : '';
     const entregue = status.value === 'Entregue';
     caixaFat.style.display = entregue ? '' : 'none';
     if(entregue && !fat.value) fat.value = emissao.value || isoToday();
@@ -4387,6 +4456,8 @@ function ligarCamposLaudo(form){
   emissao.addEventListener('change', sincronizar);
   emissao.addEventListener('input', sincronizar);   /* limpar com o teclado não dispara change */
   status.addEventListener('change', sincronizar);
+  if(modo) modo.addEventListener('change', sincronizar);
+  form.querySelectorAll('input[name="documentos"]').forEach(i => i.addEventListener('change', sincronizar));
   venc.readOnly = true;
   venc.classList.add('bg-slate-50', 'text-slate-500');
   sincronizar();
@@ -4467,17 +4538,23 @@ function concluirRenovacao(id){
               documentos: r.documentos, pagamento:'Entregue', dataFaturamento: isoToday() },
     afterRender: ligarCamposLaudo,
     onSave: v => {
+      const docs = parseDocs(v.documentos);
+      const dispensa = ehDispensa(docs);
+      if(dispensa && docs.length > 1){
+        toast('A declaração de dispensa substitui o PGR e o PCMSO — registre-a sozinha.', 'erro'); return;
+      }
       const fatNovo = v.pagamento === 'Entregue' ? v.dataFaturamento : '';
       if(fatNovo && barradoPorFechamento(fatNovo, 'Lançamento nesta competência')) return;
       if(l.atual && l.atual.emissao) l.historico = [l.atual].concat(l.historico || []);
-      l.atual = { documentos:v.documentos, clinica:v.clinica, emissao:v.emissao,
-                  vencimento: v.emissao ? addDays(v.emissao, 365) : '',
+      l.atual = { documentos:docs, clinica:v.clinica, emissao:v.emissao,
+                  vencimento: (!dispensa && v.emissao) ? addDays(v.emissao, 365) : '',
                   pagamento:v.pagamento, valor: 0,
                   dataFaturamento: fatNovo,
                   solicitadoEm: r.solicitadoEm };
       l.renovacao = null;
       save(); closeModal(); voltarParaTelaAtual();
-      toast('Entrega registrada. O laudo anterior foi para o histórico.');
+      toast(dispensa ? 'Declaração de dispensa registrada — sem validade, vale enquanto a unidade se enquadrar.'
+                     : 'Entrega registrada. O laudo anterior foi para o histórico.');
     }
   });
 }
@@ -4488,15 +4565,74 @@ function cancelarRenovacao(id){
   save(); voltarParaTelaAtual(); toast('Renovação cancelada.');
 }
 
+/* ═════════ DESENQUADRAMENTO DA DISPENSA ═════════
+   A declaração de dispensa não vence — ela deixa de valer quando a unidade
+   deixa de se enquadrar. Como isso é um ato e não uma data, precisa de um
+   registro próprio: guarda o QUANDO e o PORQUÊ, manda a declaração para o
+   histórico e devolve a unidade à condição de pendência, para que o PGR e o
+   PCMSO possam ser pedidos como em qualquer outra unidade descoberta. */
+const MOTIVOS_DESENQUADRAMENTO = [
+  'Mudança de porte — deixou de ser ME/EPP',
+  'Mudança de grau de risco — passou a 3 ou 4',
+  'Passou a existir risco na avaliação preliminar',
+  'Exigência de fiscalização ou do cliente',
+  'Outro'
+];
+function desenquadrarLaudo(id){
+  const l = DB.laudos.find(x => x.id === id); if(!l || !laudoDispensado(l)) return;
+  const a = l.atual;
+  /* a declaração já cobrada num mês fechado não some do fechamento — ela vai
+     para o histórico com a data do encerramento, e o faturamento dela fica
+     onde estava */
+  openForm({
+    title: 'Desenquadrar da dispensa — ' + uniNome(l.unidadeId),
+    largura: 'max-w-2xl',
+    fields: [
+      { type:'html', name:'ctx', html:`<div class="sm:col-span-2 bg-indigo-50 border border-indigo-200 rounded-lg p-4">
+          <p class="font-semibold text-sm text-indigo-900"><i class="fa-solid fa-file-circle-check mr-1"></i>Declaração de dispensa em vigor</p>
+          <p class="text-xs text-indigo-800 mt-1">Emitida em <b>${fmtDate(a.emissao)}</b>${a.clinica?' · '+esc(a.clinica):''} · sem validade.</p>
+          <p class="text-xs text-indigo-800 mt-1">Ao desenquadrar, a declaração vai para o histórico e a unidade volta a
+            aparecer como <b>pendência</b> até que o PGR e o PCMSO sejam entregues.</p>
+        </div>` },
+      { name:'data', label:'Data do desenquadramento', type:'date', req:true },
+      { name:'motivo', label:'Motivo', type:'select', req:true,
+        options: MOTIVOS_DESENQUADRAMENTO.map(m => ({ v:m, l:m })) },
+      { name:'observacao', label:'Observação', type:'textarea', rows:2, col:'sm:col-span-2',
+        hint:'o que mudou na unidade — fica registrado no histórico' },
+      { name:'pedir', label:'Abrir agora a solicitação do PGR e do PCMSO', type:'checkbox' }
+    ],
+    values: { data: isoToday(), motivo: MOTIVOS_DESENQUADRAMENTO[0], pedir: true },
+    onSave: v => {
+      l.historico = [Object.assign({}, a, {
+        encerradaEm: v.data, motivoEncerramento: v.motivo, observacaoEncerramento: v.observacao
+      })].concat(l.historico || []);
+      /* sem emissão e sem vencimento = pendência: é assim que a unidade volta
+         para os Acompanhamentos e para o vermelho da grade */
+      l.atual = { documentos:['PCMSO','PGR'], clinica: a.clinica || '', emissao:'', vencimento:'',
+                  pagamento:'Solicitado', valor:0, dataFaturamento:'' };
+      save(); closeModal(); voltarParaTelaAtual();
+      toast('Dispensa encerrada em ' + fmtDate(v.data) + '. A unidade voltou a ser pendência de laudo.', 'alerta');
+      if(v.pedir) solicitarRenovacao(id);
+    }
+  });
+}
+
 function historicoLaudo(id){
   const l = DB.laudos.find(x => x.id === id); if(!l) return;
   const linha = (v, vigente) => `
-    <tr class="${vigente?'bg-emerald-50':''}">
-      <td class="px-3 py-2">${vigente?badge('Vigente','bg-emerald-100 text-emerald-700'):'<span class="text-slate-400 text-xs">anterior</span>'}</td>
-      <td class="px-3 py-2 text-xs">${esc(docsLabel(v.documentos))}</td>
+    <tr class="${vigente?(ehDispensa(v)?'bg-indigo-50':'bg-emerald-50'):''}">
+      <td class="px-3 py-2">${vigente
+        ? badge(ehDispensa(v)?'Dispensada':'Vigente', ehDispensa(v)?'bg-indigo-100 text-indigo-700':'bg-emerald-100 text-emerald-700')
+        : '<span class="text-slate-400 text-xs">anterior</span>'}</td>
+      <td class="px-3 py-2 text-xs">${esc(docsLabel(v.documentos))}
+        ${v.motivoEncerramento?`<p class="text-[11px] text-amber-700 mt-0.5"><i class="fa-solid fa-triangle-exclamation mr-1"></i>${esc(v.motivoEncerramento)}</p>`:''}
+        ${v.observacaoEncerramento?`<p class="text-[11px] text-slate-500 italic">${esc(v.observacaoEncerramento)}</p>`:''}</td>
       <td class="px-3 py-2 text-xs">${esc(v.clinica||'—')}</td>
       <td class="px-3 py-2 text-xs whitespace-nowrap">${fmtDate(v.emissao)}</td>
-      <td class="px-3 py-2 text-xs whitespace-nowrap">${fmtDate(v.vencimento)}</td>
+      <td class="px-3 py-2 text-xs whitespace-nowrap">${ehDispensa(v)
+        ? (v.encerradaEm ? '<span class="text-amber-700">desenquadrada ' + fmtDate(v.encerradaEm) + '</span>'
+                         : '<span class="text-indigo-600">sem validade</span>')
+        : fmtDate(v.vencimento)}</td>
       <td class="px-3 py-2 text-xs whitespace-nowrap">${fmtDate(v.dataFaturamento)}</td>
       <td class="px-3 py-2 text-xs">${v.pagamento||'—'}</td>
     </tr>`;
@@ -4534,12 +4670,15 @@ function exportarLaudos(){
   const linhas = [];
   laudosFiltrados().forEach(l => {
     const s = laudoSituacao(l), a = l.atual;
+    const venc = v => ehDispensa(v) ? 'Sem validade' : fmtDate(v.vencimento);
     linhas.push([uniNome(l.unidadeId), 'Vigente', a?docsLabel(a.documentos):'', a?a.clinica:'',
-      a?fmtDate(a.emissao):'', a?fmtDate(a.vencimento):'', s.dias===null?'':s.dias, s.label,
+      a?fmtDate(a.emissao):'', a?venc(a):'', s.dias===null?'':s.dias, s.label,
       l.renovacao?fmtDate(l.renovacao.solicitadoEm):'', a?a.pagamento:'', a?fmtDate(a.dataFaturamento):'', a?a.valor||0:0]);
     (l.historico||[]).forEach(v => {
       linhas.push([uniNome(l.unidadeId), 'Histórico', docsLabel(v.documentos), v.clinica,
-        fmtDate(v.emissao), fmtDate(v.vencimento), '', 'Substituído', '', v.pagamento, fmtDate(v.dataFaturamento), v.valor||0]);
+        fmtDate(v.emissao), venc(v), '',
+        v.encerradaEm ? 'Desenquadrada ' + fmtDate(v.encerradaEm) + (v.motivoEncerramento?' — '+v.motivoEncerramento:'') : 'Substituído',
+        '', v.pagamento, fmtDate(v.dataFaturamento), v.valor||0]);
     });
   });
   exportCSV('laudos-sst',
@@ -4768,6 +4907,10 @@ function migrarPrecos(d){
     (d.visitas||[]).forEach(v => { if(Number(v.valor) === 400) v.valor = 600; });
     d.precosVersao = 3;
   }
+  /* declaração de dispensa de PGR e PCMSO: R$750 pela emissão.
+     Preço próprio porque não é um laudo — é o documento que entra no lugar
+     dele, e cobrar os R$2.200 do pacote seria cobrar o que não foi feito. */
+  if(d.precos.dispensa == null) d.precos.dispensa = 750;
   /* carteirinha sanitária: R$25 cobrados da unidade, R$16 pagos à Arys */
   if(d.precos.carteirinha == null) d.precos.carteirinha = 25;
   if(d.precos.carteirinhaCusto == null) d.precos.carteirinhaCusto = 16;
@@ -5027,6 +5170,11 @@ function custoExame(nome, mes){
 function temLaboratorial(e){ return !tipoSoClinico(e.tipoExame) && !!(e.exameLab||'').trim(); }
 function precoAso(unidadeId, comLab, mes){ return precoNoMes(mes, unidadeId, comLab ? 'asoLab' : 'asoClinico'); }
 function precoLaudo(unidadeId, mes){ return precoNoMes(mes, unidadeId, 'laudo'); }
+function precoDispensa(unidadeId, mes){ return precoNoMes(mes, unidadeId, 'dispensa'); }
+/* a entrega é cobrada pelo que ela é: declaração de dispensa tem preço próprio */
+function precoEntregaLaudo(v, unidadeId, mes){
+  return ehDispensa(v) ? precoDispensa(unidadeId, mes) : precoLaudo(unidadeId, mes);
+}
 function precoVisita(unidadeId, mes){ return precoNoMes(mes, unidadeId, 'visita'); }
 function precoMensal(unidadeId, mes){ return precoNoMes(mes, unidadeId, 'mensal'); }
 
@@ -8827,7 +8975,8 @@ function fechamentoDados(mesArg, unidadeArg){
     (!uFiltro || e.unidadeId === uFiltro));
   /* o valor do laudo vem da matriz de preço por unidade, não de um campo aberto */
   const lds = entregasLaudos(mes, uFiltro).map(x => Object.assign({}, x.v, {
-    unidadeId: x.laudo.unidadeId, laudoId: x.laudo.id, valor: precoLaudo(x.laudo.unidadeId, mes)
+    unidadeId: x.laudo.unidadeId, laudoId: x.laudo.id,
+    valor: precoEntregaLaudo(x.v, x.laudo.unidadeId, mes)
   }));
   /* só visitas REALIZADAS entram no faturamento */
   const vis = (DB.visitas||[]).filter(v =>
@@ -9550,6 +9699,8 @@ function editarPrecos(){
       { name:'asoLab', label:'ASO com exames laboratoriais (R$)', type:'number', step:'0.01', hint:'exame clínico + laboratoriais' },
       { name:'asoClinico', label:'ASO só análise clínica (R$)', type:'number', step:'0.01', hint:'exame clínico sem laboratoriais' },
       { name:'laudo', label:'Laudos PGR + PCMSO + LTCAT (R$)', type:'number', step:'0.01' },
+      { name:'dispensa', label:'Declaração de dispensa PGR/PCMSO (R$)', type:'number', step:'0.01',
+        hint:'cobrada na emissão — a declaração não vence, então não se repete' },
       { name:'visita', label:'Visita técnica (R$)', type:'number', step:'0.01' },
       { name:'mensal', label:'Valor mensal padrão (R$)', type:'number', step:'0.01', hint:'mensalidade fixa cobrada da unidade' },
       { type:'sep', label:'Carteirinha sanitária' },
@@ -9565,7 +9716,8 @@ function editarPrecos(){
     values: Object.assign({}, DB.precos),
     onSave: v => {
       DB.precos = { asoLab:Number(v.asoLab)||0, asoClinico:Number(v.asoClinico)||0,
-                    laudo:Number(v.laudo)||0, visita:Number(v.visita)||0, mensal:Number(v.mensal)||0,
+                    laudo:Number(v.laudo)||0, dispensa:Number(v.dispensa)||0,
+                    visita:Number(v.visita)||0, mensal:Number(v.mensal)||0,
                     carteirinha:Number(v.carteirinha)||0, carteirinhaCusto:Number(v.carteirinhaCusto)||0 };
       save(); closeModal(); viewFaturamento(); toast('Tabela de preços atualizada.');
     }
@@ -9574,8 +9726,9 @@ function editarPrecos(){
 
 /* repositório de preços por unidade — override do padrão */
 function editarPrecosUnidade(){
-  const campos = ['asoLab','asoClinico','laudo','visita','mensal','carteirinha'];
-  const rotulos = { asoLab:'ASO c/ lab', asoClinico:'ASO clínico', laudo:'Laudos', visita:'Visita',
+  const campos = ['asoLab','asoClinico','laudo','dispensa','visita','mensal','carteirinha'];
+  const rotulos = { asoLab:'ASO c/ lab', asoClinico:'ASO clínico', laudo:'Laudos',
+                    dispensa:'Decl. dispensa', visita:'Visita',
                     mensal:'Valor mensal', carteirinha:'Carteirinha' };
   const linha = u => {
     const o = (DB.precosUnidade||{})[u.id] || {};
