@@ -4,14 +4,23 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Atlas — Gestão de Medicina Ocupacional e SST</title>
-<script src="https://cdn.tailwindcss.com"></script>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+<!-- Bibliotecas externas com VERSÃO FIXA e, onde o servidor permite, hash de
+     integridade (integrity): se o arquivo no CDN for trocado, o navegador se
+     recusa a rodar. Para atualizar uma delas, troque a versão E o hash juntos
+     (openssl dgst -sha384 -binary | openssl base64 -A). O Tailwind não manda
+     cabeçalho CORS, então só dá para fixar a versão. -->
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css"
+  integrity="sha384-PPIZEGYM1v8zp5Py7UjFb79S58UeqCL9pYVnVPURKEqvioPROaVAJKKLzvH2rDnI" crossorigin="anonymous">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"
+  integrity="sha384-9nhczxUqK87bcKHh20fSQcTGD4qq5GhayNYSYWqwBkINBhOfQLg/P5HG5lF1urn4" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"
+  integrity="sha384-vtjasyidUo0kW94K5MXDXntzOJpQgBKXmE7e2Ga4LG0skTTLeBi97eFAXsqewJjw" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2"
+  integrity="sha384-WgXwGL6fUsYJWNaKJgVbrJKGRQwc1vieh2oy4kw9nXqpNDz3tdSsqEYUgeHD/NuF" crossorigin="anonymous"></script>
 <script>
 tailwind.config = {
   theme: { extend: {
@@ -181,6 +190,7 @@ function fimSessao(sess){ return inicioSessao(sess) + SESSAO_MAX_MS; }
 async function encerrarPorTempo(){
   clearTimeout(SESSAO.timerFim);
   try{ if(podeGravar()) await nuvemGravarJa(); }catch(e){}
+  try{ await comLimite(sb.from('atlas_log').insert({ usuario:String(SESSAO.email).toLowerCase(), origem:'app', acao:'sessao_expirada', detalhe:{} }), 3000); }catch(e){}
   try{ await limparCopiasLocais(); }catch(e){}
   try{ await sb.auth.signOut(); }catch(e){}
   location.reload();
@@ -628,6 +638,7 @@ function mostrarLogin(msg){
 async function sairNuvem(){
   if(!confirm('Encerrar a sessão e sair?')) return;
   try{ if(CLOUD_ON) await nuvemGravarJa(); }catch(e){}
+  try{ if(CLOUD_ON) await comLimite(sb.from('atlas_log').insert({ usuario:String(SESSAO.email).toLowerCase(), origem:'app', acao:'saiu', detalhe:{} }), 3000); }catch(e){}
   await limparCopiasLocais();
   try{ if(CLOUD_ON) await sb.auth.signOut(); }catch(e){}
   location.reload();
@@ -734,6 +745,9 @@ async function montarMenuUsuario(){
         ${copiaDriveHabilitada() ? `<button onclick="fecharMenuUsuario();exportBackup()"
           class="w-full text-left px-3 py-2 rounded-lg text-xs text-slate-600 hover:bg-slate-100 flex items-center gap-2">
           <i class="fa-solid fa-cloud-arrow-down w-4 text-slate-400"></i>Baixar backup agora</button>` : ''}
+        <button onclick="fecharMenuUsuario();abrirTrocaSenha()"
+          class="w-full text-left px-3 py-2 rounded-lg text-xs text-slate-600 hover:bg-slate-100 flex items-center gap-2">
+          <i class="fa-solid fa-key w-4 text-slate-400"></i>Alterar minha senha</button>
         <button onclick="fecharMenuUsuario();sairNuvem()"
           class="w-full text-left px-3 py-2 rounded-lg text-xs text-red-600 hover:bg-red-50 flex items-center gap-2">
           <i class="fa-solid fa-right-from-bracket w-4"></i>Sair da conta</button>
@@ -1499,6 +1513,7 @@ async function exportBackup(){
   const nome = 'atlas-sst-backup-' + isoToday() + '.json';
   /* o master leva junto pedidos e acessos; restrito baixa só o que enxerga */
   const extra = copiaDriveHabilitada() ? await extrasNuvemParaCopia() : null;
+  registrarAtividade('baixou_copia', { arquivo: nome });
   baixar(nome, extra ? textoDaCopia(extra) : JSON.stringify(DB, null, 1), 'application/json');
   toast('Backup gerado: ' + nome);
 }
@@ -1516,6 +1531,7 @@ async function importBackup(input){
       await guardarSnapshotLocal('antes de restaurar backup de arquivo');
       DB = d; migrarLaudos(DB); dedupeLaudos(DB); migrarLaudoStatus(DB); migrarCargos(DB); migrarExames(DB); migrarEmissoes(DB); migrarPrecos(DB); migrarAsos(DB); migrarDuplicidadesCadastro(DB); migrarClinicas(DB); migrarDocs(DB); migrarAtestados(DB); migrarNomesMaiusculos(DB); migrarNaoCompareceu(DB); migrarDemissionais(DB); migrarDataAso(DB);
       save({ jaJa:true }); go(rota);
+      registrarAtividade('restaurou_backup', { arquivo: f.name, salvoEm: (d.meta && d.meta.salvoEm) || '' });
       toast('Backup restaurado.');
     }catch(err){ toast('Arquivo inválido: ' + err.message, 'erro'); }
     input.value = '';
@@ -1658,10 +1674,249 @@ function baixar(nome, conteudo, mime){
   setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 500);
 }
 function exportCSV(nome, headers, linhas){
+  /* LGPD: gerente não leva planilha para fora; quem pode, fica registrado */
+  if(ACESSO.gerente){ toast('Exportação de planilha não está liberada para o seu acesso.', 'erro'); return; }
+  registrarAtividade('exportou', { arquivo: nome, linhas: (linhas || []).length, colunas: headers });
   const q = v => '"' + String(v==null?'':v).replace(/"/g,'""') + '"';
   const csv = [headers.map(q).join(';')].concat(linhas.map(l => l.map(q).join(';'))).join('\r\n');
   baixar(nome + '-' + isoToday() + '.csv', csv, 'text/csv');
   toast('Exportado: ' + nome + '.csv');
+}
+
+/* ═══════ REGISTRO DE ATIVIDADES (auditoria — LGPD art. 37 e 48) ═══════
+   Duas frentes (ver sql/05-registro-de-atividades.sql):
+   • o BANCO registra sozinho toda alteração de dado (gatilhos) — ids de quem
+     foi incluído, alterado ou excluído, por coleção;
+   • o APP registra o que o banco não vê: entrada, saída, exportação, cópia
+     baixada, ficha aberta, troca de senha.
+   Só o master lê. Ninguém altera nem apaga. Registrar nunca pode atrapalhar
+   o uso: falhou, fica só no console. */
+function registrarAtividade(acao, detalhe){
+  if(!CLOUD_ON || !nuvemLigada() || !SESSAO.email) return;
+  try{
+    sb.from('atlas_log').insert({ usuario: String(SESSAO.email).toLowerCase(), origem:'app', acao, detalhe: detalhe || {} })
+      .then(r => { if(r && r.error) console.warn('registrarAtividade', r.error.message); },
+            e => console.warn('registrarAtividade', e));
+  }catch(e){ console.warn('registrarAtividade', e); }
+}
+
+const LOG_ACOES = {
+  entrou:'Entrou no sistema', saiu:'Saiu do sistema', sessao_expirada:'Sessão encerrada (6h)',
+  exportou:'Exportou planilha', baixou_copia:'Baixou cópia da base', baixou_historico:'Baixou histórico de colaborador',
+  abriu_ficha:'Abriu ficha de colaborador', restaurou_backup:'Restaurou backup de arquivo', trocou_senha:'Trocou a própria senha',
+  incluiu:'Incluiu', alterou:'Alterou', excluiu:'Excluiu'
+};
+const LOG_TABELAS = { atlas_unidade:'Dados da unidade', atlas_comum:'Dados gerais', atlas_acesso:'Acessos', atlas_solicitacao:'Pedido de gerente' };
+const LOG_COLECOES = { colaboradores:'Colaboradores', emissoes:'Exames', asos:'ASOs', laudos:'Laudos', visitas:'Visitas',
+  atestados:'Atestados', documentos:'Documentos', docsOficiais:'Docs oficiais', relatorios:'Relatórios',
+  esocial2220:'eSocial S-2220', esocial2240:'eSocial S-2240', precos:'Tabela de preços', precosUnidade:'Preços por unidade',
+  mesesFechados:'Fechamentos', reajustes:'Reajustes', exames:'Catálogo de exames', cargos:'Cargos', matriz:'Matriz PCMSO',
+  unidade:'Cadastro da unidade', empresa:'Cadastro da empresa', totaisCobrados:'Totais cobrados' };
+
+/* nome legível de um registro pelo id (o log guarda só o id) */
+function nomeNoLog(colecao, id){
+  const achar = (l, f) => { const x = (DB[l] || []).find(r => r.id === id); return x ? f(x) : ''; };
+  const c = {
+    colaboradores: () => achar('colaboradores', x => x.nome),
+    emissoes:      () => achar('emissoes', x => x.colaborador),
+    asos:          () => achar('asos', x => (colab(x.colaboradorId) || {}).nome || ''),
+    atestados:     () => achar('atestados', x => x.colaborador),
+    visitas:       () => achar('visitas', x => uniNome(x.unidadeId) + ' ' + fmtDate(x.data)),
+    laudos:        () => achar('laudos', x => uniNome(x.unidadeId)),
+    reajustes:     () => achar('reajustes', x => x.tipo + (x.desde ? ' ' + x.desde : ''))
+  }[colecao];
+  return (c && c()) || '';
+}
+function resumoDetalheLog(r){
+  const d = r.detalhe || {};
+  const nomes = (col, ids) => {
+    const l = (ids || []).map(id => nomeNoLog(col, id) || ('id ' + id));
+    return esc(l.slice(0, 4).join(', ')) + (l.length > 4 ? ' <span class="text-slate-400">e mais ' + (l.length - 4) + '</span>' : '');
+  };
+  if(d.erro_no_registro) return '<span class="text-red-600">erro ao registrar: ' + esc(d.erro_no_registro) + '</span>';
+  if(r.origem === 'banco' && (r.tabela === 'atlas_unidade' || r.tabela === 'atlas_comum')){
+    if(d.linha) return 'linha ' + esc(d.linha);
+    return Object.keys(d).map(k => {
+      const v = d[k], rot = esc(LOG_COLECOES[k] || k);
+      if(v && v.incluidos){
+        const p = [];
+        if(v.incluidos.length) p.push('<span class="text-emerald-700">+' + v.incluidos.length + ' incluído(s)</span>: ' + nomes(k, v.incluidos));
+        if(v.alterados.length) p.push('<span class="text-amber-700">' + v.alterados.length + ' alterado(s)</span>: ' + nomes(k, v.alterados));
+        if(v.excluidos.length) p.push('<span class="text-red-700">' + v.excluidos.length + ' excluído(s)</span>: ' + nomes(k, v.excluidos));
+        if(!p.length) p.push(v.qtd_antes + ' → ' + v.qtd_depois + ' registro(s)');
+        return '<b>' + rot + '</b> — ' + p.join(' · ');
+      }
+      if(v && typeof v === 'object' && 'de' in v){
+        const a = v.de || {}, b = v.para || {};
+        if(typeof a === 'object' && typeof b === 'object' && a && b){
+          const ks = [...new Set(Object.keys(a).concat(Object.keys(b)))].filter(x => JSON.stringify(a[x]) !== JSON.stringify(b[x]));
+          return '<b>' + rot + '</b> — ' + esc(ks.slice(0, 6).map(x => x + ': ' + JSON.stringify(a[x]) + ' → ' + JSON.stringify(b[x])).join('; '));
+        }
+        return '<b>' + rot + '</b> — ' + esc(JSON.stringify(a)) + ' → ' + esc(JSON.stringify(b));
+      }
+      return '<b>' + rot + '</b> — alterado';
+    }).join('<br>');
+  }
+  if(r.tabela === 'atlas_acesso'){
+    const a = d.antes || {}, b = d.depois || {};
+    const ks = [...new Set(Object.keys(a).concat(Object.keys(b)))]
+      .filter(x => x !== 'criado_em' && JSON.stringify(a[x]) !== JSON.stringify(b[x]));
+    return 'login <b>' + esc(d.email || '') + '</b>' + (ks.length && r.acao === 'alterou' ? ' — ' + esc(ks.join(', ')) : '');
+  }
+  if(r.tabela === 'atlas_solicitacao'){
+    return esc((nomeNoLog('colaboradores', d.colaborador_id) || 'pedido') + ' · ' + (d.tipo_exame || '') +
+      (d.status_de || d.status_para ? ' · ' + (d.status_de || 'novo') + ' → ' + (d.status_para || 'apagado') : ''));
+  }
+  if(r.acao === 'exportou') return esc((d.arquivo || '') + ' · ' + (d.linhas || 0) + ' linha(s)');
+  if(r.acao === 'abriu_ficha' || r.acao === 'baixou_historico') return esc(nomeNoLog('colaboradores', d.colaborador_id) || ('id ' + d.colaborador_id));
+  if(r.acao === 'entrou') return '<span class="text-slate-400">' + esc(d.navegador || '') + '</span>';
+  return esc(Object.keys(d).length ? JSON.stringify(d) : '');
+}
+
+const UILog = { usuario:'', tipo:'', de:'', ate:'', linhas:[] };
+function abrirRegistroAtividades(){
+  if(!ACESSO.master){ toast('Só o master consulta o registro de atividades.', 'erro'); return; }
+  if(!UILog.ate) UILog.ate = isoToday();
+  if(!UILog.de) UILog.de = addDays(isoToday(), -7);
+  const emails = [...new Set([EMAIL_MASTER].concat((ACESSOS_NUVEM || acessos() || []).map(a => chaveEmail(a.email))))].filter(Boolean).sort();
+  openInfo('Registro de atividades', `
+    <div class="space-y-3">
+      <p class="text-xs text-slate-500">Quem fez o quê e quando. Alterações de dados são registradas pelo próprio banco;
+        entradas, exportações e fichas abertas, pelo sistema. Ninguém consegue alterar ou apagar este registro.</p>
+      <div class="flex flex-wrap gap-2 items-end">
+        <div><label class="block text-[11px] text-slate-500 mb-1">Usuário</label>
+          <select id="logUsu" class="px-2 py-1.5 text-xs border border-slate-300 rounded-lg">
+            <option value="">Todos</option>${emails.map(e => `<option ${UILog.usuario === e ? 'selected' : ''}>${esc(e)}</option>`).join('')}</select></div>
+        <div><label class="block text-[11px] text-slate-500 mb-1">Tipo</label>
+          <select id="logTipo" class="px-2 py-1.5 text-xs border border-slate-300 rounded-lg">
+            ${[['','Tudo'],['dados','Alterações de dados'],['entrou','Entradas'],['exportou','Exportações'],['abriu_ficha','Fichas abertas'],
+               ['baixou_copia','Cópias baixadas'],['atlas_acesso','Mudanças de acesso']]
+              .map(([v,l]) => `<option value="${v}" ${UILog.tipo === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+        <div><label class="block text-[11px] text-slate-500 mb-1">De</label>
+          <input id="logDe" type="date" value="${esc(UILog.de)}" class="px-2 py-1.5 text-xs border border-slate-300 rounded-lg"></div>
+        <div><label class="block text-[11px] text-slate-500 mb-1">Até</label>
+          <input id="logAte" type="date" value="${esc(UILog.ate)}" class="px-2 py-1.5 text-xs border border-slate-300 rounded-lg"></div>
+        <button onclick="consultarRegistro()" class="px-3 py-1.5 rounded-lg text-xs bg-accent text-white hover:bg-blue-700">
+          <i class="fa-solid fa-magnifying-glass mr-1"></i>Consultar</button>
+        <button onclick="exportarRegistro()" class="px-3 py-1.5 rounded-lg text-xs border border-slate-300 hover:bg-slate-50">
+          <i class="fa-solid fa-file-csv mr-1"></i>CSV</button>
+      </div>
+      <div id="logCorpo" class="text-sm text-slate-400 py-6 text-center">Consultando…</div>
+    </div>`, 'max-w-6xl');
+  consultarRegistro();
+}
+async function consultarRegistro(){
+  UILog.usuario = ($('#logUsu') || {}).value || '';
+  UILog.tipo    = ($('#logTipo') || {}).value || '';
+  UILog.de      = ($('#logDe') || {}).value || UILog.de;
+  UILog.ate     = ($('#logAte') || {}).value || UILog.ate;
+  const corpo = $('#logCorpo'); if(!corpo) return;
+  corpo.textContent = 'Consultando…';
+  try{
+    let q = sb.from('atlas_log').select('*').order('em', { ascending:false }).limit(1000)
+      .gte('em', new Date(UILog.de + 'T00:00:00').toISOString())
+      .lte('em', new Date(UILog.ate + 'T23:59:59').toISOString());
+    if(UILog.usuario) q = q.eq('usuario', UILog.usuario);
+    if(UILog.tipo === 'dados') q = q.eq('origem', 'banco').in('tabela', ['atlas_unidade','atlas_comum']);
+    else if(UILog.tipo === 'atlas_acesso') q = q.eq('tabela', 'atlas_acesso');
+    else if(UILog.tipo) q = q.eq('acao', UILog.tipo);
+    const r = await comLimite(q, 15000);
+    if(!r) throw new Error('sem resposta da nuvem');
+    if(r.error) throw new Error(r.error.message);
+    UILog.linhas = r.data || [];
+  }catch(e){
+    corpo.innerHTML = '<p class="text-red-600 text-sm">Não consegui ler o registro: ' + esc(e.message || String(e)) + '</p>';
+    return;
+  }
+  const L = UILog.linhas;
+  corpo.className = '';
+  corpo.innerHTML = !L.length ? '<p class="text-sm text-slate-400 py-6 text-center">Nada registrado neste filtro.</p>' : `
+    <p class="text-[11px] text-slate-500 mb-1">${L.length} registro(s)${L.length === 1000 ? ' — mostrando os 1000 mais recentes; estreite o período' : ''}</p>
+    <div class="overflow-x-auto border border-slate-200 rounded-lg max-h-[60vh] overflow-y-auto">
+      <table class="w-full text-xs">
+        <thead class="bg-slate-50 text-slate-500 sticky top-0"><tr>
+          <th class="px-3 py-2 text-left">Quando</th><th class="px-3 py-2 text-left">Usuário</th>
+          <th class="px-3 py-2 text-left">Ação</th><th class="px-3 py-2 text-left">Onde</th><th class="px-3 py-2 text-left">Detalhe</th></tr></thead>
+        <tbody class="divide-y divide-slate-100">${L.map(r => `<tr class="align-top hover:bg-slate-50">
+          <td class="px-3 py-2 whitespace-nowrap">${new Date(r.em).toLocaleString('pt-BR')}</td>
+          <td class="px-3 py-2">${esc(r.usuario || '(sistema)')}</td>
+          <td class="px-3 py-2 whitespace-nowrap">${esc(LOG_ACOES[r.acao] || r.acao)}</td>
+          <td class="px-3 py-2">${esc(r.unidade_id ? uniNome(r.unidade_id) : (LOG_TABELAS[r.tabela] || (r.origem === 'app' ? 'Sistema' : r.tabela || '')))}</td>
+          <td class="px-3 py-2">${resumoDetalheLog(r)}</td></tr>`).join('')}</tbody>
+      </table>
+    </div>`;
+}
+function exportarRegistro(){
+  if(!UILog.linhas.length){ toast('Consulte antes de exportar.', 'alerta'); return; }
+  const txt = h => { const d = document.createElement('div'); d.innerHTML = h; return d.textContent; };
+  exportCSV('registro-atividades', ['Quando','Usuário','Origem','Ação','Onde','Detalhe'],
+    UILog.linhas.map(r => [new Date(r.em).toLocaleString('pt-BR'), r.usuario, r.origem, LOG_ACOES[r.acao] || r.acao,
+      r.unidade_id ? uniNome(r.unidade_id) : (LOG_TABELAS[r.tabela] || ''), txt(resumoDetalheLog(r))]));
+}
+
+/* ═══════ TROCA DE SENHA PELO PRÓPRIO USUÁRIO ═══════
+   A Atlas cria o login com uma senha provisória no painel do Supabase; aqui a
+   pessoa troca por uma que só ela conhece. Enquanto não trocar, um aviso
+   discreto aparece no topo (menos para o master). */
+function precisaTrocarSenha(){
+  return CLOUD_ON && !ACESSO.master && !SESSAO.senhaTrocada;
+}
+function renderAvisoSenha(){
+  const b = $('#banner'); if(!b) return;
+  let adiado = false;
+  try{ adiado = sessionStorage.getItem('atlas_senha_depois') === '1'; }catch(e){}
+  if(!precisaTrocarSenha() || adiado){ b.innerHTML = ''; return; }
+  b.innerHTML = `
+    <div class="bg-amber-50 border-b border-amber-300 px-4 sm:px-6 py-2.5 flex flex-wrap items-center gap-3 no-print">
+      <i class="fa-solid fa-key text-amber-500"></i>
+      <p class="flex-1 min-w-[220px] text-sm text-amber-900">Por segurança, troque a senha provisória que você recebeu por uma que só você conheça.</p>
+      <button onclick="abrirTrocaSenha()" class="px-3 py-1.5 rounded-lg text-xs bg-amber-600 text-white hover:bg-amber-700">Trocar agora</button>
+      <button onclick="try{sessionStorage.setItem('atlas_senha_depois','1')}catch(e){};renderAvisoSenha()"
+        class="px-3 py-1.5 rounded-lg text-xs text-amber-800 hover:bg-amber-100">Depois</button>
+    </div>`;
+}
+function abrirTrocaSenha(){
+  if(!CLOUD_ON){ toast('Troca de senha só existe na versão com login.', 'erro'); return; }
+  openInfo('Alterar minha senha', `
+    <div class="space-y-3 max-w-sm">
+      <p class="text-xs text-slate-500">Mínimo de 8 caracteres, com letras e números. Não reutilize senha de outro site.</p>
+      <div><label class="block text-xs font-medium text-slate-600 mb-1">Nova senha</label>
+        <input id="senhaNova" type="password" autocomplete="new-password" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"></div>
+      <div><label class="block text-xs font-medium text-slate-600 mb-1">Repita a nova senha</label>
+        <input id="senhaConf" type="password" autocomplete="new-password" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"></div>
+      <p id="senhaErro" class="text-xs text-red-600"></p>
+      <div class="flex justify-end gap-2">
+        <button onclick="closeModal()" class="px-4 py-2 rounded-lg text-sm border border-slate-300 text-slate-600 hover:bg-slate-50">Cancelar</button>
+        <button id="senhaBtn" onclick="salvarNovaSenha()" class="px-4 py-2 rounded-lg text-sm bg-accent text-white hover:bg-blue-700">
+          <i class="fa-solid fa-key mr-1"></i>Salvar nova senha</button>
+      </div>
+    </div>`, 'max-w-md');
+}
+async function salvarNovaSenha(){
+  const a = ($('#senhaNova') || {}).value || '', b = ($('#senhaConf') || {}).value || '';
+  const err = $('#senhaErro'), btn = $('#senhaBtn');
+  const falha = m => { if(err) err.textContent = m; };
+  if(a.length < 8) return falha('A senha precisa ter pelo menos 8 caracteres.');
+  if(!/[A-Za-z]/.test(a) || !/\d/.test(a)) return falha('Use letras e números.');
+  if(a !== b) return falha('As duas senhas não são iguais.');
+  if(btn) btn.disabled = true;
+  try{
+    const r = await comLimite(sb.auth.updateUser({ password:a, data:{ senha_trocada_em: new Date().toISOString() } }), 15000);
+    if(!r) throw new Error('sem resposta da nuvem — tente de novo');
+    if(r.error){
+      const m = String(r.error.message || '');
+      if(/different from the old/i.test(m)) throw new Error('A nova senha precisa ser diferente da atual.');
+      if(/reauthentic/i.test(m)) throw new Error('Por segurança, saia, entre de novo e troque a senha logo em seguida.');
+      if(/weak|at least|characters/i.test(m)) throw new Error('Senha fraca demais para o servidor. Use uma mais longa.');
+      throw new Error(m);
+    }
+    SESSAO.senhaTrocada = true;
+    registrarAtividade('trocou_senha', {});
+    closeModal(); renderAvisoSenha();
+    toast('Senha alterada. Use a nova no próximo acesso.', 'ok');
+  }catch(e){
+    falha(e.message || String(e));
+  }finally{ if(btn) btn.disabled = false; }
 }
 
 /* ───────────────────────── consultas ───────────────────────── */
@@ -1956,6 +2211,7 @@ function viewAcessos(){
       <div class="bg-white rounded-xl border border-slate-200">
         <div class="px-4 py-3 border-b border-slate-200 flex flex-wrap gap-2 items-center no-print">
           ${botao('Novo acesso','fa-user-plus','editarAcesso()')}
+          ${CLOUD_ON ? botao('Registro de atividades','fa-clock-rotate-left','abrirRegistroAtividades()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50') : ''}
           <span class="text-xs text-slate-500 ml-auto">${lista.length} login(s) liberado(s), além do master
             ${CLOUD_ON ? ' · dados ' + (NUVEM_PARTIDA ? 'separados por unidade' : 'em documento único') : ''}</span>
         </div>
@@ -3043,6 +3299,7 @@ function selectFiltro(id, label, opcoes, onchange, valor, cls){
   </select>`;
 }
 function botao(txt, icon, onclick, cls='bg-accent text-white hover:bg-blue-700'){
+  if(icon === 'fa-file-csv' && ACESSO.gerente) return '';   /* gerente não exporta planilha */
   return `<button onclick="${onclick}" class="px-3 py-2 rounded-lg text-sm flex items-center gap-2 whitespace-nowrap ${cls}">
     <i class="fa-solid ${icon}"></i><span class="hidden sm:inline">${esc(txt)}</span></button>`;
 }
@@ -7316,6 +7573,7 @@ async function excluirColab(id){
 }
 function fichaColab(id){
   const c = colab(id), u = uni(c.unidadeId);
+  registrarAtividade('abriu_ficha', { colaborador_id: id });
   const asoAtual = asoVigente(id);
   const asos = asoAtual
     ? [asoAtual].concat(asoAtual.historico || [])
@@ -7658,6 +7916,7 @@ function historicoColabHTML(id){
 }
 function baixarHistoricoColab(id){
   const c = colab(id);
+  registrarAtividade('baixou_historico', { colaborador_id: id });
   const limpo = String(c.nome||'').replace(/[\\/:*?"<>|]/g,'').trim();
   baixar('Histórico do Colaborador - ' + limpo + ' - ' + isoToday() + '.html', historicoColabHTML(id), 'text/html');
   toast('Histórico baixado — abra o arquivo e use Ctrl+P para gerar o PDF.');
@@ -12582,7 +12841,7 @@ function baixarRelatorio(id){
 /* ═══════════════════════════ 8. BACKUP E SEGURANÇA ═══════════════════════════ */
 function renderBanner(){
   const b = $('#banner'); if(!b) return;
-  if(CLOUD_ON){ b.innerHTML = ''; return; }   /* nuvem é o backup — aviso de "só neste navegador" não se aplica */
+  if(CLOUD_ON){ renderAvisoSenha(); return; }   /* nuvem é o backup — no lugar do aviso de backup, o de senha provisória */
   if(FS.permissao){ b.innerHTML = ''; return; }
   const jaTem = !!FS.pasta;
   b.innerHTML = `
@@ -12894,6 +13153,7 @@ $('#hojeLabel').textContent = HOJE.toLocaleDateString('pt-BR', { weekday:'long',
     SESSAO.inicio   = inicioSessao(sess);
     SESSAO.expiraEm = fimSessao(sess);
     SESSAO.expira   = SESSAO.expiraEm;
+    SESSAO.senhaTrocada = !!(sess.user && sess.user.user_metadata && sess.user.user_metadata.senha_trocada_em);
   }
 
   let estadoBoot = '';
@@ -12922,6 +13182,16 @@ $('#hojeLabel').textContent = HOJE.toLocaleDateString('pt-BR', { weekday:'long',
   carregarAcesso();
   aplicarEscopoAcesso();
   armarFimDeSessao();
+  if(CLOUD_ON){
+    /* uma entrada por sessão, não uma por recarga de página */
+    let ja = '';
+    try{ ja = sessionStorage.getItem('atlas_log_entrada') || ''; }catch(e){}
+    if(ja !== String(SESSAO.inicio)){
+      registrarAtividade('entrou', { navegador: String(navigator.userAgent || '').slice(0, 160) });
+      try{ sessionStorage.setItem('atlas_log_entrada', String(SESSAO.inicio)); }catch(e){}
+    }
+    renderAvisoSenha();
+  }
 
   /* pedidos das gerentes — depois do acesso, porque a política do banco recorta
      pelo login: a Atlas recebe todos, cada gerente recebe só os das unidades dela */
