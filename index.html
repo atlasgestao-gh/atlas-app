@@ -273,7 +273,7 @@ const UNI_ORFAOS = '__sem_unidade__';   /* casa dos registros sem unidade: só o
 const COLECOES_UNIDADE = ['colaboradores','emissoes','laudos','visitas','atestados',
                           'documentos','docsOficiais','relatorios','asos','esocial2220','esocial2240'];
 /* estas não moram nem no comum nem na unidade: têm tratamento próprio */
-const COLECOES_A_PARTE = ['empresas','unidades','acessos'];
+const COLECOES_A_PARTE = ['empresas','unidades','acessos','_nuvemExtra'];
 
 /* de qual unidade é este registro? asos seguem o colaborador; eventos do
    eSocial seguem o CPF; o resto tem unidadeId próprio */
@@ -1085,7 +1085,7 @@ async function lerArquivoDados(){
     const fh = await FS.pasta.getFileHandle(ARQ_DADOS);
     const f = await fh.getFile();
     FS.carimboLido = f.lastModified;
-    const d = JSON.parse(await f.text());
+    const d = tirarExtras(JSON.parse(await f.text()));
     return baseValida(d) ? d : null;
   }catch(e){
     if(e.name !== 'NotFoundError') FS.ultimoErro = e.message;
@@ -1137,6 +1137,34 @@ async function gravarTudo(o){
   if(FS.permissao && o && o.arquivo) await gravarArquivo();
 }
 
+/* Pedidos das gerentes e lista de acessos moram em tabelas próprias, fora da
+   base: sem isto a cópia no Drive não os teria. Vão CRUS (como estão no banco,
+   prontos para reinserir) numa chave à parte, que é retirada em toda leitura
+   de arquivo — nunca entra na base nem no documento comum. */
+let _extraNuvemCache = null;
+async function extrasNuvemParaCopia(){
+  if(!CLOUD_ON || !nuvemLigada()) return null;
+  const ler = async tab => {
+    const r = await comLimite(sb.from(tab).select('*'), 8000);
+    if(!r) throw new Error(tab + ': sem resposta');
+    if(r.error) throw new Error(tab + ': ' + r.error.message);
+    return r.data || [];
+  };
+  try{
+    _extraNuvemCache = { lidoEm:new Date().toISOString(),
+      atlas_acesso: await ler('atlas_acesso'), atlas_solicitacao: await ler('atlas_solicitacao') };
+    return _extraNuvemCache;
+  }catch(e){
+    console.warn('extrasNuvemParaCopia', e);
+    /* falhou agora: vai a última leitura boa, marcada como tal */
+    return _extraNuvemCache ? Object.assign({}, _extraNuvemCache, { falhaAgora: e.message }) : { falhaAgora: e.message };
+  }
+}
+function textoDaCopia(extra){
+  return JSON.stringify(extra ? Object.assign({}, DB, { _nuvemExtra: extra }) : DB);
+}
+function tirarExtras(d){ if(d && typeof d === 'object') delete d._nuvemExtra; return d; }
+
 /* na nuvem, só o master grava cópia em pasta: a base de quem é restrito é
    recortada e não serve de backup (e não deve parar num arquivo solto) */
 function copiaDriveHabilitada(){
@@ -1161,7 +1189,7 @@ async function gravarArquivo(){
       }
     }catch(e){ /* arquivo ainda não existe */ }
 
-    const texto = JSON.stringify(DB);
+    const texto = textoDaCopia(await extrasNuvemParaCopia());
     /* createWritable grava num arquivo temporário e só troca no close() — à prova de queda de energia */
     const fh = await FS.pasta.getFileHandle(ARQ_DADOS, { create:true });
     const w = await fh.createWritable();
@@ -1462,9 +1490,11 @@ function vincularEsocial(d){
   });
 }
 
-function exportBackup(){
+async function exportBackup(){
   const nome = 'atlas-sst-backup-' + isoToday() + '.json';
-  baixar(nome, JSON.stringify(DB, null, 1), 'application/json');
+  /* o master leva junto pedidos e acessos; restrito baixa só o que enxerga */
+  const extra = copiaDriveHabilitada() ? await extrasNuvemParaCopia() : null;
+  baixar(nome, extra ? textoDaCopia(extra) : JSON.stringify(DB, null, 1), 'application/json');
   toast('Backup gerado: ' + nome);
 }
 async function importBackup(input){
@@ -1472,7 +1502,7 @@ async function importBackup(input){
   const r = new FileReader();
   r.onload = async e => {
     try{
-      const d = JSON.parse(e.target.result);
+      const d = tirarExtras(JSON.parse(e.target.result));
       if(!baseValida(d)) throw new Error('estrutura inválida');
       const q = d.meta && d.meta.salvoEm ? new Date(d.meta.salvoEm).toLocaleString('pt-BR') : 'sem data';
       if(!confirm(`Restaurar este backup?\n\nSalvo em: ${q}\nColaboradores: ${d.colaboradores.length}\n\n` +
@@ -12699,6 +12729,7 @@ async function viewBackup(){
           <p class="text-xs ${FS.permissao ? 'text-emerald-800' : 'text-amber-800'} mt-0.5">
             Backup do banco enquanto o plano do Supabase não tem backup próprio. Com você logada, o sistema grava a base
             completa na pasta escolhida: uma cópia por dia (60 dias + o dia 1º de cada mês) e uma por hora com alteração (últimas ${MANTER_HORARIOS}).
+            Inclui os pedidos das gerentes e a lista de acessos.
             Use uma pasta <b>fora</b> da pasta do código (ex.: <code>ATLAS/backup-atlas-sst</code>).</p>
           ${FS.pasta ? `<p class="text-[11px] text-slate-500 mt-1">Pasta: <b>${esc(FS.pasta.name)}</b>
             · última cópia: ${ultimoArq ? esc(ultimoArq) : 'nesta sessão, ainda nenhuma'}</p>` : ''}
