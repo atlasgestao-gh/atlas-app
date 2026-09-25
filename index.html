@@ -731,9 +731,9 @@ async function montarMenuUsuario(){
         </div>
       </div>
       <div class="border-t border-slate-100 p-2 space-y-1">
-        <button onclick="fecharMenuUsuario();exportBackup()"
+        ${copiaDriveHabilitada() ? `<button onclick="fecharMenuUsuario();exportBackup()"
           class="w-full text-left px-3 py-2 rounded-lg text-xs text-slate-600 hover:bg-slate-100 flex items-center gap-2">
-          <i class="fa-solid fa-cloud-arrow-down w-4 text-slate-400"></i>Baixar backup agora</button>
+          <i class="fa-solid fa-cloud-arrow-down w-4 text-slate-400"></i>Baixar backup agora</button>` : ''}
         <button onclick="fecharMenuUsuario();sairNuvem()"
           class="w-full text-left px-3 py-2 rounded-lg text-xs text-red-600 hover:bg-red-50 flex items-center gap-2">
           <i class="fa-solid fa-right-from-bracket w-4"></i>Sair da conta</button>
@@ -1431,10 +1431,13 @@ document.addEventListener('pointerdown', function primeiraVez(){
 
 /* ---------- rede de segurança ----------
    Sem pasta autorizada, um backup .json desce sozinho para Downloads
-   a cada 3 dias de uso — pior caso, a perda fica limitada. */
+   a cada 3 dias de uso — pior caso, a perda fica limitada.
+   SÓ NO MODO LOCAL. Na nuvem os dados já estão no Supabase e na cópia do Drive
+   do master, e o download automático espalhava a base (CPF, dados de saúde) na
+   pasta Downloads de qualquer computador logado — inclusive o das gerentes. */
 function redeSeguranca(){
   try{
-    if(FS.permissao || NUVEM_FALHA || !DB) return;
+    if(CLOUD_ON || FS.permissao || NUVEM_FALHA || !DB) return;
     const ultimo = localStorage.getItem('atlas_auto_dl') || '';
     const hoje = isoToday();
     if(ultimo && (new Date(hoje) - new Date(ultimo)) < 3*24*3600*1000) return;
@@ -1491,6 +1494,8 @@ function vincularEsocial(d){
 }
 
 async function exportBackup(){
+  /* na nuvem, baixar a base inteira num arquivo solto é coisa só do master */
+  if(CLOUD_ON && !copiaDriveHabilitada()){ toast('Só o acesso master baixa cópia da base.', 'erro'); return; }
   const nome = 'atlas-sst-backup-' + isoToday() + '.json';
   /* o master leva junto pedidos e acessos; restrito baixa só o que enxerga */
   const extra = copiaDriveHabilitada() ? await extrasNuvemParaCopia() : null;
