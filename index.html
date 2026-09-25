@@ -70,10 +70,7 @@ tailwind.config = {
 
   <nav id="nav" class="flex-1 overflow-y-auto py-3 px-3 space-y-1 text-sm"></nav>
 
-  <div class="p-3 border-t border-white/10 space-y-1 text-sm shrink-0">
-    <button onclick="exportBackup()" class="w-full text-left px-3 py-2 rounded-lg hover:bg-white/10 flex items-center gap-3">
-      <i class="fa-solid fa-cloud-arrow-down w-4 text-slate-400"></i> Baixar backup agora
-    </button>
+  <div id="rodapeLateral" class="p-3 border-t border-white/10 space-y-1 text-sm shrink-0">
     <input type="file" id="fileImport" accept="application/json" class="hidden" onchange="importBackup(this)">
     <p id="lastSave" class="text-[10px] text-slate-500 px-3 pt-1 leading-relaxed"></p>
   </div>
@@ -198,23 +195,22 @@ function armarFimDeSessao(){
   SESSAO.timerFim = setTimeout(armarFimDeSessao, Math.min(falta, 60000));
 }
 
+/* motivo de a leitura da nuvem ter falhado ao abrir ('' = leu bem). Com falha,
+   o sistema NÃO abre nem grava nada — ver bootStorage/iniciar. */
+let NUVEM_FALHA = '';
 async function nuvemLer(){
   if(!nuvemLigada()) return null;
-  /* formato novo manda quando já existe; senão cai na atlas_estado de sempre */
   const partida = await nuvemLerPartida();
+  if(partida && partida.erro){ NUVEM_FALHA = partida.erro; return null; }
   if(partida){ NUVEM_PARTIDA = true; return partida.base; }
   NUVEM_PARTIDA = false;
-  /* A atlas_estado é a base INTEIRA num documento só. Ela é rede de segurança
-     DO MASTER e nada mais: quem não é master não cai aqui nem que a política do
-     banco afrouxe. Foi por este caminho que um login sem permissão nenhuma leu
-     a base toda em 28/08 — a política da atlas_estado tinha ficado aberta para
-     qualquer autenticado, e o app caía nela quando não achava linha de unidade. */
-  if(!ehMaster(SESSAO.email || '')) return null;
-  try{
-    const { data, error } = await sb.from('atlas_estado').select('dados').eq('id',1).single();
-    if(error){ console.warn('nuvemLer', error.message); return null; }
-    return baseValida(data && data.dados) ? data.dados : null;
-  }catch(e){ console.warn('nuvemLer', e); return null; }
+  /* A atlas_estado (base inteira num documento só, parada em 28/08/2026) foi
+     aposentada: ler dela abria uma base de um mês atrás como se fosse a atual,
+     e o que se lançasse ia para o lugar errado. Para o master, não achar
+     nenhuma linha de unidade é falha, não "base vazia". Quem não é master pode
+     legitimamente não ter unidade nenhuma liberada. */
+  if(ehMaster(SESSAO.email || '')) NUVEM_FALHA = 'nenhuma unidade encontrada na nuvem';
+  return null;
 }
 
 let _nuvemTimer = null, _nuvemGravando = false, _nuvemPend = false;
@@ -241,13 +237,11 @@ async function nuvemGravarJa(){
       carimboSalvamento();
       return;
     }
-    const u = await nuvemUsuario();
-    const { error } = await sb.from('atlas_estado')
-      .update({ dados: DB, salvo_em: (DB.meta&&DB.meta.salvoEm)||new Date().toISOString(),
-                atualizado_por: u ? u.email : null })
-      .eq('id', 1);
-    if(error) console.warn('nuvemGravar', error.message);
-    else { FS.ultimoNuvem = new Date().toISOString(); }
+    /* sem a base por unidade carregada não há onde gravar: o formato antigo
+       (atlas_estado) foi aposentado e gravar nele seria trabalho perdido */
+    FS.erroNuvem = 'a base não foi carregada da nuvem — recarregue a página';
+    toast('NÃO consegui salvar na nuvem: ' + FS.erroNuvem + '.', 'erro');
+    carimboSalvamento();
   }catch(e){ console.warn('nuvemGravar', e); }
   finally{
     _nuvemGravando = false;
@@ -375,9 +369,8 @@ function conferirParticao(base, comum, linhas){
 }
 
 /* ═══════════ Camada de nuvem no formato partido ═══════════
-   Liga sozinha quando existe ao menos uma linha em atlas_unidade. Enquanto não
-   existir, tudo continua na atlas_estado — é o que torna a virada reversível:
-   basta apagar as linhas novas para o sistema voltar ao formato antigo. */
+   Liga quando a leitura traz ao menos uma linha de atlas_unidade. É o único
+   formato: a atlas_estado (documento único) foi aposentada em 09/2026. */
 let NUVEM_PARTIDA = false;
 
 const agoraISO = () => new Date().toISOString();
@@ -465,13 +458,13 @@ async function nuvemLerPartida(){
   if(!nuvemLigada()) return null;
   try{
     const r1 = await sb.from('atlas_unidade').select('unidade_id, empresa_id, dados');
-    if(r1.error){ console.warn('nuvemLerPartida/unidade', r1.error.message); return null; }
+    if(r1.error){ console.warn('nuvemLerPartida/unidade', r1.error.message); return { erro:'unidades: ' + r1.error.message }; }
     const linhas = r1.data || [];
-    if(!linhas.length) return null;            /* ainda não migrado */
+    if(!linhas.length) return null;            /* nenhuma unidade visível para este login */
     const r2 = await sb.from('atlas_comum').select('dados').eq('id', 1).single();
-    if(r2.error){ console.warn('nuvemLerPartida/comum', r2.error.message); return null; }
+    if(r2.error){ console.warn('nuvemLerPartida/comum', r2.error.message); return { erro:'comum: ' + r2.error.message }; }
     return { base: juntarBase((r2.data && r2.data.dados) || {}, linhas), linhas };
-  }catch(e){ console.warn('nuvemLerPartida', e); return null; }
+  }catch(e){ console.warn('nuvemLerPartida', e); return { erro: e.message || String(e) }; }
 }
 
 /* grava de volta. O comum só o master escreve; as linhas de unidade, quem tem
@@ -507,68 +500,28 @@ async function nuvemGravarPartida(){
   }catch(e){ return { ok:false, motivo:e.message }; }
 }
 
-/* ─── migração: da atlas_estado para o formato partido ───
-   Refazível quantas vezes quiser. Não apaga a atlas_estado. */
-async function migrarParaUnidades(){
-  if(!ACESSO.master){ toast('Só o administrador pode migrar.', 'erro'); return; }
-  if(!nuvemLigada()){ toast('Sem nuvem configurada neste arquivo.', 'erro'); return; }
-  const p = partirBase(DB);
-  if(p.naoClassificadas.length){
-    openInfo('Migração interrompida', `
-      <p class="text-sm text-slate-700">Encontrei coleção que não sei onde guardar:
-        <b>${esc(p.naoClassificadas.join(', '))}</b>.</p>
-      <p class="text-xs text-slate-500 mt-2">Parei de propósito. Classificar errado significaria
-        mandar dado de pessoa para o documento comum, que todo login lê, ou deixar a coleção de
-        fora e ela parar de ser gravada sem ninguém perceber.</p>`);
-    return;
-  }
-  const fora = conferirParticao(DB, p.comum, p.linhas);
-  if(fora.length){
-    openInfo('Migração interrompida', `<p class="text-sm text-slate-700">A conferência não bateu:</p>
-      <ul class="text-xs text-slate-600 mt-2 list-disc pl-5">${fora.map(f=>`<li>${esc(f)}</li>`).join('')}</ul>`);
-    return;
-  }
-  if(!confirm('Migrar ' + p.linhas.length + ' unidade(s) para o formato novo?\n\n' +
-              'A base atual (atlas_estado) NÃO é apagada — ela continua como rede de segurança. ' +
-              'O app só passa a usar o formato novo depois que você recarregar a página.')) return;
-
-  await guardarSnapshotLocal('antes de migrar para o formato por unidade');
-  const quem = SESSAO.email || '';
-  try{
-    const e1 = (await sb.from('atlas_comum')
-      .update({ dados:p.comum, salvo_em:agoraISO(), atualizado_por:quem }).eq('id',1)).error;
-    if(e1) throw new Error('comum: ' + e1.message);
-    const e2 = (await sb.from('atlas_unidade').upsert(
-      p.linhas.map(l => ({ unidade_id:l.unidade_id, empresa_id:l.empresa_id, dados:l.dados,
-                           salvo_em:agoraISO(), atualizado_por:quem })), { onConflict:'unidade_id' })).error;
-    if(e2) throw new Error('unidades: ' + e2.message);
-  }catch(e){ openInfo('Falha ao migrar', `<p class="text-sm text-danger">${esc(e.message)}</p>`); return; }
-
-  /* confere lendo DE VOLTA do banco, não do que eu acabei de montar */
-  const lido = await nuvemLerPartida();
-  if(!lido){ openInfo('Migração gravada, mas não consegui reler', '<p class="text-sm">Recarregue e confira.</p>'); return; }
-  const conf = conferirParticao(DB, {}, lido.linhas);
-  const linhas = COLECOES_UNIDADE.concat(['empresas','unidades']).map(k =>
-    `<tr><td class="px-3 py-1.5">${k}</td>
-         <td class="px-3 py-1.5 text-right">${(DB[k]||[]).length}</td>
-         <td class="px-3 py-1.5 text-right">${(lido.base[k]||[]).length}</td>
-         <td class="px-3 py-1.5">${(DB[k]||[]).length === (lido.base[k]||[]).length
-            ? '<span class="text-emerald-600">confere</span>' : '<span class="text-danger">DIVERGIU</span>'}</td></tr>`).join('');
-  openInfo(conf.length ? 'Migração com divergência' : 'Migração concluída', `
-    <p class="text-sm ${conf.length?'text-danger':'text-emerald-700'}">
-      ${conf.length ? 'Alguma contagem não bateu — NÃO recarregue, me avise.'
-                    : p.linhas.length + ' unidade(s) gravadas e conferidas lendo de volta do banco.'}</p>
-    <p class="text-xs text-slate-500 mt-1">Comparação entre a base em uso agora e o que voltou do banco:</p>
-    <div class="overflow-x-auto border border-slate-200 rounded-lg mt-2">
-      <table class="w-full text-xs"><thead class="bg-slate-50 text-slate-500">
-        <tr><th class="px-3 py-2 text-left">Coleção</th><th class="px-3 py-2 text-right">Agora</th>
-            <th class="px-3 py-2 text-right">No banco</th><th class="px-3 py-2 text-left">Situação</th></tr></thead>
-        <tbody class="divide-y divide-slate-100">${linhas}</tbody></table>
-    </div>
-    ${p.orfaos ? `<p class="text-xs text-amber-700 mt-2">${p.orfaos} registro(s) sem unidade foram para
-      uma linha reservada, visível só para você.</p>` : ''}
-    <p class="text-xs text-slate-500 mt-2">A <b>atlas_estado</b> continua intacta. Recarregue a página
-      para o app passar a usar o formato novo.</p>`, 'max-w-2xl');
+/* a nuvem não respondeu ao abrir: tela de bloqueio, sem abrir cópia nenhuma */
+function mostrarFalhaNuvem(){
+  if(document.getElementById('falhaNuvem')) return;
+  const ov = document.createElement('div');
+  ov.id = 'falhaNuvem';
+  ov.className = 'fixed inset-0 z-[99999] flex items-center justify-center p-5 bg-slate-900/95';
+  ov.innerHTML = `
+    <div class="w-full max-w-md bg-white rounded-2xl shadow-2xl p-6 text-center">
+      <div class="w-14 h-14 mx-auto rounded-xl bg-red-50 text-danger flex items-center justify-center text-2xl mb-3">
+        <i class="fa-solid fa-cloud-bolt"></i></div>
+      <p class="font-bold text-lg text-slate-800">Não consegui ler seus dados da nuvem</p>
+      <p class="text-sm text-slate-600 mt-2">Para não mostrar dados desatualizados, o sistema não abriu nada.
+        Nenhuma informação foi alterada. Confira a internet e tente de novo.</p>
+      <p class="text-[11px] text-slate-400 mt-3">Detalhe técnico: ${esc(NUVEM_FALHA || 'desconhecido')}</p>
+      <div class="flex flex-wrap justify-center gap-2 mt-5">
+        <button onclick="location.reload()" class="px-4 py-2 rounded-lg text-sm bg-accent text-white hover:bg-blue-700">
+          <i class="fa-solid fa-rotate-right mr-1"></i>Tentar de novo</button>
+        <button onclick="sairNuvem()" class="px-4 py-2 rounded-lg text-sm border border-slate-300 text-slate-600 hover:bg-slate-50">
+          Sair da conta</button>
+      </div>
+    </div>`;
+  document.body.appendChild(ov);
 }
 
 /* logo em base64 — reaproveitado na tela de login e no menu do cabeçalho */
@@ -1054,8 +1007,16 @@ async function bootStorage(){
   }catch(e){ FS.pasta = null; }
 
   let doNuvem = null, doArquivo = null, doIdb = null, doLs = null;
-  if(CLOUD_ON) doNuvem = await comLimite(nuvemLer(), 12000);
-  if(FS.permissao) doArquivo = await lerArquivoDados();
+  if(CLOUD_ON){
+    const r = await comLimite(nuvemLer().then(b => ({ b })), 12000);
+    if(!r) NUVEM_FALHA = 'a nuvem não respondeu em 12 segundos';
+    else doNuvem = r.b;
+    /* leitura falhou: não abre cópia local nenhuma no lugar — ela pode estar
+       velha, e o próximo salvamento a publicaria por cima da boa */
+    if(NUVEM_FALHA) return 'falha-nuvem';
+  }
+  /* na nuvem a pasta do Drive é só cópia de segurança: nunca é lida ao abrir */
+  if(FS.permissao && !CLOUD_ON) doArquivo = await lerArquivoDados();
   doIdb = await comLimite(idbGet('db'), 8000);
   try{
     const raw = localStorage.getItem(STORE_KEY);
@@ -1161,7 +1122,7 @@ function save(opts){
   if(CLOUD_ON) nuvemGravar(opts && opts.jaJa);        /* camada 0 — nuvem */
 
   /* camada 1 — arquivo, com atraso para não gravar a cada tecla */
-  if(FS.permissao){
+  if(FS.permissao && copiaDriveHabilitada()){
     clearTimeout(timerArquivo);
     timerArquivo = setTimeout(() => gravarArquivo(), (opts && opts.jaJa) ? 0 : 12000);
   }
@@ -1176,13 +1137,19 @@ async function gravarTudo(o){
   if(FS.permissao && o && o.arquivo) await gravarArquivo();
 }
 
+/* na nuvem, só o master grava cópia em pasta: a base de quem é restrito é
+   recortada e não serve de backup (e não deve parar num arquivo solto) */
+function copiaDriveHabilitada(){
+  return !CLOUD_ON || !!(ACESSO && ACESSO.master && ehMaster(SESSAO.email || '') && !NUVEM_FALHA);
+}
 async function gravarArquivo(){
-  if(!FS.permissao || !FS.pasta) return false;
+  if(!FS.permissao || !FS.pasta || !copiaDriveHabilitada()) return false;
   if(FS.gravando){ FS.pendente = true; return false; }
   FS.gravando = true;
   try{
-    /* alguém alterou o arquivo por fora (outra máquina)? */
-    try{
+    /* alguém alterou o arquivo por fora (outra máquina)? Na nuvem não importa:
+       a fonte da verdade é o Supabase e o arquivo é só a cópia mais recente */
+    if(!CLOUD_ON) try{
       const f = await (await FS.pasta.getFileHandle(ARQ_DADOS)).getFile();
       if(FS.carimboLido && f.lastModified > FS.carimboLido + 2000){
         const outro = JSON.parse(await f.text());
@@ -1282,6 +1249,7 @@ async function gravarSnapshotHorario(texto){
 
 /* ---------- autorização da pasta ---------- */
 async function ativarPasta(){
+  if(!copiaDriveHabilitada()){ toast('Só o acesso master grava cópia em pasta.', 'erro'); return; }
   try{
     const h = await window.showDirectoryPicker({ mode:'readwrite', startIn:'documents' });
     if((await h.requestPermission({ mode:'readwrite' })) !== 'granted'){
@@ -1290,8 +1258,9 @@ async function ativarPasta(){
     FS.pasta = h; FS.permissao = true; FS.ultimoErro = null;
     await idbSet('pastaBackup', h);
 
-    /* já existe dados.json nessa pasta? oferece carregar em vez de sobrescrever */
-    const existente = await lerArquivoDados();
+    /* já existe dados.json nessa pasta? oferece carregar em vez de sobrescrever
+       (só no modo local — na nuvem a pasta é cópia e a nuvem manda) */
+    const existente = CLOUD_ON ? null : await lerArquivoDados();
     if(existente && existente !== DB){
       const q = existente.meta && existente.meta.salvoEm ? new Date(existente.meta.salvoEm).toLocaleString('pt-BR') : '?';
       if(confirm('Já existe um dados.json nessa pasta (salvo em ' + q + ', ' +
@@ -1318,7 +1287,7 @@ async function reativarPermissao(){
     const p = await FS.pasta.requestPermission({ mode:'readwrite' });
     if(p === 'granted'){
       FS.permissao = true;
-      const doArquivo = await lerArquivoDados();
+      const doArquivo = CLOUD_ON ? null : await lerArquivoDados();
       /* o arquivo pode estar mais novo que esta aba (outra máquina) */
       if(baseValida(doArquivo) && ((doArquivo.meta&&doArquivo.meta.salvoEm)||'') > ((DB.meta&&DB.meta.salvoEm)||'')){
         if(confirm('O arquivo no Drive está mais recente que os dados desta janela. Carregar a versão do Drive?')){
@@ -1365,6 +1334,11 @@ async function restaurarSnapshot(i){
 }
 
 function carimboSalvamento(){
+  carimboRodape();
+  const r = document.getElementById('rodapeLateral'), el = $('#lastSave');
+  if(r && el) r.classList.toggle('hidden', !el.innerHTML.trim());
+}
+function carimboRodape(){
   const el = $('#lastSave');
   if(!el) return;
   const q = DB.meta && DB.meta.salvoEm ? new Date(DB.meta.salvoEm).toLocaleTimeString('pt-BR') : '—';
@@ -1376,11 +1350,8 @@ function carimboSalvamento(){
       <i class="fa-solid fa-triangle-exclamation"></i> NÃO SALVOU na nuvem</span> · baixe um backup`;
     return;
   }
-  if(CLOUD_ON){
-    el.innerHTML = `<span class="text-emerald-400"><i class="fa-solid fa-cloud"></i> nuvem${
-      NUVEM_PARTIDA ? ' por unidade' : ''}</span> · salvo ${q}`;
-    return;
-  }
+  /* na nuvem, tudo certo = nada no rodapé (o último salvamento fica no menu do usuário) */
+  if(CLOUD_ON){ el.innerHTML = ''; return; }
   el.innerHTML = FS.permissao
     ? `<span class="text-emerald-400"><i class="fa-solid fa-shield-halved"></i> protegido</span> · ${arq ? 'arquivo ' + arq : 'aguardando'}`
     : `<span class="text-red-400"><i class="fa-solid fa-triangle-exclamation"></i> sem backup em arquivo</span> · local ${q}`;
@@ -1408,11 +1379,12 @@ setInterval(() => { if(FS.permissao && timerArquivo) gravarArquivo(); }, 300000)
    clique em qualquer lugar da página tenta reativar sozinho — se o Chrome
    lembrar da autorização, nem chega a mostrar diálogo. */
 async function tentarReativarSilencioso(){
-  if(FS.permissao || !FS.pasta) return;
+  if(FS.permissao || !FS.pasta || !copiaDriveHabilitada()) return;
   try{
     if((await FS.pasta.requestPermission({ mode:'readwrite' })) === 'granted'){
       FS.permissao = true; FS.ultimoErro = null;
-      const doArquivo = await lerArquivoDados();
+      /* na nuvem a pasta é só cópia: nada de carregar dela */
+      const doArquivo = CLOUD_ON ? null : await lerArquivoDados();
       if(baseValida(doArquivo) && ((doArquivo.meta&&doArquivo.meta.salvoEm)||'') > ((DB.meta&&DB.meta.salvoEm)||'')){
         if(confirm('O arquivo no Drive está mais recente que os dados desta janela. Carregar a versão do Drive?')){
           DB = doArquivo; await idbSet('db', DB); go(rota);
@@ -1434,7 +1406,7 @@ document.addEventListener('pointerdown', function primeiraVez(){
    a cada 3 dias de uso — pior caso, a perda fica limitada. */
 function redeSeguranca(){
   try{
-    if(FS.permissao) return;
+    if(FS.permissao || NUVEM_FALHA || !DB) return;
     const ultimo = localStorage.getItem('atlas_auto_dl') || '';
     const hoje = isoToday();
     if(ultimo && (new Date(hoje) - new Date(ultimo)) < 3*24*3600*1000) return;
@@ -1949,17 +1921,9 @@ function viewAcessos(){
       <div class="bg-white rounded-xl border border-slate-200">
         <div class="px-4 py-3 border-b border-slate-200 flex flex-wrap gap-2 items-center no-print">
           ${botao('Novo acesso','fa-user-plus','editarAcesso()')}
-          ${CLOUD_ON && !NUVEM_PARTIDA
-            ? botao('Migrar para o formato por unidade','fa-database','migrarParaUnidades()',
-                    'bg-white border border-amber-300 text-amber-700 hover:bg-amber-50')
-            : ''}
           <span class="text-xs text-slate-500 ml-auto">${lista.length} login(s) liberado(s), além do master
             ${CLOUD_ON ? ' · dados ' + (NUVEM_PARTIDA ? 'separados por unidade' : 'em documento único') : ''}</span>
         </div>
-        ${CLOUD_ON && !NUVEM_PARTIDA ? `<div class="px-4 py-3 border-b border-amber-200 bg-amber-50 text-xs text-amber-900">
-          <b>O isolamento por unidade ainda não está valendo.</b> Hoje a base é um documento só, e o recorte
-          é de tela — quem tem login alcança o documento inteiro pela API. Depois de migrar, quem decide
-          o que sai do banco é a política do Postgres. A migração não apaga nada e pode ser refeita.</div>` : ''}
         <div class="overflow-x-auto rounded-b-xl">
           <table class="w-full text-sm data">
             <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
@@ -12724,6 +12688,33 @@ async function viewBackup(){
         <span class="text-slate-500">(${esc(DB.meta.divergencia)})</span></p>` : ''}
     </div>
 
+    ${CLOUD_ON && ACESSO.master ? `
+    <div class="rounded-xl border-2 ${FS.permissao ? 'border-emerald-200 bg-emerald-50/60' : 'border-amber-300 bg-amber-50'} p-5">
+      <div class="flex flex-wrap items-center gap-4">
+        <div class="w-11 h-11 rounded-xl ${FS.permissao ? 'bg-success' : 'bg-warning'} text-white flex items-center justify-center text-xl shrink-0">
+          <i class="fa-brands fa-google-drive"></i></div>
+        <div class="flex-1 min-w-[240px]">
+          <p class="font-semibold text-sm ${FS.permissao ? 'text-emerald-900' : 'text-amber-900'}">Cópia automática no Drive
+            ${FS.permissao ? '— ativa' : FS.pasta ? '— pausada, precisa de um clique' : '— não configurada'}</p>
+          <p class="text-xs ${FS.permissao ? 'text-emerald-800' : 'text-amber-800'} mt-0.5">
+            Backup do banco enquanto o plano do Supabase não tem backup próprio. Com você logada, o sistema grava a base
+            completa na pasta escolhida: uma cópia por dia (60 dias + o dia 1º de cada mês) e uma por hora com alteração (últimas ${MANTER_HORARIOS}).
+            Use uma pasta <b>fora</b> da pasta do código (ex.: <code>ATLAS/backup-atlas-sst</code>).</p>
+          ${FS.pasta ? `<p class="text-[11px] text-slate-500 mt-1">Pasta: <b>${esc(FS.pasta.name)}</b>
+            · última cópia: ${ultimoArq ? esc(ultimoArq) : 'nesta sessão, ainda nenhuma'}</p>` : ''}
+        </div>
+        <div class="flex flex-wrap gap-2">
+          ${FS.permissao
+            ? `<button onclick="gravarArquivo().then(r=>toast(r?'Cópia gravada no Drive.':'Falhou — veja o erro.', r?'ok':'erro')).then(()=>viewBackup())"
+                class="px-4 py-2 rounded-lg text-sm bg-success text-white hover:bg-emerald-600 whitespace-nowrap">
+                <i class="fa-solid fa-floppy-disk mr-1"></i>Gravar cópia agora</button>`
+            : `<button onclick="${FS.pasta ? 'reativarPermissao()' : 'ativarPasta()'}"
+                class="px-4 py-2 rounded-lg text-sm bg-warning text-white hover:opacity-90 whitespace-nowrap">
+                <i class="fa-solid fa-folder-open mr-1"></i>${FS.pasta ? 'Reativar' : 'Escolher pasta'}</button>`}
+        </div>
+      </div>
+    </div>` : ''}
+
     <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
       ${CLOUD_ON
         ? camada(true, '1. Nuvem privada (fonte da verdade)',
@@ -12869,8 +12860,9 @@ $('#hojeLabel').textContent = HOJE.toLocaleDateString('pt-BR', { weekday:'long',
     SESSAO.expira   = SESSAO.expiraEm;
   }
 
+  let estadoBoot = '';
   try{
-    await bootStorage();
+    estadoBoot = await bootStorage();
   }catch(e){
     console.error('Falha ao carregar', e);
     DB = seedFresh();
@@ -12880,6 +12872,7 @@ $('#hojeLabel').textContent = HOJE.toLocaleDateString('pt-BR', { weekday:'long',
             : 'O sistema abriu com a base original das planilhas. NÃO faça alterações: ' +
               'vá em "Backup e segurança" e restaure a partir de um arquivo antes de continuar.'));
   }
+  if(estadoBoot === 'falha-nuvem'){ mostrarFalhaNuvem(); return; }
   carimboSalvamento();
 
   /* permissões antes da primeira tela: quem é restrito recebe a base já
