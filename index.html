@@ -939,6 +939,8 @@ function toast(msg, tipo){
 const ARQ_DADOS = 'dados.json';
 const PASTA_HIST = 'historico';
 const MANTER_DIARIOS = 60;
+const PASTA_HORARIA = 'horario';   /* subpasta de PASTA_HIST */
+const MANTER_HORARIOS = 48;
 
 const FS = {
   pasta: null,        // FileSystemDirectoryHandle
@@ -1205,6 +1207,7 @@ async function gravarArquivo(){
     FS.carimboLido = conf.lastModified;
 
     await gravarSnapshotDiario(texto);
+    await gravarSnapshotHorario(texto);
 
     FS.ultimoWrite = new Date().toISOString();
     FS.ultimoErro = null;
@@ -1241,6 +1244,40 @@ async function gravarSnapshotDiario(texto){
       await hist.removeEntry(n).catch(()=>{});
     }
   }catch(e){ console.warn('snapshot diário', e); }
+}
+
+/* uma cópia por hora de uso: só quando já passou 1h desde a última e a base foi gravada
+   (gravarArquivo só roda depois de uma alteração). Guarda as últimas 48; o histórico
+   longo fica com as cópias diárias acima. Sem alteração, sem arquivo novo. */
+async function gravarSnapshotHorario(texto){
+  try{
+    /* base recortada de gerente não serve de backup — só a base inteira entra no histórico */
+    if(DB.meta && DB.meta.escopo === 'parcial') return;
+    const hist = await FS.pasta.getDirectoryHandle(PASTA_HIST, { create:true });
+    const dir = await hist.getDirectoryHandle(PASTA_HORARIA, { create:true });
+    const RE = /^atlas-sst-(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})\.json$/;
+    const arquivos = [];
+    for await (const [n, h] of dir.entries()){
+      if(h.kind === 'file' && RE.test(n)) arquivos.push(n);
+    }
+    arquivos.sort();
+
+    const agora = new Date();
+    if(arquivos.length){
+      const m = arquivos[arquivos.length - 1].match(RE);
+      const ultima = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]);
+      if(agora - ultima < 3600 * 1000) return;
+    }
+    const p2 = n => String(n).padStart(2, '0');
+    const nome = 'atlas-sst-' + agora.getFullYear() + '-' + p2(agora.getMonth() + 1) + '-' + p2(agora.getDate()) +
+                 '-' + p2(agora.getHours()) + p2(agora.getMinutes()) + '.json';
+    const fh = await dir.getFileHandle(nome, { create:true });
+    const w = await fh.createWritable(); await w.write(texto); await w.close();
+    arquivos.push(nome);
+
+    for(const n of arquivos.slice(0, Math.max(0, arquivos.length - MANTER_HORARIOS)))
+      await dir.removeEntry(n).catch(()=>{});
+  }catch(e){ console.warn('snapshot horário', e); }
 }
 
 /* ---------- autorização da pasta ---------- */
@@ -1503,7 +1540,7 @@ async function resetToSeed(){
   const antigo = DB;
   DB = seedFresh();
   /* preserva o que nasceu na plataforma e não existe na planilha */
-  ['atestados','relatorios','visitas','docsOficiais','precos','precosUnidade','totaisCobrados'].forEach(k => {
+  ['atestados','relatorios','visitas','docsOficiais','precos','precosUnidade','totaisCobrados','reajustes'].forEach(k => {
     if(antigo && antigo[k] !== undefined) DB[k] = antigo[k];
   });
   save({ jaJa:true }); go('dashboard');
@@ -5305,10 +5342,18 @@ function snapshotPrecosDe(d){
   };
 }
 function snapshotPrecos(){ return snapshotPrecosDe(DB); }
-/* tabela que vale para a competência: a congelada, se houver; senão a de hoje */
+/* tabela que vale para a competência, nesta ordem:
+   1. a prévia de um reajuste sendo simulada (só enquanto a prévia é calculada);
+   2. a congelada no fechamento, se houver;
+   3. a de antes de um reajuste que só começa DEPOIS deste mês (vigência);
+   4. a de hoje. */
 function tabelaDoMes(mes){
+  const m = (mes || '').slice(0,7);
+  if(PREVIA_TAB && m && PREVIA_TAB.aplica(m)) return PREVIA_TAB.tabela;
   const r = registroDoMes(mes);
   if(r && r.tabela) return r.tabela;
+  const v = tabelaAntesDoReajuste(m);
+  if(v) return v;
   return { precos: DB.precos || {}, precosUnidade: DB.precosUnidade || {}, custosExame: null };
 }
 /* preço de um campo respeitando o override por unidade, dentro da competência */
@@ -5325,7 +5370,9 @@ function custoExame(nome, mes){
   /* competência congelada guarda o custo que o exame tinha à época */
   if(t.custosExame){
     const v = t.custosExame[norm(nome)];
-    return v != null ? Number(v) || 0 : 0;
+    if(v != null) return Number(v) || 0;
+    /* tabela de vigência (não congelada): exame que entrou no catálogo depois usa o custo de hoje */
+    if(!t.vigencia) return 0;
   }
   const e = exameCatalogo(nome);
   return e ? Number(e.custo)||0 : 0;
@@ -9456,7 +9503,8 @@ function quadroResumoFat(d){
 function viewFaturamento(){
   const abas = [
     { id:'fechamento', label:'Fechamento do mês', icon:'fa-file-invoice-dollar' },
-    { id:'notas',      label:'Emissão de notas e boletos', icon:'fa-receipt' }
+    { id:'notas',      label:'Emissão de notas e boletos', icon:'fa-receipt' },
+    { id:'reajustes',  label:'Reajustes de preço e custo', icon:'fa-arrow-trend-up' }
   ];
   $('#view').innerHTML = `
     <div class="space-y-4">
@@ -9467,7 +9515,7 @@ function viewFaturamento(){
       </div>
       <div id="abaFat"></div>
     </div>`;
-  ({ fechamento:abaFechamentoMes, notas:abaNotasBoletos })[UIFat.aba || 'fechamento']();
+  ({ fechamento:abaFechamentoMes, notas:abaNotasBoletos, reajustes:abaReajustes })[UIFat.aba || 'fechamento']();
 }
 
 function abaFechamentoMes(){
@@ -9575,6 +9623,8 @@ function abaFechamentoMes(){
     </div>
 
     ${quadroResumoFat(d)}
+
+    ${bannerForaDaTabela(d.mes)}
 
     <div class="grid grid-cols-1 gap-4">
       <div class="bg-white rounded-xl border border-slate-200 overflow-hidden print-block">
@@ -10081,6 +10131,9 @@ function editarPrecos(){
         <div class="sm:col-span-2 space-y-2">
           <p class="text-[11px] text-slate-500">Estes são os valores <b>padrão</b>. Para cobrar diferente de uma unidade específica,
             use <b>Preços por unidade</b>. O custo dos exames que a Atlas paga à Arys fica no <b>Catálogo de exames</b>.</p>
+          <p class="text-[11px] text-amber-700"><i class="fa-solid fa-circle-info mr-1"></i>Exames e visitas já realizados guardam o valor
+            de quando foram lançados — mudar aqui não os altera. Para um reajuste com data de início, que também atualiza
+            esses valores (com prévia e desfazer), use a aba <b>Reajustes de preço e custo</b>.</p>
           ${avisoCompetenciasCongeladas()}
         </div>` }
     ],
@@ -10091,6 +10144,7 @@ function editarPrecos(){
                     visita:Number(v.visita)||0, mensal:Number(v.mensal)||0,
                     carteirinha:Number(v.carteirinha)||0, carteirinhaCusto:Number(v.carteirinhaCusto)||0 };
       save(); closeModal(); viewFaturamento(); toast('Tabela de preços atualizada.');
+      avisarValoresForaDaTabela();
     }
   });
 }
@@ -10139,6 +10193,528 @@ function salvarPrecosUnidade(){
   save(); closeModal(); viewFaturamento();
   const n = Object.keys(novo).length;
   toast(n ? n + ' unidade(s) com preço próprio.' : 'Todas as unidades usam o preço padrão.');
+  avisarValoresForaDaTabela();
+}
+
+/* ═══════ REAJUSTES DE PREÇO E CUSTO ═══════
+   Reajuste = nova tabela (venda às unidades e/ou custo do fornecedor) com uma
+   competência inicial. As regras, combinadas com a Jessica:
+   • mês FECHADO nunca muda (a tabela dele está congelada);
+   • mês REABERTO também não recebe nada sozinho — só pelo botão (gatilho)
+     "Aplicar a tabela vigente" daquele mês;
+   • mês aberto ANTES da competência inicial continua na tabela anterior
+     (a tabela `antes` fica guardada no registro e vale por vigência);
+   • mês aberto a partir da competência inicial passa a usar a tabela nova.
+   Exames e visitas guardam o próprio valor (gravado no lançamento), então o
+   reajuste também realinha esses valores — com prévia, escolha por grupo,
+   ponto de retorno e desfazer. Valor que não bate com nenhum preço de tabela
+   conhecido pode ser ajuste manual: vem desmarcado.
+   O registro vai para o documento comum: só ids e valores, nada de pessoa. */
+var PREVIA_TAB = null;     /* tabela provisória, só durante o cálculo de uma prévia */
+let PREVIA_REAJ = null;    /* o que a prévia aberta vai aplicar */
+const CAMPOS_VENDA = [
+  ['asoLab','ASO com laboratoriais'], ['asoClinico','ASO só clínico'], ['laudo','Laudos PGR + PCMSO + LTCAT'],
+  ['dispensa','Declaração de dispensa'], ['visita','Visita técnica'], ['mensal','Valor mensal'],
+  ['carteirinha','Carteirinha (cobrada da unidade)']
+];
+const UIReaj = { desde:'', pctVenda:'', pctCusto:'', unidades:false, venda:{}, cart:'', exames:{} };
+
+function reajustes(){
+  if(!Array.isArray(DB.reajustes)) DB.reajustes = [];
+  return DB.reajustes;
+}
+function r2(v){ return Math.round((Number(v) || 0) * 100) / 100; }
+function clonar(o){ return JSON.parse(JSON.stringify(o || {})); }
+function reajustesDeTabelaAtivos(){ return reajustes().filter(r => r.tipo === 'reajuste' && !r.desfeito && r.antes); }
+
+/* mês aberto antes do início de um reajuste fica na tabela anterior a ele */
+function tabelaAntesDoReajuste(m){
+  if(!m || !Array.isArray(DB.reajustes) || !DB.reajustes.length) return null;
+  let alvo = null;
+  reajustesDeTabelaAtivos().forEach(r => { if(r.desde > m && (!alvo || r.desde < alvo.desde)) alvo = r; });
+  return alvo ? Object.assign({}, alvo.antes, { vigencia:true }) : null;
+}
+function mesDaVisita(v){ return (v.fechamento || v.mes || (v.data||'').slice(0,7) || '').slice(0,7); }
+/* meses em aberto de verdade: com movimento e sem registro de fechamento (nem reaberto) */
+function mesesAbertosLivres(){
+  const s = new Set(mesesComMovimento());
+  const atual = UIFat.mes || mesFaturamentoPadrao();
+  if(atual) s.add(atual);
+  return [...s].filter(m => m && !registroDoMes(m)).sort();
+}
+function custosPorId(){
+  const o = {};
+  (DB.exames || []).forEach(e => { o[e.id] = Number(e.custo) || 0; });
+  return o;
+}
+function precoDaTabela(t, uniId, campo){
+  const o = ((t && t.precosUnidade) || {})[uniId] || {};
+  return o[campo] != null ? Number(o[campo]) || 0 : (Number(((t && t.precos) || {})[campo]) || 0);
+}
+/* todo preço que já foi de tabela para esse campo/unidade — serve para dizer se
+   um valor gravado é "preço antigo" (alinhar) ou "ajuste manual" (perguntar) */
+function precosConhecidos(campo, uniId){
+  const tabs = [{ precos:DB.precos, precosUnidade:DB.precosUnidade }];
+  mesesFechados().forEach(r => { if(r.tabela) tabs.push(r.tabela); (r.tabelasAnteriores||[]).forEach(t => tabs.push(t)); });
+  reajustes().forEach(r => { ['antes','depois','tabelaAnterior','nova'].forEach(k => { if(r[k]) tabs.push(r[k]); }); });
+  const s = new Set([0]);
+  tabs.forEach(t => s.add(r2(precoDaTabela(t, uniId, campo))));
+  return s;
+}
+
+/* valores gravados de exames e visitas realizados que não batem com a tabela da competência */
+function divergenciasValores(meses){
+  const itens = [];
+  DB.emissoes.forEach(e => {
+    const m = (e.fechamento || '').slice(0,7);
+    if(!meses.has(m) || e.status !== 'REALIZADO') return;
+    const de = r2(e.valor), para = r2(precoEmissao(e));
+    if(de !== para) itens.push({ tipo:'exame', id:e.id, mes:m, uni:e.unidadeId,
+      campo: temLaboratorial(e) ? 'asoLab' : 'asoClinico', de, para });
+  });
+  (DB.visitas || []).forEach(v => {
+    const m = mesDaVisita(v);
+    if(!meses.has(m) || v.status !== 'REALIZADO') return;
+    const de = r2(v.valor), para = r2(precoVisita(v.unidadeId, m));
+    if(de !== para) itens.push({ tipo:'visita', id:v.id, mes:m, uni:v.unidadeId, campo:'visita', de, para });
+  });
+  return itens;
+}
+function agruparDivergencias(itens){
+  const g = {}, cache = {};
+  const conhecidos = (campo, uni) => cache[campo + '|' + uni] || (cache[campo + '|' + uni] = precosConhecidos(campo, uni));
+  itens.forEach(x => {
+    const k = [x.tipo, x.campo, x.de, x.para].join('|');
+    (g[k] = g[k] || { tipo:x.tipo, campo:x.campo, de:x.de, para:x.para, itens:[], meses:new Set(), conhecido:true }).itens.push(x);
+    g[k].meses.add(x.mes);
+    if(!conhecidos(x.campo, x.uni).has(x.de)) g[k].conhecido = false;
+  });
+  return Object.values(g).map(x => Object.assign(x, { meses:[...x.meses].sort() }))
+    .sort((a,b) => (b.conhecido - a.conhecido) || (b.itens.length - a.itens.length));
+}
+function objetoDoItem(x){
+  return x.tipo === 'exame' ? DB.emissoes.find(e => e.id === x.id) : (DB.visitas || []).find(v => v.id === x.id);
+}
+
+/* aviso depois de mexer direto na tabela padrão / por unidade */
+function avisarValoresForaDaTabela(){
+  const n = divergenciasValores(new Set(mesesAbertosLivres())).length;
+  if(n) setTimeout(() => toast(n + ' exame(s)/visita(s) em meses abertos ficaram com valor diferente da tabela. ' +
+    'Revise em Faturamento → Reajustes de preço e custo.', 'alerta'), 400);
+}
+/* faixa no fechamento do mês quando a grade tem valores fora da tabela vigente */
+function bannerForaDaTabela(mes){
+  if(registroDoMes(mes)) return '';
+  const n = divergenciasValores(new Set([mes])).length;
+  if(!n) return '';
+  return `
+    <div class="rounded-xl border border-amber-300 bg-amber-50 px-5 py-3 flex flex-wrap items-center gap-3 no-print">
+      <i class="fa-solid fa-scale-unbalanced text-amber-500"></i>
+      <p class="flex-1 min-w-[240px] text-sm text-amber-800"><b>${n} lançamento(s)</b> deste mês com valor diferente da tabela de preços vigente
+        (o valor fica gravado no exame/visita e não acompanha a tabela sozinho).</p>
+      <button onclick="previaAlinhamento(['${mes}'])" class="px-3 py-2 rounded-lg text-xs bg-amber-600 text-white hover:bg-amber-700 whitespace-nowrap">
+        <i class="fa-solid fa-magnifying-glass-dollar mr-1"></i>Revisar e alinhar</button>
+    </div>`;
+}
+
+/* ---- montar a tabela nova a partir do formulário ---- */
+function montarTabelaReajuste(){
+  const base = snapshotPrecos();
+  const precos = clonar(base.precos);
+  CAMPOS_VENDA.forEach(([k]) => {
+    const n = UIReaj.venda[k];
+    if(n !== '' && n != null && !isNaN(Number(n))) precos[k] = r2(n);
+  });
+  if(UIReaj.cart !== '' && UIReaj.cart != null && !isNaN(Number(UIReaj.cart))) precos.carteirinhaCusto = r2(UIReaj.cart);
+  const precosUnidade = clonar(base.precosUnidade);
+  const pv = Number(UIReaj.pctVenda);
+  if(UIReaj.unidades && pv){
+    Object.keys(precosUnidade).forEach(u => Object.keys(precosUnidade[u]).forEach(k => {
+      precosUnidade[u][k] = r2(Number(precosUnidade[u][k]) * (1 + pv/100));
+    }));
+  }
+  const porId = custosPorId(), custosExame = {};
+  Object.keys(UIReaj.exames).forEach(id => {
+    const n = UIReaj.exames[id];
+    if(n !== '' && n != null && !isNaN(Number(n)) && porId[id] != null) porId[id] = r2(n);
+  });
+  (DB.exames || []).forEach(e => { custosExame[norm(e.nome)] = porId[e.id]; });
+  return { precos, precosUnidade, custosExame, custosPorId: porId };
+}
+/* o que muda de uma tabela para outra (para prévia e histórico) */
+function mudancasTabela(a, b){
+  const out = [];
+  const val = x => x === '' || x == null ? '' : r2(x);
+  const add = (rotulo, de, para, uni) => { if(val(de) !== val(para)) out.push({ rotulo, de:val(de), para:val(para), uni: uni || '' }); };
+  CAMPOS_VENDA.forEach(([k, l]) => add('Venda · ' + l, (a.precos||{})[k], (b.precos||{})[k]));
+  add('Custo · Carteirinha (pago à Arys)', (a.precos||{}).carteirinhaCusto, (b.precos||{}).carteirinhaCusto);
+  const us = new Set(Object.keys(a.precosUnidade||{}).concat(Object.keys(b.precosUnidade||{})));
+  us.forEach(u => {
+    const oa = (a.precosUnidade||{})[u] || {}, ob = (b.precosUnidade||{})[u] || {};
+    new Set(Object.keys(oa).concat(Object.keys(ob))).forEach(k => {
+      const l = (CAMPOS_VENDA.find(c => c[0] === k) || [k, k])[1];
+      if(oa[k] != null || ob[k] != null) add('Preço próprio · ' + l, oa[k] != null ? oa[k] : '', ob[k] != null ? ob[k] : '', u);
+    });
+  });
+  const ca = a.custosExame || {}, cb = b.custosExame || {};
+  (DB.exames || []).forEach(e => {
+    const k = norm(e.nome);
+    if(ca[k] != null || cb[k] != null) add('Custo · ' + e.nome, ca[k] != null ? ca[k] : e.custo, cb[k] != null ? cb[k] : e.custo);
+  });
+  return out;
+}
+/* resumo do mês com e sem a tabela nova (receita calculada e custo) */
+function resumoMesComTabela(meses, tabela, aplica){
+  const antes = {}, depois = {};
+  meses.forEach(m => { antes[m] = fechamentoDados(m, ''); });
+  PREVIA_TAB = { tabela, aplica };
+  try{ meses.forEach(m => { depois[m] = fechamentoDados(m, ''); }); }
+  finally{ PREVIA_TAB = null; }
+  return meses.map(m => ({ m, a:antes[m], d:depois[m] }));
+}
+
+/* ---- prévias ---- */
+function previaReajuste(){
+  if(DB.meta && DB.meta.escopo === 'parcial'){ toast('Reajuste só pode ser aplicado com a base completa (acesso master).', 'erro'); return; }
+  const desde = UIReaj.desde;
+  if(!/^\d{4}-\d{2}$/.test(desde || '')){ toast('Informe a competência inicial do reajuste.', 'erro'); return; }
+  const ult = reajustesDeTabelaAtivos().slice(-1)[0];
+  if(ult && desde < ult.desde){
+    toast('Já existe um reajuste a partir de ' + mesLabel(ult.desde) + '. O novo precisa começar nessa competência ou depois.', 'erro'); return;
+  }
+  const atual = snapshotPrecos();
+  const nova = montarTabelaReajuste();
+  const mud = mudancasTabela(atual, nova);
+  if(!mud.length){ toast('Nenhum valor novo informado — preencha a coluna "Novo" ou use o percentual.', 'alerta'); return; }
+  const aplica = m => m >= desde && !registroDoMes(m);
+  const meses = mesesAbertosLivres().filter(m => m >= desde);
+  const resumo = resumoMesComTabela(meses, nova, aplica);
+  PREVIA_TAB = { tabela:nova, aplica };
+  let itens;
+  try{ itens = divergenciasValores(new Set(meses)); } finally{ PREVIA_TAB = null; }
+  PREVIA_REAJ = { tipo:'reajuste', desde, nova, mud, grupos: agruparDivergencias(itens) };
+  abrirPrevia('Prévia do reajuste a partir de ' + mesLabel(desde), resumo);
+}
+function previaAlinhamento(mesesArg){
+  if(DB.meta && DB.meta.escopo === 'parcial'){ toast('Alinhamento só pode ser feito com a base completa (acesso master).', 'erro'); return; }
+  const meses = (mesesArg || mesesAbertosLivres()).filter(m => !registroDoMes(m));
+  const itens = divergenciasValores(new Set(meses));
+  if(!itens.length){ toast('Nada a alinhar: os valores gravados batem com a tabela.', 'info'); return; }
+  PREVIA_REAJ = { tipo:'alinhamento', meses, mud:[], grupos: agruparDivergencias(itens) };
+  abrirPrevia('Alinhar valores gravados à tabela vigente', null);
+}
+/* gatilho: mês reaberto passa a usar a tabela vigente (a antiga fica guardada) */
+function previaReaberto(mes){
+  const r = registroDoMes(mes);
+  if(!r || !r.reaberto){ toast('Só vale para mês reaberto.', 'erro'); return; }
+  const base = tabelaAntesDoReajuste(mes) || snapshotPrecos();
+  const nova = clonar(base); delete nova.vigencia;
+  if(!nova.custosExame){ nova.custosExame = snapshotPrecos().custosExame; }
+  nova.congeladoEm = new Date().toISOString();
+  nova.origem = 'gatilho de reajuste no mês reaberto';
+  const mud = mudancasTabela(r.tabela || {}, nova);
+  const aplica = m => m === mes;
+  const resumo = resumoMesComTabela([mes], nova, aplica);
+  PREVIA_TAB = { tabela:nova, aplica };
+  let itens;
+  try{ itens = divergenciasValores(new Set([mes])); } finally{ PREVIA_TAB = null; }
+  if(!mud.length && !itens.length){ toast(mesLabel(mes) + ' já está na tabela vigente — nada a aplicar.', 'info'); return; }
+  PREVIA_REAJ = { tipo:'reaberto', mes, nova, mud, grupos: agruparDivergencias(itens) };
+  abrirPrevia('Aplicar a tabela vigente em ' + mesLabel(mes) + ' (reaberto)', resumo);
+}
+
+function htmlMudancas(mud){
+  if(!mud.length) return '';
+  return `
+    <div>
+      <p class="text-xs font-semibold text-slate-600 mb-1">Tabela: o que muda</p>
+      <div class="overflow-x-auto border border-slate-200 rounded-lg max-h-56 overflow-y-auto">
+        <table class="w-full text-xs"><thead class="bg-slate-50 text-slate-500 sticky top-0"><tr>
+          <th class="px-3 py-1.5 text-left">Item</th><th class="px-3 py-1.5 text-right">Antes</th><th class="px-3 py-1.5 text-right">Depois</th><th class="px-3 py-1.5 text-right">Variação</th></tr></thead>
+        <tbody class="divide-y divide-slate-100">${mud.map(x => {
+          const de = x.de === '' ? null : Number(x.de), para = x.para === '' ? null : Number(x.para);
+          const pct = de && para != null ? ((para/de - 1) * 100).toFixed(1).replace('.', ',') + '%' : '';
+          return `<tr><td class="px-3 py-1.5">${esc(x.rotulo)}${x.uni ? ' <span class="text-slate-400">— ' + esc(uniNome(x.uni)) + '</span>' : ''}</td>
+            <td class="px-3 py-1.5 text-right text-slate-500">${de == null ? 'padrão' : fmtMoney(de)}</td>
+            <td class="px-3 py-1.5 text-right font-medium">${para == null ? 'padrão' : fmtMoney(para)}</td>
+            <td class="px-3 py-1.5 text-right text-slate-500">${pct}</td></tr>`; }).join('')}</tbody></table>
+      </div>
+    </div>`;
+}
+function abrirPrevia(titulo, resumo){
+  const P = PREVIA_REAJ;
+  const fech = mesesFechados().filter(r => !r.reaberto).map(r => r.mes).sort();
+  const reab = mesesFechados().filter(r => r.reaberto).map(r => r.mes).sort();
+  const nomeTipo = { exame:'exame(s)', visita:'visita(s)' };
+  const rotCampo = { asoLab:'ASO c/ lab', asoClinico:'ASO clínico', visita:'Visita técnica' };
+  const blocoMeses = resumo && resumo.length ? `
+    <div>
+      <p class="text-xs font-semibold text-slate-600 mb-1">Meses que recebem a tabela nova</p>
+      <div class="overflow-x-auto border border-slate-200 rounded-lg">
+        <table class="w-full text-xs"><thead class="bg-slate-50 text-slate-500"><tr>
+          <th class="px-3 py-1.5 text-left">Competência</th><th class="px-3 py-1.5 text-right">Custo (antes → depois)</th>
+          <th class="px-3 py-1.5 text-right">Laudos + mensal + carteirinha (antes → depois)</th></tr></thead>
+        <tbody class="divide-y divide-slate-100">${resumo.map(x => `<tr>
+          <td class="px-3 py-1.5">${mesLabel(x.m)}</td>
+          <td class="px-3 py-1.5 text-right">${fmtMoney(x.a.custo)} → <b>${fmtMoney(x.d.custo)}</b></td>
+          <td class="px-3 py-1.5 text-right">${fmtMoney(x.a.recLd + x.a.recMensal + x.a.recCart)} → <b>${fmtMoney(x.d.recLd + x.d.recMensal + x.d.recCart)}</b></td></tr>`).join('')}
+        </tbody></table>
+      </div>
+      <p class="text-[11px] text-slate-500 mt-1">Exames e visitas guardam o próprio valor — eles mudam só pelos grupos marcados abaixo.</p>
+    </div>` : (resumo ? `<p class="text-xs text-slate-500">Nenhum mês em aberto a partir desta competência ainda — a tabela nova vale para os lançamentos que vierem.</p>` : '');
+  const protegidos = P.tipo === 'reaberto' ? '' : `
+    <div class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] text-slate-600 space-y-0.5">
+      <p><i class="fa-solid fa-lock mr-1"></i><b>Não são alterados:</b> ${fech.length} mês(es) fechado(s)${fech.length ? ' (' + esc(fech.slice(-4).map(mesLabel).join(', ')) + (fech.length > 4 ? '…' : '') + ')' : ''}${P.tipo === 'reajuste' ? ' e os meses abertos antes de ' + mesLabel(P.desde) + ', que continuam na tabela anterior' : ''}.</p>
+      ${reab.length ? `<p><i class="fa-solid fa-lock-open mr-1 text-amber-500"></i><b>Reabertos, ignorados:</b> ${esc(reab.map(mesLabel).join(', '))} — só recebem pelo botão "Aplicar a tabela vigente" na aba Reajustes.</p>` : ''}
+    </div>`;
+  const grupos = P.grupos.length ? `
+    <div>
+      <p class="text-xs font-semibold text-slate-600 mb-1">Valores gravados a atualizar</p>
+      <p class="text-[11px] text-slate-500 mb-1">Marcados: o valor gravado é um preço de tabela (antigo) — seguem a tabela.
+        <span class="text-amber-700">Desmarcados: valor que nunca foi preço de tabela, provavelmente ajuste manual — marque só se quiser sobrescrever.</span></p>
+      <div class="border border-slate-200 rounded-lg divide-y divide-slate-100 max-h-64 overflow-y-auto">
+        ${P.grupos.map((g, i) => `
+          <label class="flex items-start gap-2 px-3 py-2 text-xs hover:bg-slate-50 cursor-pointer">
+            <input type="checkbox" class="grpReaj mt-0.5 w-4 h-4 accent-emerald-600" value="${i}" ${g.conhecido ? 'checked' : ''}>
+            <span class="flex-1"><b>${g.itens.length} ${nomeTipo[g.tipo]}</b> · ${esc(rotCampo[g.campo] || g.campo)} ·
+              ${fmtMoney(g.de)} → <b>${fmtMoney(g.para)}</b>
+              ${g.conhecido ? '' : '<span class="ml-1 px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800">possível ajuste manual</span>'}
+              <span class="block text-slate-400">${esc(g.meses.map(mesLabel).join(', '))}</span></span>
+          </label>`).join('')}
+      </div>
+    </div>` : `<p class="text-xs text-slate-500">Nenhum exame/visita com valor gravado a atualizar.</p>`;
+  openInfo(titulo, `
+    <div class="space-y-4">
+      ${htmlMudancas(P.mud)}
+      ${blocoMeses}
+      ${protegidos}
+      ${grupos}
+      <p class="text-[11px] text-slate-500"><i class="fa-solid fa-shield-halved mr-1"></i>Antes de aplicar, um ponto de retorno completo é guardado,
+        e o registro fica no histórico da aba Reajustes com o botão <b>Desfazer</b>.</p>
+      <div class="flex justify-end gap-2">
+        <button onclick="closeModal()" class="px-4 py-2 rounded-lg text-sm border border-slate-300 text-slate-600 hover:bg-slate-50">Cancelar</button>
+        <button onclick="aplicarPrevia()" class="px-4 py-2 rounded-lg text-sm bg-accent text-white hover:bg-blue-700">
+          <i class="fa-solid fa-check mr-1"></i>Aplicar</button>
+      </div>
+    </div>`, 'max-w-4xl');
+}
+
+/* ---- aplicar e desfazer ---- */
+async function aplicarPrevia(){
+  const P = PREVIA_REAJ; if(!P) return;
+  const marcados = [...document.querySelectorAll('#modalBody .grpReaj:checked')].map(i => Number(i.value));
+  const itens = [];
+  marcados.forEach(g => (P.grupos[g] ? P.grupos[g].itens : []).forEach(x => itens.push(x)));
+  if(P.tipo === 'alinhamento' && !itens.length){ toast('Marque ao menos um grupo para alinhar.', 'alerta'); return; }
+  const txt = { reajuste:'Aplicar o reajuste a partir de ' + mesLabel(P.desde) + '?',
+                alinhamento:'Alinhar os valores gravados à tabela vigente?',
+                reaberto:'Aplicar a tabela vigente em ' + mesLabel(P.mes) + ' (mês reaberto)?' }[P.tipo];
+  if(!confirm(txt + '\n\n' + (P.mud.length ? P.mud.length + ' item(ns) de tabela mudam.\n' : '') +
+              itens.length + ' valor(es) gravado(s) serão atualizados.\n\nUm ponto de retorno será guardado e dá para desfazer pelo histórico.')) return;
+  await guardarSnapshotLocal('antes de ' + (P.tipo === 'reajuste' ? 'reajuste desde ' + P.desde : P.tipo === 'reaberto' ? 'aplicar tabela vigente em ' + P.mes : 'alinhar valores'));
+  const reg = { id:uid('rj'), tipo:P.tipo, em:new Date().toISOString(), por:(SESSAO && SESSAO.email) || '', mudancas:P.mud, itens:[] };
+  if(P.tipo === 'reajuste'){
+    reg.desde = P.desde;
+    reg.antes = snapshotPrecos();
+    reg.antesCustosPorId = custosPorId();
+    reg.reabertosIgnorados = mesesFechados().filter(r => r.reaberto).map(r => r.mes);
+    DB.precos = clonar(P.nova.precos);
+    DB.precosUnidade = clonar(P.nova.precosUnidade);
+    (DB.exames || []).forEach(e => { if(P.nova.custosPorId[e.id] != null) e.custo = P.nova.custosPorId[e.id]; });
+    reg.depois = snapshotPrecos();
+  }else if(P.tipo === 'reaberto'){
+    const r = registroDoMes(P.mes);
+    if(!r || !r.reaberto){ toast(mesLabel(P.mes) + ' não está mais reaberto — nada aplicado.', 'erro'); closeModal(); return; }
+    reg.mes = P.mes;
+    reg.tabelaAnterior = r.tabela ? clonar(r.tabela) : null;
+    r.tabelasAnteriores = (r.tabelasAnteriores || []).concat(r.tabela ? [clonar(r.tabela)] : []);
+    r.tabela = clonar(P.nova);
+    reg.nova = clonar(P.nova);
+  }else{
+    reg.meses = P.meses;
+  }
+  let pulados = 0;
+  itens.forEach(x => {
+    const o = objetoDoItem(x);
+    /* só mexe se o valor ainda é o que a prévia mostrou e o mês não fechou no meio */
+    if(!o || r2(o.valor) !== x.de || mesFechado(x.mes)){ pulados++; return; }
+    o.valor = x.para;
+    reg.itens.push({ tipo:x.tipo, id:x.id, mes:x.mes, de:x.de, para:x.para });
+  });
+  reajustes().push(reg);
+  PREVIA_REAJ = null;
+  save(); closeModal(); viewFaturamento();
+  toast((P.tipo === 'reajuste' ? 'Reajuste aplicado a partir de ' + mesLabel(P.desde) + '. ' : P.tipo === 'reaberto' ? mesLabel(P.mes) + ' passou à tabela vigente. ' : '') +
+        reg.itens.length + ' valor(es) atualizado(s)' + (pulados ? ', ' + pulados + ' pulado(s) (mudaram no meio)' : '') + '.', 'ok');
+}
+async function desfazerReajuste(id){
+  const ativos = reajustes().filter(r => !r.desfeito);
+  const reg = ativos[ativos.length - 1];
+  if(!reg || reg.id !== id){ toast('Só dá para desfazer o último registro ativo, um de cada vez.', 'erro'); return; }
+  let aviso = '';
+  if(reg.tipo === 'reajuste' && reg.depois && JSON.stringify(mudancasTabela(snapshotPrecos(), reg.depois)) !== '[]')
+    aviso = '\n\nATENÇÃO: a tabela foi mexida depois deste reajuste. Desfazer volta a tabela inteira para como estava antes dele.';
+  if(!confirm('Desfazer este registro?\n\nOs valores gravados voltam ao que eram (menos os que foram alterados depois ou cujo mês já foi fechado).' + aviso +
+              '\n\nUm ponto de retorno será guardado.')) return;
+  await guardarSnapshotLocal('antes de desfazer reajuste ' + reg.id);
+  let voltaram = 0, pulados = 0;
+  (reg.itens || []).forEach(x => {
+    const o = objetoDoItem(x);
+    if(!o || r2(o.valor) !== x.para || mesFechado(x.mes)){ pulados++; return; }
+    o.valor = x.de; voltaram++;
+  });
+  if(reg.tipo === 'reajuste' && reg.antes){
+    DB.precos = clonar(reg.antes.precos);
+    DB.precosUnidade = clonar(reg.antes.precosUnidade);
+    (DB.exames || []).forEach(e => { const c = (reg.antesCustosPorId || {})[e.id]; if(c != null) e.custo = c; });
+  }
+  if(reg.tipo === 'reaberto'){
+    const r = registroDoMes(reg.mes);
+    if(r && reg.tabelaAnterior){
+      r.tabela = clonar(reg.tabelaAnterior);
+      if(Array.isArray(r.tabelasAnteriores)) r.tabelasAnteriores.pop();
+    }
+  }
+  reg.desfeito = true; reg.desfeitoEm = new Date().toISOString(); reg.desfeitoPor = (SESSAO && SESSAO.email) || '';
+  save(); viewFaturamento();
+  toast('Registro desfeito — ' + voltaram + ' valor(es) voltaram' + (pulados ? ', ' + pulados + ' mantido(s)' : '') + '.', 'alerta');
+}
+
+/* ---- a aba ---- */
+function preencherPctReaj(qual){
+  const p = Number(qual === 'venda' ? UIReaj.pctVenda : UIReaj.pctCusto);
+  if(!p){ toast('Informe o percentual.', 'alerta'); return; }
+  const f = 1 + p/100;
+  if(qual === 'venda') CAMPOS_VENDA.forEach(([k]) => { UIReaj.venda[k] = r2((Number(DB.precos[k]) || 0) * f); });
+  else{
+    UIReaj.cart = r2((Number(DB.precos.carteirinhaCusto) || 0) * f);
+    (DB.exames || []).forEach(e => { UIReaj.exames[e.id] = r2((Number(e.custo) || 0) * f); });
+  }
+  viewFaturamento();
+}
+function limparReaj(){
+  Object.assign(UIReaj, { pctVenda:'', pctCusto:'', unidades:false, venda:{}, cart:'', exames:{} });
+  viewFaturamento();
+}
+function abaReajustes(){
+  if(!UIReaj.desde) UIReaj.desde = UIFat.mes || mesFaturamentoPadrao();
+  const parcial = DB.meta && DB.meta.escopo === 'parcial';
+  const inp = (val, on, ph) => `<input type="number" step="0.01" value="${val === '' || val == null ? '' : val}" placeholder="${esc(String(ph))}" oninput="${on}"
+      class="w-28 px-2 py-1 text-xs text-right border border-slate-300 rounded focus:outline-none focus:ring-2 focus:ring-accent/40">`;
+  const linha = (rot, atual, val, on) => `<tr><td class="px-3 py-1.5 text-xs">${esc(rot)}</td>
+      <td class="px-3 py-1.5 text-xs text-right text-slate-500">${fmtMoney(atual)}</td>
+      <td class="px-3 py-1.5 text-right">${inp(val, on, atual)}</td></tr>`;
+  const cab = `<thead class="bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500 sticky top-0"><tr>
+      <th class="px-3 py-2 text-left">Item</th><th class="px-3 py-2 text-right">Atual</th><th class="px-3 py-2 text-right">Novo</th></tr></thead>`;
+  const livres = mesesAbertosLivres();
+  const nDiv = divergenciasValores(new Set(livres)).length;
+  const reab = mesesFechados().filter(r => r.reaberto).map(r => r.mes).sort();
+  const hist = reajustes().slice().reverse();
+  const ativos = reajustes().filter(r => !r.desfeito);
+  const ultimoAtivo = ativos.length ? ativos[ativos.length - 1].id : '';
+  const rotTipo = { reajuste:'Reajuste de tabela', alinhamento:'Alinhamento de valores', reaberto:'Tabela vigente em mês reaberto' };
+  const exames = (DB.exames || []).slice().sort((a,b) => String(a.nome).localeCompare(String(b.nome), 'pt-BR'));
+
+  $('#abaFat').innerHTML = `
+    <div class="space-y-4">
+      <div class="rounded-xl border border-slate-200 bg-white px-5 py-4 text-xs text-slate-600 space-y-1">
+        <p class="text-sm font-semibold text-slate-700"><i class="fa-solid fa-arrow-trend-up mr-1 text-accent"></i>Como o reajuste funciona</p>
+        <p>• Vale a partir da <b>competência inicial</b>: meses abertos antes dela continuam na tabela anterior.</p>
+        <p>• <b>Mês fechado nunca muda.</b> <b>Mês reaberto não recebe nada sozinho</b> — só pelo botão "Aplicar a tabela vigente" dele, mais abaixo.</p>
+        <p>• Exames e visitas guardam o valor do lançamento; o reajuste mostra quais vão mudar e você confirma por grupo. Tudo com prévia, ponto de retorno e desfazer.</p>
+      </div>
+      ${parcial ? `<div class="rounded-xl border border-red-200 bg-red-50 px-5 py-4 text-sm text-red-700">Reajustes só podem ser aplicados com a base completa (acesso master).</div>` : ''}
+
+      <div class="rounded-xl border ${nDiv ? 'border-amber-300 bg-amber-50' : 'border-emerald-200 bg-emerald-50'} px-5 py-4 flex flex-wrap items-center gap-3">
+        <i class="fa-solid ${nDiv ? 'fa-scale-unbalanced text-amber-500' : 'fa-circle-check text-emerald-600'}"></i>
+        <div class="flex-1 min-w-[240px]">
+          <p class="text-sm font-semibold ${nDiv ? 'text-amber-800' : 'text-emerald-800'}">${nDiv
+            ? nDiv + ' lançamento(s) em meses abertos com valor diferente da tabela vigente'
+            : 'Os valores gravados dos meses abertos batem com a tabela vigente'}</p>
+          <p class="text-xs ${nDiv ? 'text-amber-700' : 'text-emerald-700'}">Acontece quando a tabela padrão (ou por unidade) é alterada direto: os exames já realizados guardam o valor antigo.
+            Meses abertos: ${esc(livres.map(mesLabel).join(', ') || 'nenhum')}.</p>
+        </div>
+        ${nDiv && !parcial ? `<button onclick="previaAlinhamento()" class="px-3 py-2 rounded-lg text-xs bg-amber-600 text-white hover:bg-amber-700 whitespace-nowrap">
+          <i class="fa-solid fa-magnifying-glass-dollar mr-1"></i>Revisar e alinhar</button>` : ''}
+      </div>
+
+      <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
+        <div class="px-5 py-4 border-b border-slate-200 flex flex-wrap items-end gap-4">
+          <h3 class="font-semibold text-sm text-slate-700 mr-auto">Novo reajuste</h3>
+          <div><label class="block text-xs font-medium text-slate-600 mb-1">Competência inicial</label>
+            <input type="month" value="${esc(UIReaj.desde)}" onchange="UIReaj.desde=this.value"
+              class="px-3 py-1.5 text-sm border border-slate-300 rounded-lg"></div>
+        </div>
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 p-5">
+          <div class="space-y-2">
+            <div class="flex flex-wrap items-center gap-2">
+              <p class="text-xs font-semibold text-slate-600 mr-auto">Venda — o que as unidades pagam</p>
+              <input type="number" step="0.01" value="${esc(String(UIReaj.pctVenda))}" oninput="UIReaj.pctVenda=this.value" placeholder="%"
+                class="w-20 px-2 py-1 text-xs text-right border border-slate-300 rounded">
+              <button onclick="preencherPctReaj('venda')" class="px-2 py-1 rounded text-xs border border-slate-300 hover:bg-slate-50">Aplicar % na coluna Novo</button>
+            </div>
+            <div class="overflow-x-auto border border-slate-200 rounded-lg"><table class="w-full">${cab}<tbody class="divide-y divide-slate-100">
+              ${CAMPOS_VENDA.map(([k, l]) => linha(l, DB.precos[k], UIReaj.venda[k], `UIReaj.venda['${k}']=this.value`)).join('')}
+            </tbody></table></div>
+            <label class="flex items-center gap-2 text-xs text-slate-600">
+              <input type="checkbox" ${UIReaj.unidades ? 'checked' : ''} onchange="UIReaj.unidades=this.checked" class="w-4 h-4">
+              <span>Aplicar o mesmo % de venda aos <b>preços próprios por unidade</b> (${Object.keys(DB.precosUnidade || {}).length} unidade(s))</span></label>
+          </div>
+          <div class="space-y-2">
+            <div class="flex flex-wrap items-center gap-2">
+              <p class="text-xs font-semibold text-slate-600 mr-auto">Custo — o que a Atlas paga ao fornecedor</p>
+              <input type="number" step="0.01" value="${esc(String(UIReaj.pctCusto))}" oninput="UIReaj.pctCusto=this.value" placeholder="%"
+                class="w-20 px-2 py-1 text-xs text-right border border-slate-300 rounded">
+              <button onclick="preencherPctReaj('custo')" class="px-2 py-1 rounded text-xs border border-slate-300 hover:bg-slate-50">Aplicar % na coluna Novo</button>
+            </div>
+            <div class="overflow-x-auto border border-slate-200 rounded-lg max-h-[380px] overflow-y-auto"><table class="w-full">${cab}<tbody class="divide-y divide-slate-100">
+              ${linha('Carteirinha sanitária', DB.precos.carteirinhaCusto, UIReaj.cart, 'UIReaj.cart=this.value')}
+              ${exames.map(e => linha(e.nome, e.custo, UIReaj.exames[e.id], `UIReaj.exames['${e.id}']=this.value`)).join('')}
+            </tbody></table></div>
+          </div>
+        </div>
+        <div class="px-5 pb-4 flex justify-end gap-2">
+          <button onclick="limparReaj()" class="px-4 py-2 rounded-lg text-sm border border-slate-300 text-slate-600 hover:bg-slate-50">Limpar</button>
+          ${parcial ? '' : `<button onclick="previaReajuste()" class="px-4 py-2 rounded-lg text-sm bg-accent text-white hover:bg-blue-700">
+            <i class="fa-solid fa-eye mr-1"></i>Ver prévia do reajuste</button>`}
+        </div>
+      </div>
+
+      ${reab.length ? `
+      <div class="bg-white rounded-xl border border-amber-200 overflow-hidden">
+        <div class="px-5 py-3 border-b border-amber-200 bg-amber-50">
+          <h3 class="font-semibold text-sm text-amber-800"><i class="fa-solid fa-lock-open mr-1"></i>Meses reabertos — ficam na tabela da época</h3>
+          <p class="text-xs text-amber-700">Nenhum reajuste chega aqui sozinho. Use o botão só se esse mês deve passar a cobrar/custar pela tabela vigente.</p>
+        </div>
+        <div class="divide-y divide-slate-100">${reab.map(m => { const r = registroDoMes(m); return `
+          <div class="px-5 py-3 flex flex-wrap items-center gap-3">
+            <span class="text-sm font-medium text-slate-700 flex-1">${mesLabel(m)}
+              <span class="text-xs font-normal text-slate-500">— tabela ${r && r.tabela && r.tabela.congeladoEm ? 'de ' + new Date(r.tabela.congeladoEm).toLocaleDateString('pt-BR') : 'da época'}</span></span>
+            ${parcial ? '' : `<button onclick="previaReaberto('${m}')" class="px-3 py-1.5 rounded-lg text-xs border border-amber-400 text-amber-800 hover:bg-amber-50">
+              <i class="fa-solid fa-bolt mr-1"></i>Aplicar a tabela vigente</button>`}
+          </div>`; }).join('')}</div>
+      </div>` : ''}
+
+      <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
+        <div class="px-5 py-3 border-b border-slate-200"><h3 class="font-semibold text-sm text-slate-700">Histórico</h3></div>
+        ${hist.length ? `<div class="divide-y divide-slate-100">${hist.map(r => `
+          <div class="px-5 py-3 text-xs ${r.desfeito ? 'opacity-60' : ''}">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="font-semibold text-slate-700">${rotTipo[r.tipo] || r.tipo}</span>
+              ${r.desde ? `<span class="px-2 py-0.5 rounded-full bg-stone-100 text-accent">a partir de ${mesLabel(r.desde)}</span>` : ''}
+              ${r.mes ? `<span class="px-2 py-0.5 rounded-full bg-amber-50 text-amber-700">${mesLabel(r.mes)}</span>` : ''}
+              ${r.desfeito ? `<span class="px-2 py-0.5 rounded-full bg-slate-200 text-slate-600">desfeito em ${new Date(r.desfeitoEm).toLocaleDateString('pt-BR')}</span>` : ''}
+              <span class="text-slate-400 ml-auto">${new Date(r.em).toLocaleString('pt-BR')}${r.por ? ' · ' + esc(r.por) : ''}</span>
+              ${!r.desfeito && r.id === ultimoAtivo && !parcial ? `<button onclick="desfazerReajuste('${r.id}')" class="px-2 py-1 rounded border border-red-300 text-red-700 hover:bg-red-50">
+                <i class="fa-solid fa-rotate-left mr-1"></i>Desfazer</button>` : ''}
+            </div>
+            <p class="text-slate-500 mt-1">${(r.mudancas || []).length} item(ns) de tabela · ${(r.itens || []).length} valor(es) gravado(s) atualizado(s)
+              ${r.reabertosIgnorados && r.reabertosIgnorados.length ? ' · reabertos ignorados: ' + esc(r.reabertosIgnorados.map(mesLabel).join(', ')) : ''}</p>
+            ${(r.mudancas || []).length ? `<details class="mt-1"><summary class="cursor-pointer text-accent">ver o que mudou</summary>
+              <div class="mt-2">${htmlMudancas(r.mudancas)}</div></details>` : ''}
+          </div>`).join('')}</div>` : `<p class="px-5 py-6 text-sm text-slate-400 text-center">Nenhum reajuste registrado ainda.</p>`}
+      </div>
+    </div>`;
 }
 
 /* ---- gerador de e-mail de fechamento (multi-unidade, formato do cliente) ---- */
@@ -12224,6 +12800,7 @@ async function viewBackup(){
         <li>Ao abrir o sistema, o Chrome pode pedir confirmação para gravar na pasta — é um clique, e a faixa vermelha some.</li>
         <li>O arquivo <code>${ARQ_DADOS}</code> é a fonte da verdade. Trocando de máquina, basta abrir o HTML, autorizar a mesma pasta do Drive e escolher "carregar esses dados".</li>
         <li>A subpasta <code>${PASTA_HIST}</code> guarda uma cópia por dia (${MANTER_DIARIOS} dias, mais o dia 1º de cada mês para sempre).</li>
+        <li>Dentro dela, a pasta <code>${PASTA_HORARIA}</code> guarda uma cópia a cada hora em que houve alteração (as últimas ${MANTER_HORARIOS}) — para voltar a um ponto de poucas horas atrás.</li>
         <li>A gravação usa arquivo temporário e só substitui o original no fim — uma queda de energia no meio não corrompe a base.</li>
         <li>O backup contém CPF, RG e dados de saúde. Mantenha a pasta do Drive restrita a quem já tem acesso às planilhas.</li>
       </ul>
