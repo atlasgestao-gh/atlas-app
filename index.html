@@ -1059,7 +1059,10 @@ async function bootStorage(){
     DB = seedFresh();
     DB.meta.fonteInicial = CLOUD_ON ? 'base vazia (nuvem) — restaure um backup' : 'base original das planilhas';
     await gravarTudo({ arquivo:true });
-    if(CLOUD_ON) nuvemGravar(true);
+    /* só o master semeia a nuvem. Quem não tem unidade liberada (ou é da
+       equipe de admissão, que não lê unidade nenhuma) chega aqui todo dia, e
+       mandar gravar daria o aviso de "não consegui salvar" a cada entrada */
+    if(CLOUD_ON && ehMaster(SESSAO.email || '')) nuvemGravar(true);
     return;
   }
   candidatos.sort((a,b) => ((b.d.meta&&b.d.meta.salvoEm)||'').localeCompare((a.d.meta&&a.d.meta.salvoEm)||''));
@@ -1166,7 +1169,11 @@ async function extrasNuvemParaCopia(){
   };
   try{
     _extraNuvemCache = { lidoEm:new Date().toISOString(),
-      atlas_acesso: await ler('atlas_acesso'), atlas_solicitacao: await ler('atlas_solicitacao') };
+      atlas_acesso: await ler('atlas_acesso'), atlas_solicitacao: await ler('atlas_solicitacao'),
+      /* férias apontadas entram na cópia. As FICHAS de admissão ficam de fora
+         de propósito: têm prazo para serem apagadas, e uma cópia em arquivo
+         guardaria para sempre o que o banco apaga em 30 dias. */
+      atlas_ferias: await ler('atlas_ferias') };
     return _extraNuvemCache;
   }catch(e){
     console.warn('extrasNuvemParaCopia', e);
@@ -1704,9 +1711,12 @@ const LOG_ACOES = {
   entrou:'Entrou no sistema', saiu:'Saiu do sistema', sessao_expirada:'Sessão encerrada (6h)',
   exportou:'Exportou planilha', baixou_copia:'Baixou cópia da base', baixou_historico:'Baixou histórico de colaborador',
   abriu_ficha:'Abriu ficha de colaborador', restaurou_backup:'Restaurou backup de arquivo', trocou_senha:'Trocou a própria senha',
-  incluiu:'Incluiu', alterou:'Alterou', excluiu:'Excluiu'
+  incluiu:'Incluiu', alterou:'Alterou', excluiu:'Excluiu',
+  abriu_ficha_admissao:'Abriu ficha de admissão', imprimiu_ficha_admissao:'Gerou ficha de admissão',
+  emitiu_contrato:'Emitiu contrato', abriu_contrato:'Abriu contrato', expurgou:'Apagou dados pelo prazo de guarda'
 };
-const LOG_TABELAS = { atlas_unidade:'Dados da unidade', atlas_comum:'Dados gerais', atlas_acesso:'Acessos', atlas_solicitacao:'Pedido de gerente' };
+const LOG_TABELAS = { atlas_unidade:'Dados da unidade', atlas_comum:'Dados gerais', atlas_acesso:'Acessos', atlas_solicitacao:'Pedido de gerente',
+  atlas_admissao:'Admissão', atlas_contrato:'Contrato', atlas_ferias:'Férias' };
 const LOG_COLECOES = { colaboradores:'Colaboradores', emissoes:'Exames', asos:'ASOs', laudos:'Laudos', visitas:'Visitas',
   atestados:'Atestados', documentos:'Documentos', docsOficiais:'Docs oficiais', relatorios:'Relatórios',
   esocial2220:'eSocial S-2220', esocial2240:'eSocial S-2240', precos:'Tabela de preços', precosUnidade:'Preços por unidade',
@@ -2013,6 +2023,10 @@ const MENU = [
   { id:'atestados',   label:'Atestados e NR-01',   icon:'fa-file-medical',      sub:'Absenteísmo, riscos psicossociais e relatório de monitoramento' },
   { id:'faturamento', label:'Faturamento',         icon:'fa-file-invoice-dollar', sub:'Fechamento mensal, cobrança e e-mail' },
   { id:'documentos',  label:'Documentos',          icon:'fa-file-pen',          sub:'Ofícios, orçamentos e comunicados no papel timbrado' },
+  /* `admissao:true`: só o master e a equipe de admissão do cliente abrem — e,
+     para essa equipe, é a ÚNICA tela (ver podeAba). Não entra na lista de
+     telas marcáveis: a ficha tem dado de RH, não é para quem opera o SST. */
+  { id:'admissoes',   label:'Admissões',           icon:'fa-id-card',           sub:'Ficha, contrato e acompanhamento de experiência e férias', admissao:true },
   { id:'backup',      label:'Backup e segurança',  icon:'fa-shield-halved',     sub:'Onde os dados estão gravados e como recuperá-los' },
   { id:'acessos',     label:'Acessos e permissões', icon:'fa-user-shield',      sub:'Quem entra no app e o que cada login enxerga', master:true },
   /* A tela da gerente. `gerente:true` é o espelho de `master:true`: item que só
@@ -2058,15 +2072,16 @@ function acessos(){
 /* a tabela usa snake_case; o app fala o dialeto dele */
 function acessoDaLinha(r){
   return { email:r.email, nome:r.nome || '', master:!!r.master,
-           perfil: r.perfil === 'gerente' ? 'gerente' : 'atlas',
+           perfil: (r.perfil === 'gerente' || r.perfil === 'admissao') ? r.perfil : 'atlas',
            abas:r.abas || [], unidades:r.unidade_ids || [], empresas:[],
            podeIncluir:!!r.pode_incluir, podeEditar:!!r.pode_editar, podeExcluir:!!r.pode_excluir };
 }
 function linhaDoAcesso(a){
-  const ger = a.perfil === 'gerente';
+  /* gerente e equipe de admissão são perfis fechados: uma tela, nenhum verbo */
+  const ger = a.perfil === 'gerente' || a.perfil === 'admissao';
   return { email:String(a.email||'').trim().toLowerCase(), nome:a.nome || '',
            master: ger ? false : !!a.master,
-           perfil: ger ? 'gerente' : 'atlas',
+           perfil: ger ? a.perfil : 'atlas',
            abas: ger ? [] : (a.abas || []), unidade_ids:a.unidades || [],
            /* gerente não grava dado real em hipótese nenhuma: os verbos vão
               falsos para o banco, não só para a tela */
@@ -2099,15 +2114,18 @@ function carregarAcesso(){
      ehMaster() acima, que é lista literal no código. */
   const r = acessoDe(email);
   const gerente = !!(r && r.perfil === 'gerente');
-  ACESSO = { master:false, irrestrito:false, email, semCadastro: !r, gerente,
+  /* equipe de admissão do cliente: não lê a base (o banco não entrega nenhuma
+     linha de unidade a ela) e trabalha só nas tabelas de admissão */
+  const admissao = !!(r && r.perfil === 'admissao');
+  ACESSO = { master:false, irrestrito:false, email, semCadastro: !r, gerente, admissao,
              empresas: (r && r.empresas) || [], unidades: (r && r.unidades) || [],
-             abas: gerente ? [] : ((r && r.abas) || []),
+             abas: (gerente || admissao) ? [] : ((r && r.abas) || []),
              /* gerente é perfil de PEDIDO: ela nunca escreve no dado real, e
                 por isso os verbos são zerados aqui também — não só na gravação
                 da linha. Marcação errada na tela de acessos não vira escrita. */
-             podeIncluir: !gerente && !!(r && r.podeIncluir),
-             podeEditar:  !gerente && !!(r && r.podeEditar),
-             podeExcluir: !gerente && !!(r && r.podeExcluir) };
+             podeIncluir: !gerente && !admissao && !!(r && r.podeIncluir),
+             podeEditar:  !gerente && !admissao && !!(r && r.podeEditar),
+             podeExcluir: !gerente && !admissao && !!(r && r.podeExcluir) };
 }
 function podeAba(id){
   const m = MENU.find(x => x.id === id);
@@ -2117,6 +2135,9 @@ function podeAba(id){
      não consegue lhe dar o faturamento. */
   if(ACESSO.gerente) return !!m.gerente;
   if(m.gerente) return false;
+  /* mesma lógica para a equipe de admissão: uma tela, e só ela */
+  if(ACESSO.admissao) return !!m.admissao;
+  if(m.admissao) return ACESSO.irrestrito;
   if(m.master && !ACESSO.master) return false;
   return ACESSO.irrestrito || ACESSO.abas.indexOf(id) >= 0;
 }
@@ -2178,8 +2199,10 @@ function viewAcessos(){
     return esc(nomes.slice(0,4).join(', ')) + (nomes.length > 4 ? ' <span class="text-slate-400">+' + (nomes.length-4) + '</span>' : '');
   };
   const ehGerente = a => a.perfil === 'gerente';
+  const ehAdmissao = a => a.perfil === 'admissao';
   const resumoVerbos = a => {
     if(ehGerente(a)) return '<span class="text-slate-500">pede exame · não grava</span>';
+    if(ehAdmissao(a)) return '<span class="text-slate-500">ficha, contrato e férias · não vê dado de saúde</span>';
     const v = [];
     if(a.podeIncluir) v.push('incluir');
     if(a.podeEditar)  v.push('editar');
@@ -2188,12 +2211,15 @@ function viewAcessos(){
   };
   const resumoAbas = a => {
     if(ehGerente(a)) return '<span class="text-slate-500">Minha unidade</span>';
+    if(ehAdmissao(a)) return '<span class="text-slate-500">Admissões</span>';
     const n = (a.abas||[]).length;
     if(!n) return '<span class="text-red-600">nenhuma tela</span>';
     return esc(MENU.filter(m => (a.abas||[]).indexOf(m.id) >= 0).map(m => m.label).join(', '));
   };
   const selo = a => ehGerente(a)
     ? '<span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700 whitespace-nowrap">gerente</span>'
+    : ehAdmissao(a)
+    ? '<span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700 whitespace-nowrap">admissão</span>'
     : '';
   $('#view').innerHTML = `
     <div class="space-y-4">
@@ -2254,12 +2280,13 @@ function editarAcesso(email){
       { name:'nome', label:'Pessoa / cargo', col:'sm:col-span-2', ph:'Ex.: Alessandra — RH Emerald' },
       { name:'perfil', label:'Perfil de acesso', type:'select', col:'sm:col-span-2',
         options:[{ v:'atlas',   l:'Atlas — opera o sistema' },
-                 { v:'gerente', l:'Gerente do cliente — só pede exames e acompanha' }],
-        hint:'gerente vê apenas a tela "Minha unidade" e nunca grava no cadastro; ' +
-             'as telas e os verbos abaixo não se aplicam a ela' },
+                 { v:'gerente', l:'Gerente do cliente — só pede exames e acompanha' },
+                 { v:'admissao', l:'Equipe de admissão do cliente — ficha, contrato e férias' }],
+        hint:'gerente vê apenas a tela "Minha unidade"; a equipe de admissão vê apenas "Admissões" e nenhum dado de saúde. ' +
+             'Nenhuma das duas grava no cadastro, e as telas e os verbos abaixo não se aplicam a elas' },
       { type:'sep', name:'sepTelas', label:'Telas que pode abrir' },
       { name:'abas', label:'Menu lateral', type:'multi', col:'sm:col-span-2',
-        options: MENU.filter(m => !m.master && !m.gerente).map(m => ({ v:m.id, l:m.label })),
+        options: MENU.filter(m => !m.master && !m.gerente && !m.admissao).map(m => ({ v:m.id, l:m.label })),
         hint:'sem nenhuma marcada, a pessoa entra e não vê tela nenhuma' },
       { type:'sep', label:'O que pode enxergar' },
       { name:'empresas', label:'Atalho: marcar todas as unidades de', type:'multi', col:'sm:col-span-2',
@@ -2283,7 +2310,7 @@ function editarAcesso(email){
       const sel = form.elements['perfil'];
       const some = ['sepTelas','abas','sepFazer','podeIncluir','podeEditar','podeExcluir'];
       const pintar = () => {
-        const ger = sel.value === 'gerente';
+        const ger = sel.value === 'gerente' || sel.value === 'admissao';
         some.forEach(n => {
           const el = form.querySelector('[data-campo="' + n + '"]');
           if(el) el.classList.toggle('hidden', ger);
@@ -2310,7 +2337,7 @@ function editarAcesso(email){
       v.empresas = [];
       /* gerente é perfil fechado: a tela dela não vem de "abas marcadas", e ela
          não grava. Zerado aqui para o que vai ao banco bater com a regra. */
-      const ger = v.perfil === 'gerente';
+      const ger = v.perfil === 'gerente' || v.perfil === 'admissao';
       if(ger){ v.abas = []; v.podeIncluir = false; v.podeEditar = false; v.podeExcluir = false; }
       if(a) Object.assign(a, v);
       else acessos().push(Object.assign({ criadoEm:new Date().toISOString(), criadoPor:SESSAO.email||'' }, v));
@@ -2433,6 +2460,7 @@ function viewMinhaUnidade(){
     { id:'recusados',    label:'Recusados',      icon:'fa-ban',
       n: pedidosRecusados().length,
       tom: pedidosRecusados().some(recusaNova) ? 'alerta' : '' },
+    { id:'contratos',    label:'Contratos',      icon:'fa-file-signature', n: contratosDaGerente().length },
     { id:'estatisticas', label:'Estatísticas',   icon:'fa-chart-pie' }
   ];
   if(!abas.some(a => a.id === UIGer.aba)) UIGer.aba = 'pedidos';
@@ -2453,7 +2481,7 @@ function viewMinhaUnidade(){
       <div id="abaGer"></div>
     </div>`;
   ({ pedidos:gerPedidos, acompanhar:gerAcompanhar, recusados:gerRecusados,
-     estatisticas:gerEstatisticas })[UIGer.aba]();
+     contratos:gerContratos, estatisticas:gerEstatisticas })[UIGer.aba]();
 }
 
 function emissoesDaGerente(){
@@ -2962,6 +2990,8 @@ function go(id){
   let m = livres.find(x => x.id === id);
   if(!m){ m = livres[0]; id = m.id; }
   rota = id;
+  /* pelo menu, Admissões abre sempre na lista — não na última ficha aberta */
+  if(id === 'admissoes') UIAdm.edit = null;
   $('#pageTitle').textContent = m.label;
   $('#pageSub').textContent = m.sub;
   renderNav();
@@ -2970,7 +3000,7 @@ function go(id){
   ({ dashboard:viewDashboard, acompanhamentos:viewAcompanhamentos, empresas:viewEmpresas, laudos:viewLaudos, cadastros:viewCadastros,
      exames:viewExames, asos:viewAsos, visitas:viewVisitas, atestados:viewAtestados,
      faturamento:viewFaturamento, documentos:viewDocumentos, backup:viewBackup,
-     acessos:viewAcessos, minhaunidade:viewMinhaUnidade })[id]();
+     acessos:viewAcessos, minhaunidade:viewMinhaUnidade, admissoes:viewAdmissoes })[id]();
   renderBanner();
   if(window.innerWidth < 1024) fecharSidebar();
   window.scrollTo(0,0);
@@ -7298,11 +7328,14 @@ function editarColab(id, pre){
       /* "Salvar e solicitar ASO": cria a emissão já como Solicitado */
       if(extra === 'solicitarAso'){
         const em = solicitarAsoDoCadastro(alvo, eraNovo);
+        if(pre && pre._aposSalvar) pre._aposSalvar(alvo, em);
         closeModal(); go('exames');
         toast('Colaborador salvo.' + eco + ' Exame ' + tipoLabel(em.tipoExame).toLowerCase() + ' criado como Solicitado.');
         return;
       }
-      closeModal(); viewCadastros();
+      /* aberto de outra tela (Admissões): quem abriu decide para onde voltar */
+      closeModal();
+      if(pre && pre._aposSalvar) pre._aposSalvar(alvo); else viewCadastros();
       toast('Colaborador salvo.' + eco);
     }
   });
@@ -7461,6 +7494,8 @@ async function aplicarPedido(id, opt){
             origemAuto:'pedido de ' + tipoLabel(p.tipoExame).toLowerCase() +
                        (p.pedidoPor ? ' · ' + p.pedidoPor : '') +
                        ' · ' + fmtDate((p.pedidoEm||'').slice(0,10)) };
+      /* veio da equipe de admissão: a ficha já tem nascimento, sexo e contatos */
+      admEnriquecerColab(c);
       DB.colaboradores.push(c);
     }
   }
@@ -7883,6 +7918,8 @@ function historicoColabHTML(id){
         ems.filter(x => x.carteirinha).length + ' emitida(s)') : ''}
     ${c.afastamento ? campo('Afastamento', esc(c.afastamento)) : ''}
   </table>
+
+  ${admHistoricoHTML(c, secao, campo)}
 
   ${secao('3. Histórico de ASOs (' + asos.length + ')')}
   ${asos.length ? `<table class="grid">
@@ -13129,6 +13166,2579 @@ async function verificarIntegridade(){
   }catch(e){ toast('Não foi possível ler o arquivo: ' + e.message, 'erro'); }
 }
 
+/* ADM-INICIO */
+/* ═══════════════════════════ 9. ADMISSÕES ═══════════════════════════
+   Ficha de admissão, contrato e acompanhamento de experiência e férias.
+   Veio do "Sistema de Admissão Unificado" (arquivo avulso, que guardava tudo
+   no navegador de quem usava).
+
+   AS REGRAS, que valem mais que qualquer tela daqui:
+
+   1. Dado de RH não se mistura com dado de saúde. A ficha (banco, PIX, título,
+      filiação, dependentes) mora em atlas_admissao, nunca em DB — e por isso
+      nunca entra na linha da unidade nem na cópia de segurança do Drive.
+   2. Para o cadastro de colaboradores vai só o que o SST usa: nome, CPF, RG,
+      nascimento, sexo, contatos, unidade, função e admissão.
+   3. A equipe de admissão do cliente não lê dado de saúde nem escreve no
+      cadastro: o "inserir na base" dela é um pedido, que vira colaborador
+      quando a Atlas abre o sistema (admAplicarPendentes).
+   4. A ficha e o contrato são apagados 30 dias depois da emissão do contrato.
+      Quem apaga é o banco (sql/06); a tela só mostra o prazo.
+
+   Sem nuvem (build local) as admissões vivem só em memória, como os pedidos
+   das gerentes: melhor perdê-las ao recarregar do que gravar ficha em disco. */
+
+const ADM_CATALOGO = {
+    "Gerente financeiro": "planejar o orçamento, controlar despesas, analisar investimentos e elaborar relatórios contábeis",
+    "Gerente administrativo": "admitir, demitir, organizar escala e horários do quadro de funcionário, realizar as compras da loja, scanear os documentos quando solicitar, realizar a emissão de credenciamento de funcionários, realizar o acompanhamento nas funções para verificar o desenvolvimento de cada um, enviar as notas e boleto para contas a pagar, bem como todo e qualquer serviço que lhe solicitado que faça parte das obrigações do cargo gerencial.",
+    "Gerente RH": "conduzir recrutamento, treinamento, desenvolvimento e manter relações trabalhistas adequadas.",
+    "Gerente Juridico": " elaborar e revisar contratos, garantir conformidade legal e prestar suporte jurídico às áreas.",
+    "Gerente Comercial": "definir estratégias de vendas, estabelecer metas e acompanhar o desempenho do setor.",
+    "Gerente Geral": "alinhar estratégias, coordenar operações e garantir o cumprimento dos objetivos organizacionais.",
+    "Supervisor ADM": "scanear de todas notas fiscais, documentos de funcionários, credenciamento de funcionários e prestadores de serviço, entrega de holerites e conferência de pontos e demais funções relacionadas ao administrativo da base",
+    "Supervisor RH": "garantir o cumprimento das políticas da área, acompanhar admissões e desligamentos, e apoiar ações de desenvolvimento.",
+    "Analista de Compras": "cotar preços, negociar com fornecedores, emitir pedidos e controlar entregas.",
+    "Analista de marketing": "desenvolver campanhas, criar conteúdo, analisar resultados e promover a marca.",
+    "Auxiliar de escritório (aprendiz)": "organizar documentos, atender demandas internas e apoiar o setor.",
+    "Advogado": "elaborar e revisar contratos, garantir conformidade legal e prestar suporte jurídico às áreas.",
+    "Estoquista (aprendiz)": "recepcionar mercadorias, conferências, organização, verificar validades, organização da sala.",
+    "Recepcionista": "recepcionar, registrar a visita na maquineta/notebook e/ou outro meio que se fizer necessário, informações sobre o voo do cliente (hora e portão), receber/conferir mercadorias, atender o telefone, refazer o registro do cliente após 3 (três) horas",
+    "Recepcionista bilingüe": "recepcionar, registrar a visita na maquineta/notebook e/ou outro meio que se fizer necessário, informações sobre o voo do cliente (hora e portão), receber/conferir mercadorias, atender o telefone, refazer o registro do cliente após 3 (três) horas",
+    "Estoquista": "recepcionar mercadorias, conferências, organização, verificar validades, organização da sala",
+    "Líder Operacional ADM": "acompanhar metas, orientar equipes e garantir a qualidade dos serviços de copa e limpeza",
+    "Assitente Administrativo": "controlar documentos, apoiar reuniões e realizar atendimento interno.",
+    "Lider Operacional de Copa": "responsável por auxiliar e supervisionar toda a área de alimentação e preparo, garantindo o controle de temperatura das geladeiras e dos alimentos refrigerados, o controle de notas fiscais de alimentos frescos e o acompanhamento de todas as atividades realizadas em conjunto com as copeiras",
+    "Supervisor de Copa": "auxiliar e supervisionar toda a área de alimentação e preparo, responsável do controle de temperatura das geladeiras e alimentos refrigerados, controle de NF de alimentação fresca e todas as atividades realizadas juntamente com as copeiras",
+    "Barista": "manter o seu posto e as louças limpos, seguir as diretrizes de saúde e segurança, aderir a novas apresentações, verificar a máquina de café e reportar manutenção, servir vinhos, whisky e congêneres, preparar drinks alcoólicos ou não, abastecer geladeiras",
+    "Barman": "manter o seu posto e as louças limpos, seguir as diretrizes de saúde e segurança, aderir a novas apresentações, verificar a máquina de café e reportar manutenção, servir vinhos, whisky e congêneres, preparar drinks alcoólicos ou não, abastecer geladeiras",
+    "Copeira(o)": "organizar o buffet, café e bebidas, montar os pratos de exposição, assar, lavar louças em geral e de utilização de clientes, repor as bebidas e cafés do salão, organizar as geladeiras do estoque frio e balcão refrigerado, manter organizado o ambiente todo",
+    "Cozinheiro(a)": "organizar o buffet, café e bebidas, montar os pratos de exposição, assar, lavar louças em geral e de utilização de clientes, repor as bebidas e cafés do salão, organizar as geladeiras do estoque frio e balcão refrigerado, manter organizado o ambiente todo",
+    "Zelador(a)": "organizar o espaço, limpeza e auxiliar os clientes em caso precisem de ajuda, reposição de alimentos no buffet",
+    "Auxiliar de limpeza": "limpeza em geral, lavagem dos banheiros, troca das lixeiras e higienização das mesmas, abastecimento de papel higiênico e tolha nos banheiros, limpeza dos pés das mesa e estofados, levar o carrinho do lixo para dispensar no contêiner do aeroporto",
+    "Auxiliar de limpeza Banheirista": "Realizar limpeza geral, higienização de sanitários, pisos e superfícies, lavar banheiros, trocar e higienizar lixeiras, repor papel, sabão e toalhas, limpar mesas e estofados, eliminar resíduos, desinfetar áreas sensíveis e levar o lixo ao contêiner",
+    "Auxiliar de Cozinha": "responsável por auxiliar no pré-preparo, preparo e processamento de alimentos, realizando a higienização, corte e organização de ingredientes (mise en place). Atua na montagem de pratos, higienização de utensílios e organização do ambiente de trabalho",
+    "Auxiliar de Manutenção": "responsável por auxiliar na execução de serviços de manutenção preventiva e corretiva nas áreas de elétrica, hidráulica, pintura, marcenaria e alvenaria leve. Atua no transporte de ferramentas, substituição de peças simples, reparos em instalações e conservação geral da infraestrutura e equipamentos"
+};
+
+const ADM_CONTRATO_UNI = {
+    "CNF": { nomeFull: "ELEVATE ADVANTAGE SALA VIP LTDA - CNPJ 57.600.310/0004-07", sede: "ELEVATE ADVANTAGE SALA VIP LTDA, inscrita no CNPJ Nº 57.600.310/0004-07, com sede na RODOVIA LMG 800, KM 7,9, SETOR L. AR 3 PISO EMBAR, AEROPORTO CONFINS, CONFINS, MG", trabalho: "Aeroporto Internacional de Belo Horizonte - CNF, Rodovia LMG 800, Km 7,9, Setor L. AR 3 Piso Embar, CONFINS, MG", local: "Confins/MG" },
+    "VCP": { nomeFull: "ELEVATE ADVANTAGE SALA VIP LTDA - CNPJ 57.600.310/0003-26", sede: "ELEVATE ADVANTAGE SALA VIP LTDA, inscrita no CNPJ Nº 57.600.310/0003-26, com sede na Rodovia Santos Dumont, Km 66, Parque Viracopos, Campinas, SP", trabalho: "Aeroporto Internacional de Viracopos - VCP, Rod. Santos Dumont, Km 66 - Term. 1, Campinas - SP", local: "Campinas/SP" },
+    "RRJ": { nomeFull: "ELEVATE ADVANTAGE SALA VIP LTDA - CNPJ 57.600.310/0002-45", sede: "ELEVATE ADVANTAGE SALA VIP LTDA, inscrita no CNPJ Nº 57.600.310/0002-45, com sede na Av. Ayrton Senna 2541, Rio de Janeiro, RJ", trabalho: "Aeroporto Rio de Janeiro Jacarepaguá - RRJ, Av. Ayrton Senna 2541, Rio de Janeiro, RJ", local: "Rio de Janeiro/RJ" },
+    "MGF": { nomeFull: "ELEVATE ADVANTAGE SALA VIP LTDA - CNPJ 57.600.310/0006-79", sede: "ELEVATE ADVANTAGE SALA VIP LTDA, inscrita no CNPJ Nº 57.600.310/0006-79, com sede na Av. Doutor Vladimir Babkov, 900, Maringá, PR", trabalho: "Aeroporto Regional de Maringá - Silvio Name Júnior, Av. Doutor Vladimir Babkov, 900, Maringá, PR", local: "Maringá/PR" },
+    "MCZ": { nomeFull: "ADVT PLUS SALAS VIP LTDA - CNPJ 22.963.976/0010-93", sede: "ADVT PLUS SALAS VIP LTDA, inscrita no CNPJ nº 22.963.976/0010-93, com sede na ROD 104, PREFEITO ANTONIO LIN, RIO LARGO, AL", trabalho: "Aeroporto Internacional de Maceió - MCZ, Pavmto 2 - Lado Ar, Rio Largo, AL", local: "Rio Largo/AL" },
+    "CGH": { nomeFull: "ADVT PLUS SALAS VIP LTDA - CNPJ 22.963.976/0002-83", sede: "ADVT PLUS SALAS VIP LTDA, inscrita no CNPJ nº 22.963.976/0002-83, com sede na Avenida Washington Luís, 1, São Paulo, SP", trabalho: "Aeroporto Congonhas - CGH, Saguão Central, Piso 1, Vila Congonhas, São Paulo, SP", local: "São Paulo/SP" },
+    "GRU": { nomeFull: "ELEVATE ADVANTAGE SALA VIP LTDA - CNPJ 57.600.310/0005-98", sede: "ELEVATE ADVANTAGE SALA VIP LTDA, inscrita no CNPJ nº 57.600.310/0005-98, com sede na Rod. Hélio Smidt, Guarulhos, SP", trabalho: "Aeroporto Guarulhos - GRU, Setor Term. 2 oeste-mezanino, sala de embarque, Guarulhos, SP", local: "Guarulhos/SP" },
+    "JOI": { nomeFull: "ADVT PLUS SALAS VIP LTDA - CNPJ 22.963.976/0005-26", sede: "ADVT PLUS SALAS VIP LTDA, inscrita no CNPJ nº 22.963.976/0005-26, com sede na Av. Santos Dumont, 9000, Joinville, SC", trabalho: "Aeroporto de Joinville - JOI, Setor de Embarque Térreo, Aventureiro, Joinville, SC", local: "Joinville/SC" },
+    "SDU": { nomeFull: "ADVT PLUS SALAS VIP LTDA - CNPJ 22.963.976/0003-64", sede: "ADVT PLUS SALAS VIP LTDA, inscrita no CNPJ nº 22.963.976/0003-64, com sede na Av. PC Senador Salgado Filho, 1, Rio de Janeiro, RJ", trabalho: "Aeroporto Santos Dumont - SDU, Sala de embarque, Centro, Rio de Janeiro, RJ", local: "Rio de Janeiro/RJ" },
+    "CPV": { nomeFull: "ADVT PLUS SALAS VIP LTDA - CNPJ 22.963.976/0016-89", sede: "ADVT PLUS SALAS VIP LTDA, inscrita no CNPJ nº 22.963.976/0016-89, com sede na Av. Uberaba, Campina Grande, PB", trabalho: "Aeroporto de Campina Grande - CPV, Pav. 1 Mezanino Lado Terra, Campina Grande, PB", local: "Campina Grande/PB" },
+    "CWB": { nomeFull: "ADVT PLUS SALAS VIP LTDA - CNPJ 22.963.976/0001-00", sede: "ADVT PLUS SALAS VIP LTDA, inscrita no CNPJ nº 22.963.976/0001-00, com sede na Av. Rocha Pombo, 1, São José Dos Pinhais, PR", trabalho: "Aeroporto Afonso Pena - CWB (Nacional), Pav. 2 Sala Embarque, São José Dos Pinhais, PR", local: "São José dos Pinhais/PR" },
+    "CWB_INT": { nomeFull: "ADVT PLUS SALAS VIP LTDA - CNPJ 22.963.976/0001-00", sede: "ADVT PLUS SALAS VIP LTDA, inscrita no CNPJ nº 22.963.976/0001-00, com sede na Av. Rocha Pombo, S/N, São José Dos Pinhais, PR", trabalho: "Aeroporto Afonso Pena - CWB (Internacional), Setor Emb. Inter – Lado AR, São José Dos Pinhais, PR", local: "São José dos Pinhais/PR" },
+    "IGU": { nomeFull: "ADVT PLUS SALAS VIP LTDA - CNPJ 22.963.976/0004-45", sede: "ADVT PLUS SALAS VIP LTDA, inscrita no CNPJ nº 22.963.976/0004-45, com sede na Av. Das Cataratas, Foz do Iguaçu, PR", trabalho: "Aeroporto Foz do Iguaçu - IGU, Sala de embarque, Vila Yolanda, Foz do Iguaçu, PR", local: "Foz do Iguaçu/PR" },
+    "JPA": { nomeFull: "ADVT PLUS SALAS VIP LTDA - CNPJ 22.963.976/0012-55", sede: "ADVT PLUS SALAS VIP LTDA, inscrita no CNPJ nº 22.963.976/0012-55, com sede na Av. Marechal Rondon, João Pessoa, PB", trabalho: "Aeroporto Internacional de João Pessoa - JPA, Sala de embarque Pav. 1, João Pessoa, PB", local: "João Pessoa/PB" },
+    "CGR": { nomeFull: "ADVT PLUS SALAS VIP LTDA - CNPJ 22.963.976/0006-07", sede: "ADVT PLUS SALAS VIP LTDA, inscrita no CNPJ nº 22.963.976/0006-07, com sede na AV DUQUE DE CAXIAS, 4355, Campo Grande, MS", trabalho: "Aeroporto de Campo Grande - CGR, Saguão Central – Check-in, Campo Grande, MS", local: "Campo Grande/MS" },
+    "NAT": { nomeFull: "ADVT PLUS SALAS VIP LTDA - CNPJ 22.963.976/0013-36", sede: "ADVT PLUS SALAS VIP LTDA, inscrita no CNPJ nº 22.963.976/0013-36, com sede na Av. Ruy Pereira Dos Santos, 3100, São Gonçalo do Amarante, RN", trabalho: "Aeroporto Internacional de Natal - NAT, MZNINO3 - LADO AR, São Gonçalo do Amarante, RN", local: "São Gonçalo do Amarante/RN" },
+    "JDO": { nomeFull: "ADVT PLUS SALAS VIP LTDA - CNPJ 22.963.976/0015-06", sede: "ADVT PLUS SALAS VIP LTDA, inscrita no CNPJ nº 22.963.976/0015-06, com sede na Av. Governador Virgílio Távora, 4000, Juazeiro do Norte, CE", trabalho: "Aeroporto de Juazeiro do Norte - JDO, Térreo sala de embarque, Juazeiro do Norte, CE", local: "Juazeiro do Norte/CE" },
+    "JJD": { nomeFull: "ADVT PLUS SALAS VIP LTDA - CNPJ 22.963.976/0017-60", sede: "ADVT PLUS SALAS VIP LTDA, inscrita no CNPJ nº 22.963.976/0017-60, com sede na ROD. CE-085, 262, Cruz, CE", trabalho: "Aeroporto de Jericoacoara - JJD, Sala de Embarque Lado Ar, Cruz, CE", local: "Cruz/CE" },
+    "GYN": { nomeFull: "ELEVATE ADVANTAGE SALA VIP LTDA - CNPJ 57.600.310/0007-50", sede: "ELEVATE ADVANTAGE SALA VIP LTDA, inscrita no CNPJ nº 57.600.310/0007-50, com sede na Al. Aeroporto, 1160, Pavimento 01 Sala Embarque Domestico, Bairro Aeroporto Internacional Santa Genoveva, Goiânia, GO", trabalho: "Aeroporto Internacional Santa Genoveva - GYN, Pavimento 01 Sala Embarque Domestico, Goiânia, GO", local: "Goiânia/GO" },
+    "CGH_Emerald": { nomeFull: "ESMERALDA ADVANTAGE SALA VIP LTDA - CNPJ 61.812.224/0003-54", sede: "ESMERALDA ADVANTAGE SALA VIP LTDA, inscrita no CNPJ nº 61.812.224/0003-54, com sede na Av. Washington Luis, S/N, Setor Lado AR Sala Saguão Central Piso 1, Bairro Santo Amaro, São Paulo, SP", trabalho: "Aeroporto Congonhas - CGH, Saguão Central, Piso 1, Vila Congonhas, São Paulo, SP", local: "São Paulo/SP" },
+    "IGU_Emerald": { nomeFull: "ESMERALDA ADVANTAGE SALA VIP LTDA - CNPJ 61.812.224/0002-73", sede: "ESMERALDA ADVANTAGE SALA VIP LTDA, inscrita no CNPJ nº 61.812.224/0002-73, com sede na Av. Das Cataratas, Foz do Iguaçu, PR", trabalho: "Aeroporto Foz do Iguaçu - IGU, Sala de embarque, Vila Yolanda, Foz do Iguaçu, PR", local: "Foz do Iguaçu/PR" },
+    "SDU_Emerald": { nomeFull: "ESMERALDA ADVANTAGE SALA VIP LTDA - CNPJ 61.812.224/0004-35", sede: "ESMERALDA ADVANTAGE SALA VIP LTDA, inscrita no CNPJ nº 61.812.224/0004-35, com sede na Av. Almirante Silvio de Noronha, 365, Pavimento 1 Salas 303 e 304, Centro, Rio de Janeiro, RJ", trabalho: "Aeroporto Santos Dumont - SDU, Pavimento 1 Salas 303 e 304, Centro, Rio de Janeiro, RJ", local: "Rio de Janeiro/RJ" },
+    "CNF_RUBY HOTELS": { nomeFull: "RUBY HOTELS LTDA - CNPJ 61.180.593/0001-00", sede: "RUBY HOTELS LTDA, inscrita no CNPJ nº 61.180.593/0001-00, com sede na RODOVIA LMG 800, KM 7,9, SETOR LOUNGE-TERM PASS 01, AEROPORTO CONFINS, CONFINS, MG", trabalho: "Aeroporto Internacional de Belo Horizonte - CNF, Rodovia LMG 800, Km 7,9, SETOR LOUNGE-TERM PASS 01, CONFINS, MG", local: "Confins/MG" }
+};
+
+/* a unidade do Atlas acha o texto do contrato pelo CNPJ */
+const ADM_CONTRATO_POR_CNPJ = (() => {
+  const m = {};
+  Object.keys(ADM_CONTRATO_UNI).forEach(k => {
+    const cn = String((ADM_CONTRATO_UNI[k].nomeFull.match(/CNPJ\s+([\d.\/-]+)/) || [])[1] || '').replace(/\D/g, '');
+    if(cn && !m[cn]) m[cn] = k;      /* CWB vem antes de CWB_INT, que repete o CNPJ no texto */
+  });
+  m['22963976000950'] = 'CWB_INT';   /* no Atlas a sala internacional tem CNPJ próprio */
+  return m;
+})();
+
+/* cor da ficha por grupo, pela raiz do CNPJ: [faixa da unidade, cabeçalho] */
+const ADM_TEMAS = { '57600310':['#B8962E','#8D6E0E'], '22963976':['#7B5E45','#5D4037'],
+                    '61812224':['#1B6B4A','#0D4A32'], '61180593':['#9B111E','#6E0D16'] };
+
+const ADM_REGIMES = [
+  'Regime de Trabalho 6X1 - Jornada de trabalho Flexível de 7:20h - Pausa Refeição de 1 hora',
+  'Regime de Trabalho 12X36 - Jornada de trabalho Flexível de 12h - Pausa Refeição de 1 h',
+  'Regime de Trabalho 5X2 - Jornada de trabalho Flexível de 8:48h - Pausa Refeição de 1 h',
+  'Regime de Trabalho 5X2 - Jornada de trabalho Flexível de 4h - Pausa Refeição de 15min',
+  'Regime de Trabalho 5X2 - Jornada de trabalho Flexível de 4h - Sem Pausa Refeição',
+  'Regime de Trabalho 5X2 - Jornada de trabalho Flexível de 6h - Pausa Refeição de 15min'
+];
+
+/* [id, rótulo, largura em 6 colunas, tipo, dica] — a ordem é a da ficha impressa */
+const ADM_SECOES = [
+  { t:'Dados pessoais', c:[
+    ['f_nome','Nome completo',4], ['f_nasc','Data de nascimento',2,'date'],
+    ['f_natal','Local de nascimento',4,'','Cidade/Estado'], ['f_ecivil','Estado civil',2],
+    ['f_conjuge','Nome do cônjuge',4], ['f_cel','Celular (DDD)',2],
+    ['f_email','E-mail',4], ['f_recado','Tel. fixo ou recado',2] ] },
+  { t:'Endereço', c:[ ['f_end','Endereço completo',6] ] },
+  { t:'Documentos', c:[
+    ['f_rg','N° RG',2], ['f_orgao','Órgão emissor/Estado',2], ['f_exp','Data expedição',2,'date'],
+    ['f_cpf','N° CPF',2], ['f_pis','N° PIS',2], ['f_instrucao','Escolaridade',2,'','ENSINO FUNDAMENTAL COMPLETO'],
+    ['f_titulo','N° título de eleitor',2], ['f_zona','Zona',2], ['f_secao','Seção',2],
+    ['f_cnh','Carteira de habilitação/Estado',2], ['f_ctps','CTPS N°',2,'','DIGITAL'], ['f_ctps_s','Série - Estado',2],
+    ['f_ctps_uf','UF',2], ['f_ctps_emissao','Emissão CTPS',2] ] },
+  { t:'Filiação', c:[ ['f_pai','Nome do pai',3], ['f_mae','Nome da mãe',3] ] },
+  { t:'Dados bancários e vale-transporte', c:[
+    ['f_banco','Banco',2,'','Itaú'], ['f_ag','Agência',2], ['f_conta','Conta',2],
+    ['f_pix','Chave PIX',2], ['f_passes','N° passes/dia',2,'','2'], ['f_vt','Valor diário VT (R$)',2] ] }
+];
+const ADM_CAMPOS = ['f_funcao','f_salario','f_admissao']
+  .concat(...ADM_SECOES.map(s => s.c.map(x => x[0])));
+/* e-mail e PIX ficam como a pessoa digitou: chave PIX aleatória diferencia maiúscula */
+const ADM_SEM_CAIXA_ALTA = ['f_email','f_pix','f_nasc','f_exp','f_admissao'];
+const ADM_CHECKLIST = [['r_vt','Vale-transporte'], ['r_aso','Exame adm. ASO'],
+                       ['r_autodecl','Auto-declaração'], ['r_foto','Foto']];
+const ADM_DIAS_GUARDA = 30;
+
+/* ───────────── estado ───────────── */
+let ADMISSOES = [], FERIAS = [], CONTRATOS = [];
+let ADM_UNIS = null, ADM_QUADRO = null;       /* só para o perfil admissão (vêm por função do banco) */
+const UIAdm = { aba:'fichas', q:'', uni:'', page:1, pageAc:1, filtroAc:'', qAc:'', uniAc:'', edit:null };
+
+const admissao = id => ADMISSOES.find(a => a.id === id) || null;
+function admNovoId(){
+  try{ if(window.crypto && crypto.randomUUID) return crypto.randomUUID(); }catch(e){}
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random()*16|0; return (c === 'x' ? r : (r&0x3|0x8)).toString(16); });
+}
+function admCpfFmt(v){
+  const d = cpfDigitos(v);
+  return d.length === 11 ? d.slice(0,3)+'.'+d.slice(3,6)+'.'+d.slice(6,9)+'-'+d.slice(9) : String(v||'');
+}
+/* quem usa: o master (e o build local) lê de DB; a equipe de admissão não tem
+   DB nenhum — recebe do banco só o nome das unidades e o quadro básico */
+function admUnidades(){
+  if(ACESSO.admissao) return ADM_UNIS || [];
+  return (DB.unidades||[]).map(u => ({ id:u.id, nome:u.nome, sigla:u.sigla||'', cnpj:u.cnpj||'',
+    cidade:u.cidade||'', uf:u.uf||'', empresa:(emp(u.empresaId)||{}).nome || '' }));
+}
+function admUnidade(id){ return admUnidades().find(u => u.id === id) || null; }
+function admUniNome(id){ const u = admUnidade(id); return u ? u.nome : '—'; }
+function admUniRotulo(id){ const u = admUnidade(id); return u ? ((u.sigla ? u.sigla + ' - ' : '') + u.nome) : '—'; }
+function admQuadro(){
+  if(ACESSO.admissao) return ADM_QUADRO || [];
+  return (DB.colaboradores||[]).map(c => ({ unidadeId:c.unidadeId, id:c.id, nome:c.nome,
+    cpf:cpfDigitos(c.cpf), funcao:c.funcao||'', admissao:c.admissao||'', status:c.status||'' }));
+}
+function admContratoUni(unidadeId){
+  const u = admUnidade(unidadeId);
+  const k = u ? ADM_CONTRATO_POR_CNPJ[cpfDigitos(u.cnpj)] : '';
+  return k ? Object.assign({ chave:k }, ADM_CONTRATO_UNI[k]) : null;
+}
+function admTema(unidadeId){
+  const u = admUnidade(unidadeId);
+  return ADM_TEMAS[cpfDigitos(u && u.cnpj).slice(0,8)] || ['#546E7A','#37474F'];
+}
+function admDescricaoFuncao(func){
+  if(!func) return '';
+  const alvo = String(func).trim().toLowerCase();
+  const k = Object.keys(ADM_CATALOGO).find(x => x.trim().toLowerCase() === alvo);
+  return k ? ADM_CATALOGO[k] : '';
+}
+/* já está no cadastro? pelo vínculo gravado ou, na falta dele, pelo CPF */
+function admNoCadastro(a){
+  if(!a) return null;
+  const q = admQuadro();
+  return (a.colaboradorId && q.find(c => c.id === a.colaboradorId)) ||
+         q.find(c => c.cpf && c.cpf === cpfDigitos(a.cpf)) || null;
+}
+function admContratoDe(a){ return CONTRATOS.find(c => c.admissaoId === a.id) || null; }
+/* dia em que a ficha e o contrato são apagados ('' enquanto não há contrato) */
+function admApagaEm(a){ return a.contratoEm ? addDays(String(a.contratoEm).slice(0,10), ADM_DIAS_GUARDA) : ''; }
+
+/* ───────────── nuvem ───────────── */
+function admDaLinha(r){
+  return { id:r.id, unidadeId:r.unidade_id, cpf:r.cpf || '', nome:r.nome || '', funcao:r.funcao || '',
+           admissao:r.admissao || '', sst:r.sst || {}, ficha:r.ficha || null,
+           fichaEm:r.ficha_em || '', contratoEm:r.contrato_em || '',
+           cadastroPedidoEm:r.cadastro_pedido_em || '', cadastroPedidoPor:r.cadastro_pedido_por || '',
+           colaboradorId:r.colaborador_id || '', asoPedidoEm:r.aso_pedido_em || '',
+           expurgadoEm:r.expurgado_em || '', criadoPor:r.criado_por || '', criadoEm:r.criado_em || '' };
+}
+function linhaDaAdm(a){
+  return { id:a.id, unidade_id:a.unidadeId, cpf:cpfDigitos(a.cpf), nome:a.nome, funcao:a.funcao || null,
+           admissao:a.admissao || null, sst:a.sst || {}, ficha:a.ficha || null,
+           ficha_em:a.fichaEm || null, contrato_em:a.contratoEm || null,
+           cadastro_pedido_em:a.cadastroPedidoEm || null, cadastro_pedido_por:a.cadastroPedidoPor || null,
+           colaborador_id:a.colaboradorId || null, aso_pedido_em:a.asoPedidoEm || null,
+           criado_por:a.criadoPor || String(SESSAO.email||'').toLowerCase(),
+           atualizado_por:String(SESSAO.email||'').toLowerCase(), atualizado_em:new Date().toISOString() };
+}
+const admContratoDaLinha = r => ({ id:r.id, admissaoId:r.admissao_id, unidadeId:r.unidade_id, nome:r.nome || '',
+  dados:r.dados || {}, emitidoEm:r.emitido_em || '', emitidoPor:r.emitido_por || '', disponivelAte:r.disponivel_ate || '' });
+const admFeriasDaLinha = r => ({ id:r.id, unidadeId:r.unidade_id, cpf:r.cpf || '', nome:r.nome || '',
+  inicio:r.inicio || '', fim:r.fim || '', abono:Number(r.abono)||0, observacao:r.observacao || '' });
+
+/* grava UMA admissão. A linha é só dela: ninguém regrava documento de ninguém.
+   `completa` só vem do formulário. Os outros salvamentos (data da ficha, do
+   contrato, pedidos, vínculo) mandam apenas os carimbos — nunca a ficha: uma
+   sessão aberta desde antes do expurgo regravaria o dado de RH que o banco
+   acabou de apagar. */
+async function admSalvar(a, completa){
+  if(!nuvemLigada()) return { ok:true };
+  try{
+    const l = linhaDaAdm(a);
+    let r;
+    if(completa) r = await sb.from('atlas_admissao').upsert(l, { onConflict:'id' });
+    else r = await sb.from('atlas_admissao').update({
+      ficha_em:l.ficha_em, contrato_em:l.contrato_em, cadastro_pedido_em:l.cadastro_pedido_em,
+      cadastro_pedido_por:l.cadastro_pedido_por, colaborador_id:l.colaborador_id, aso_pedido_em:l.aso_pedido_em,
+      atualizado_por:l.atualizado_por, atualizado_em:l.atualizado_em }).eq('id', a.id);
+    if(r.error) return { ok:false, motivo:r.error.message };
+    return { ok:true };
+  }catch(e){ return { ok:false, motivo:String(e && e.message || e) }; }
+}
+function admAvisarFalha(r, oQue){
+  if(r && r.ok) return false;
+  toast('NÃO consegui gravar ' + oQue + ' na nuvem: ' + ((r && r.motivo) || 'motivo desconhecido') +
+        '. Não feche a página e tente de novo.', 'erro');
+  return true;
+}
+
+async function admCarregar(){
+  if(!nuvemLigada()) return;
+  const ler = async (tabela, mapa, ordem) => {
+    try{
+      const { data, error } = await sb.from(tabela).select('*').order(ordem, { ascending:false });
+      if(error){ console.warn('admCarregar/' + tabela, error.message); return null; }
+      return (data || []).map(mapa);
+    }catch(e){ console.warn('admCarregar/' + tabela, e); return null; }
+  };
+  /* a gerente só recebe contrato — e a política do banco já corta pelo prazo */
+  const cs = await ler('atlas_contrato', admContratoDaLinha, 'emitido_em');
+  if(cs) CONTRATOS = cs;
+  if(ACESSO.gerente) return;
+  const as = await ler('atlas_admissao', admDaLinha, 'criado_em');
+  if(as) ADMISSOES = as;
+  const fs = await ler('atlas_ferias', admFeriasDaLinha, 'inicio');
+  if(fs) FERIAS = fs;
+  if(ACESSO.admissao){
+    try{
+      const u = await sb.rpc('atlas_admissao_unidades');
+      if(!u.error) ADM_UNIS = (u.data || []).map(x => ({ id:x.unidade_id, nome:x.nome || x.unidade_id,
+        sigla:x.sigla || '', cnpj:x.cnpj || '', cidade:x.cidade || '', uf:x.uf || '', empresa:x.empresa || '' }));
+      const q = await sb.rpc('atlas_admissao_quadro');
+      if(!q.error) ADM_QUADRO = (q.data || []).map(x => ({ unidadeId:x.unidade_id, id:x.colaborador_id,
+        nome:x.nome || '', cpf:x.cpf || '', funcao:x.funcao || '', admissao:x.admissao || '', status:x.status || '' }));
+    }catch(e){ console.warn('admCarregar/quadro', e); }
+  }
+}
+
+/* chamado uma vez no arranque, depois que o acesso já foi decidido */
+async function admIniciar(){
+  if(CLOUD_ON && (ACESSO.irrestrito || ACESSO.admissao || ACESSO.gerente)){
+    /* o prazo de guarda é cumprido antes de qualquer leitura */
+    if(!ACESSO.gerente){ try{ await comLimite(sb.rpc('atlas_admissao_expurgo'), 5000); }catch(e){} }
+    await comLimite(admCarregar(), 10000);
+  }
+  if(ACESSO.irrestrito && (!CLOUD_ON || NUVEM_PARTIDA)){
+    admCriarUnidadesFaltantes();
+    await admAplicarPendentes();
+  }
+}
+
+/* ───────────── unidades que o sistema de admissão tinha e o Atlas não ─────────────
+   Roda uma vez (DB.unidadesAdmVersao). Confere pelo CNPJ antes de criar: se a
+   unidade já existe com outro id, não duplica. A empresa é achada pela raiz do
+   CNPJ; só a Ruby Hotels não existia. Unidade nova nasce sem clínica e sem
+   ninguém liberado para vê-la, como qualquer outra. */
+const ADM_UNIDADES_NOVAS = [
+  { id:'GRU', sigla:'GRU', nome:'Elevate - Sala Guarulhos',        cnpj:'57.600.310/0005-98', cidade:'Guarulhos',       uf:'SP', aliases:['GRU','Guarulhos'] },
+  { id:'VCP', sigla:'VCP', nome:'Elevate - Sala Campinas',         cnpj:'57.600.310/0003-26', cidade:'Campinas',        uf:'SP', aliases:['VCP','Viracopos','Campinas'] },
+  { id:'GYN', sigla:'GYN', nome:'Elevate - Sala Goiânia',          cnpj:'57.600.310/0007-50', cidade:'Goiânia',         uf:'GO', aliases:['GYN','Goiânia','Goiania'] },
+  { id:'MCZ', sigla:'MCZ', nome:'Advantage - Sala Maceió',         cnpj:'22.963.976/0010-93', cidade:'Rio Largo',       uf:'AL', aliases:['MCZ','Maceió','Maceio'] },
+  { id:'SDU', sigla:'SDU', nome:'Advantage - Sala Santos Dumont',  cnpj:'22.963.976/0003-64', cidade:'Rio de Janeiro',  uf:'RJ', aliases:['SDU','Santos Dumont'] },
+  { id:'CPV', sigla:'CPV', nome:'Advantage - Sala Campina Grande', cnpj:'22.963.976/0016-89', cidade:'Campina Grande',  uf:'PB', aliases:['CPV','Campina Grande'] },
+  { id:'IGU', sigla:'IGU', nome:'Advantage - Sala Foz do Iguaçu',  cnpj:'22.963.976/0004-45', cidade:'Foz do Iguaçu',   uf:'PR', aliases:['IGU','Foz do Iguaçu','Foz'] },
+  { id:'JJD', sigla:'JJD', nome:'Advantage - Sala Jericoacoara',   cnpj:'22.963.976/0017-60', cidade:'Cruz',            uf:'CE', aliases:['JJD','Jericoacoara'] },
+  { id:'CGHE', sigla:'CGH - E', nome:'Emerald - CGH',              cnpj:'61.812.224/0003-54', cidade:'São Paulo',       uf:'SP', aliases:['CGH - E','Emerald-CGH'] },
+  { id:'IGUE', sigla:'IGU - E', nome:'Emerald - IGU',              cnpj:'61.812.224/0002-73', cidade:'Foz do Iguaçu',   uf:'PR', aliases:['IGU - E','Emerald-IGU'] },
+  { id:'CNFRUBY', sigla:'CNF - RUBY', nome:'Ruby Hotels - Confins', cnpj:'61.180.593/0001-00', cidade:'Confins',        uf:'MG', aliases:['CNF - RUBY','Ruby Hotels'],
+    empresaNova:{ id:'ruby', nome:'Ruby Hotels', razaoSocial:'RUBY HOTELS LTDA', cnpj:'61.180.593/0001-00',
+                  grupo:'', emailNotificacao:'', emailsCopia:'' } }
+];
+function admCriarUnidadesFaltantes(){
+  if(Number(DB.unidadesAdmVersao) >= 1) return 0;
+  /* base sem nenhuma empresa do grupo (um build local de outro cliente): não é aqui */
+  const raiz = v => cpfDigitos(v).slice(0,8);
+  const empresaDaRaiz = r => (DB.empresas||[]).find(e => raiz(e.cnpj) === r) ||
+    (DB.empresas||[]).find(e => (DB.unidades||[]).some(u => u.empresaId === e.id && raiz(u.cnpj) === r)) || null;
+  if(!empresaDaRaiz('22963976') && !empresaDaRaiz('57600310')) return 0;
+  let n = 0;
+  ADM_UNIDADES_NOVAS.forEach(x => {
+    const cn = cpfDigitos(x.cnpj);
+    if((DB.unidades||[]).some(u => u.id === x.id || cpfDigitos(u.cnpj) === cn)) return;
+    let e = empresaDaRaiz(raiz(x.cnpj));
+    if(!e && x.empresaNova){
+      e = (DB.empresas||[]).find(y => y.id === x.empresaNova.id) || null;
+      if(!e){ e = Object.assign({}, x.empresaNova); DB.empresas.push(e); }
+    }
+    if(!e) return;
+    DB.unidades.push({ id:x.id, nome:x.nome, sigla:x.sigla, cnpj:x.cnpj, cidade:x.cidade, uf:x.uf,
+                       aba:'', aliases:x.aliases.slice(), empresaId:e.id, carteirinhaFuncoes:[] });
+    n++;
+  });
+  DB.unidadesAdmVersao = 1;
+  save();
+  if(n) setTimeout(() => toast(n + ' unidade(s) do sistema de admissão foram criadas em Clientes e locais.', 'info'), 1500);
+  return n;
+}
+
+/* ───────────── o que da ficha vai para o cadastro (e só isto) ───────────── */
+function admParaColab(a){
+  const s = a.sst || {};
+  const canon = funcaoCanonica(a.funcao || '');
+  const noCatalogo = funcoesCanonicasCadastradas().some(f => norm(f) === norm(canon));
+  return { nome:maiusc(a.nome), cpf:admCpfFmt(a.cpf), rg:s.rg || '', nascimento:s.nascimento || '',
+           sexo:s.sexo || '', celular:s.celular || '', telefone:s.telefone || '', email:s.email || '',
+           unidadeId:a.unidadeId, funcao: noCatalogo ? canon : '', admissao:a.admissao || '', status:'Ativo' };
+}
+/* completa uma ficha que nasceu magra de um pedido, sem pisar no que já existe */
+function admEnriquecerColab(c){
+  const a = ADMISSOES.find(x => cpfDigitos(x.cpf) === cpfDigitos(c.cpf));
+  if(!a) return;
+  const v = admParaColab(a);
+  ['rg','nascimento','sexo','celular','telefone','email','admissao'].forEach(k => { if(!c[k] && v[k]) c[k] = v[k]; });
+  if(!a.colaboradorId){ a.colaboradorId = c.id; admSalvar(a); }
+}
+/* Os "inserir na base" pedidos pela equipe de admissão viram colaborador aqui,
+   na sessão de quem grava o cadastro. Nascem marcados para revisão, como todo
+   cadastro que não foi digitado pela Atlas. */
+async function admAplicarPendentes(){
+  if(!ACESSO.irrestrito) return 0;
+  const pend = ADMISSOES.filter(a => a.cadastroPedidoEm && !a.colaboradorId);
+  if(!pend.length) return 0;
+  let novos = 0;
+  pend.forEach(a => {
+    if(!uni(a.unidadeId)) return;
+    let c = colabPorCpf(a.cpf, null);
+    if(!c){
+      if(!cpfValido(a.cpf)) return;
+      const v = admParaColab(a);
+      c = Object.assign({ id:uid('col'), local:'' }, v, {
+        funcao: v.funcao || a.funcao || '', revisar:true,
+        origemAuto:'ficha de admissão' + (a.cadastroPedidoPor ? ' · ' + a.cadastroPedidoPor : '') +
+                   ' · ' + fmtDate(String(a.cadastroPedidoEm).slice(0,10)) });
+      DB.colaboradores.push(c);
+      novos++;
+    }
+    a.colaboradorId = c.id;
+  });
+  save();
+  for(const a of pend){ if(a.colaboradorId) await admSalvar(a); }
+  if(novos) setTimeout(() => toast(novos + ' colaborador(es) vindos das admissões entraram no cadastro — ' +
+                                   'estão marcados para revisão em Colaboradores.', 'info'), 2200);
+  return novos;
+}
+
+/* confirmação com Sim/Não de verdade (o confirm() do navegador diz OK/Cancelar) */
+let _admSim = null;
+function admConfirmar(titulo, html, rotuloSim, aoConfirmar){
+  openInfo(titulo, `<div class="text-sm text-slate-700 space-y-2">${html}</div>`, 'max-w-lg');
+  _admSim = aoConfirmar;
+  $('#modalFoot').innerHTML = `
+    <button onclick="closeModal()" class="px-4 py-2 rounded-lg text-sm text-slate-600 hover:bg-slate-100">Não</button>
+    <button onclick="admSim()" class="px-4 py-2 rounded-lg text-sm bg-accent text-white hover:bg-blue-700">${esc(rotuloSim || 'Sim')}</button>`;
+}
+function admSim(){ const f = _admSim; _admSim = null; closeModal(); if(f) f(); }
+
+/* ═════════ a tela ═════════ */
+function abaAdm(id){ UIAdm.aba = id; UIAdm.edit = null; viewAdmissoes(); }
+function viewAdmissoes(){
+  if(!(ACESSO.irrestrito || ACESSO.admissao)){ telaSemAcesso(); return; }
+  if(UIAdm.edit){ admRenderForm(); return; }
+  const abas = [
+    { id:'fichas', label:'Admissões', icon:'fa-id-card', n: ADMISSOES.length },
+    { id:'acompanhar', label:'Experiência e férias', icon:'fa-calendar-check',
+      n: admAlertas(), tom:'alerta' }
+  ];
+  if(!abas.some(a => a.id === UIAdm.aba)) UIAdm.aba = 'fichas';
+  $('#view').innerHTML = `
+    <div class="space-y-4">
+      ${!admUnidades().length ? `<div class="rounded-xl border border-amber-300 bg-amber-50 px-5 py-4 text-sm text-amber-900">
+        <i class="fa-solid fa-triangle-exclamation mr-1"></i>Nenhuma unidade liberada para este login.
+        Peça a liberação a quem administra o Atlas.</div>` : ''}
+      ${barraAbas(abas, UIAdm.aba, id => `abaAdm('${id}')`)}
+      <div id="abaAdm"></div>
+    </div>`;
+  (UIAdm.aba === 'fichas' ? admFichas : admAcompanhar)();
+}
+
+function admSituacao(a){
+  const b = [];
+  if(a.expurgadoEm) b.push(badge('dados de RH apagados em ' + fmtDate(String(a.expurgadoEm).slice(0,10)), 'bg-slate-100 text-slate-500'));
+  else if(a.contratoEm){
+    const fim = admApagaEm(a), d = diasPara(fim);
+    b.push(badge('contrato emitido ' + fmtDate(String(a.contratoEm).slice(0,10)), 'bg-emerald-100 text-emerald-700'));
+    b.push(badge(d !== null && d >= 0 ? 'ficha apaga em ' + d + ' dia(s)' : 'ficha no prazo de apagar',
+                 d !== null && d <= 7 ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600'));
+  }
+  else if(a.fichaEm) b.push(badge('ficha gerada', 'bg-blue-100 text-blue-700'));
+  else b.push(badge('em preenchimento', 'bg-slate-100 text-slate-600'));
+  if(admNoCadastro(a)) b.push(badge('no cadastro', 'bg-emerald-100 text-emerald-700'));
+  else if(a.cadastroPedidoEm) b.push(badge('cadastro aguardando a Atlas', 'bg-indigo-100 text-indigo-700'));
+  if(a.asoPedidoEm) b.push(badge('ASO pedido', 'bg-emerald-100 text-emerald-700'));
+  return b.join(' ');
+}
+
+function admFichas(){
+  const q = norm(UIAdm.q), qd = cpfDigitos(UIAdm.q);
+  const lista = ADMISSOES.filter(a => {
+    if(UIAdm.uni && a.unidadeId !== UIAdm.uni) return false;
+    if(!UIAdm.q) return true;
+    return norm(a.nome).includes(q) || (qd && cpfDigitos(a.cpf).includes(qd));
+  }).sort((a,b) => String(b.criadoEm||'').localeCompare(String(a.criadoEm||'')));
+  const pg = paginar(lista, UIAdm.page);
+  const bt = (icone, titulo, onclick, cls) => `<button onclick="${onclick}" title="${titulo}"
+      class="text-slate-400 ${cls || 'hover:text-accent'} px-1.5"><i class="fa-solid ${icone}"></i></button>`;
+  const linhas = pg.itens.map(a => {
+    const morta = !!a.expurgadoEm;
+    return `<tr class="hover:bg-slate-50 align-top">
+      <td class="px-4 py-3 font-medium text-slate-700">${esc(a.nome || '—')}
+        <div class="text-[11px] text-slate-500 font-normal">${esc(a.funcao || 'sem função')}</div></td>
+      <td class="px-4 py-3 text-xs text-slate-600 whitespace-nowrap">${esc(admCpfFmt(a.cpf))}</td>
+      <td class="px-4 py-3 text-xs text-slate-600">${esc(admUniNome(a.unidadeId))}</td>
+      <td class="px-4 py-3 text-xs text-slate-600 whitespace-nowrap">${a.admissao ? fmtDate(a.admissao) : '—'}</td>
+      <td class="px-4 py-3 text-xs space-y-1">${admSituacao(a)}</td>
+      <td class="px-4 py-3 text-right whitespace-nowrap no-print">
+        ${morta ? '' : bt('fa-pen', 'Abrir a ficha', `admEditar('${a.id}')`)}
+        ${morta ? '' : bt('fa-file-lines', 'Visualizar / imprimir a ficha', `admImprimirFicha('${a.id}')`)}
+        ${morta ? '' : bt('fa-file-signature', 'Contrato', `admAbrirContrato('${a.id}')`)}
+        ${admNoCadastro(a) || a.cadastroPedidoEm ? '' : bt('fa-user-plus', 'Inserir na base de colaboradores', `admCadastrar('${a.id}')`)}
+        ${a.asoPedidoEm ? '' : bt('fa-notes-medical', 'Solicitar ASO admissional', `admPedirAso('${a.id}')`, 'hover:text-emerald-600')}
+        ${bt('fa-trash', 'Excluir esta admissão', `admExcluir('${a.id}')`, 'hover:text-danger')}
+      </td></tr>`;
+  }).join('');
+  $('#abaAdm').innerHTML = `
+    <div class="space-y-4">
+      <div class="rounded-xl border border-blue-200 bg-blue-50 px-5 py-3 text-xs text-blue-900 flex items-start gap-3">
+        <i class="fa-solid fa-shield-halved mt-0.5"></i>
+        <div>A ficha guarda dados de RH (banco, PIX, documentos, dependentes). Eles ficam aqui até o contrato ser
+          emitido e por mais <b>${ADM_DIAS_GUARDA} dias</b> — depois são apagados automaticamente.
+          Para o cadastro de colaboradores vai só o que a medicina do trabalho usa.</div>
+      </div>
+      <div class="bg-white rounded-xl border border-slate-200">
+        ${barraFiltros([
+            inputBusca('admBusca', 'Buscar por nome ou CPF...', "UIAdm.q=this.value;UIAdm.page=1;admFichas();focarBusca('admBusca')", UIAdm.q, COL6),
+            selectFiltro('admUni', 'Todas as unidades', admUnidades().map(u => ({ v:u.id, l:u.nome })),
+                         "UIAdm.uni=this.value;UIAdm.page=1;admFichas()", UIAdm.uni, COL6)
+          ],
+          [ botao('Nova admissão', 'fa-plus', 'admNova()') ],
+          { ativo: !!(UIAdm.q || UIAdm.uni), onClick:"UIAdm.q='';UIAdm.uni='';UIAdm.page=1;admFichas()" })}
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm data">
+            <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
+              <tr><th class="px-4 py-3">Nome</th><th class="px-4 py-3">CPF</th><th class="px-4 py-3">Unidade</th>
+                  <th class="px-4 py-3">Admissão</th><th class="px-4 py-3">Situação</th>
+                  <th class="px-4 py-3 text-right no-print">Ações</th></tr></thead>
+            <tbody class="divide-y divide-slate-100">
+              ${lista.length ? linhas : vazio(ADMISSOES.length ? 'Nenhuma admissão encontrada para este filtro.'
+                                                               : 'Nenhuma admissão ainda — clique em "Nova admissão" para começar.')}
+            </tbody></table>
+        </div>
+        ${paginador(lista.length, pg.p, 'admPagina')}
+      </div>
+    </div>`;
+}
+function admPagina(p){ UIAdm.page = p; admFichas(); }
+
+/* ═════════ a ficha (formulário) ═════════
+   O formulário é desenhado UMA vez e lido do DOM ao salvar — redesenhar a cada
+   tecla apagaria o que a pessoa está digitando. */
+function admNova(){
+  if(!admUnidades().length){ toast('Nenhuma unidade liberada para este login.', 'erro'); return; }
+  UIAdm.edit = { id:'', nova:true };
+  admRenderForm();
+}
+function admEditar(id){
+  const a = admissao(id); if(!a) return;
+  if(a.expurgadoEm){ toast('Os dados desta ficha já foram apagados pelo prazo de guarda.', 'alerta'); return; }
+  UIAdm.edit = { id };
+  registrarAtividade('abriu_ficha_admissao', { admissao_id:id });
+  admRenderForm();
+}
+function admFecharForm(){ UIAdm.edit = null; viewAdmissoes(); window.scrollTo(0,0); }
+
+const ADM_CLS_CAMPO = 'adm-campo w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent';
+function admCor(el){
+  const vazio = !String(el.value||'').trim();
+  el.classList.toggle('border-amber-400', vazio);
+  el.classList.toggle('bg-amber-50', vazio);
+}
+function admCampoHTML(c, valor){
+  const [id, rot, larg, tipo, ph] = c;
+  const caixa = ADM_SEM_CAIXA_ALTA.indexOf(id) >= 0 ? '' : 'uppercase';
+  return `<div style="grid-column:span ${larg || 2} / span ${larg || 2}" class="max-sm:!col-span-6">
+    <label class="block text-xs font-medium text-slate-600 mb-1">${esc(rot)}</label>
+    <input id="adm_${id}" type="${tipo || 'text'}" value="${esc(valor || '')}" placeholder="${esc(ph || '')}"
+      oninput="admCor(this)" ${tipo === 'date' ? 'onpaste="colarData(event)"' : ''} autocomplete="off"
+      class="${ADM_CLS_CAMPO} ${caixa}"></div>`;
+}
+function admDepLinha(d){
+  d = d || {};
+  return `<tr>
+    <td class="p-1"><input value="${esc(d.nome||'')}" placeholder="Nome" class="${ADM_CLS_CAMPO} uppercase"></td>
+    <td class="p-1"><input type="date" value="${esc(d.nasc||'')}" onpaste="colarData(event)" class="${ADM_CLS_CAMPO}"></td>
+    <td class="p-1"><input value="${esc(d.cpf||'')}" placeholder="CPF" class="${ADM_CLS_CAMPO}"></td>
+    <td class="p-1"><input value="${esc(d.par||'Filho(a)')}" class="${ADM_CLS_CAMPO}"></td>
+    <td class="p-1 text-center"><button type="button" onclick="this.closest('tr').remove()"
+      class="text-slate-400 hover:text-danger px-2" title="Remover"><i class="fa-solid fa-xmark"></i></button></td></tr>`;
+}
+function admAddDep(d){ $('#admDeps').insertAdjacentHTML('beforeend', admDepLinha(d)); }
+
+function admRenderForm(manterRolagem){
+  const a = UIAdm.edit.id ? admissao(UIAdm.edit.id) : null;
+  const f = (a && a.ficha) || {};
+  const campos = f.campos || {}, checks = f.checks || { cb1:true, cb2:true }, radios = f.radios || {};
+  const s = (a && a.sst) || {};
+  const val = id => campos[id] != null ? campos[id] : (id === 'f_orgao' ? 'SSP/' : '');
+  const unis = admUnidades();
+  const uniSel = a ? a.unidadeId : (unis.length === 1 ? unis[0].id : '');
+  const radio = (nome, v, rot, marcado) => `<label class="flex items-center gap-2 text-sm cursor-pointer">
+    <input type="radio" name="adm_${nome}" value="${esc(v)}" ${marcado ? 'checked' : ''}
+      class="w-4 h-4 border-slate-300 text-accent focus:ring-accent">${esc(rot)}</label>`;
+  const caixa = (t, corpo) => `<div class="bg-white rounded-xl border border-slate-200 p-5">
+    <p class="text-xs font-semibold uppercase tracking-wide text-slate-400 border-b border-slate-200 pb-1 mb-3">${esc(t)}</p>${corpo}</div>`;
+  const regime = radios.r_regime || ADM_REGIMES[0];
+  const deps = (f.deps && f.deps.length) ? f.deps : [{}, {}];
+
+  $('#pageSub').textContent = a ? 'Ficha de ' + (a.nome || '—') : 'Nova admissão';
+  $('#view').innerHTML = `
+    <div class="space-y-4 max-w-5xl">
+      <div class="flex flex-wrap items-center gap-2 no-print">
+        ${botao('Voltar', 'fa-arrow-left', 'admFecharForm()', 'bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
+        <span class="text-sm font-semibold text-slate-700">${a ? esc(a.nome || 'Ficha') : 'Nova admissão'}</span>
+        ${a ? `<span class="ml-auto text-xs">${admSituacao(a)}</span>` : ''}
+      </div>
+
+      ${caixa('Unidade e importação', `
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs font-medium text-slate-600 mb-1">Unidade de trabalho <span class="text-danger">*</span></label>
+            <select id="adm_unidade" class="${ADM_CLS_CAMPO}">
+              <option value="">— selecione —</option>
+              ${unis.slice().sort((x,y) => x.nome.localeCompare(y.nome,'pt-BR')).map(u =>
+                `<option value="${esc(u.id)}" ${u.id === uniSel ? 'selected' : ''}>${esc((u.sigla ? u.sigla + ' - ' : '') + u.nome)}</option>`).join('')}
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-slate-600 mb-1">Resposta do candidato (PDF do formulário)</label>
+            <label class="flex items-center gap-3 px-3 py-2 rounded-lg border-2 border-dashed border-slate-300 cursor-pointer hover:border-accent hover:bg-slate-50">
+              <i class="fa-solid fa-file-arrow-up text-slate-400"></i>
+              <span id="admPdfRot" class="text-sm text-slate-600">Carregar PDF para preencher a ficha</span>
+              <input type="file" accept=".pdf" class="hidden" onchange="admImportarPdf(this)">
+            </label>
+            <p id="admPdfMsg" class="text-[11px] text-slate-500 mt-1">O PDF é lido aqui no seu navegador e não é enviado nem guardado.</p>
+          </div>
+        </div>
+        <p class="text-[11px] text-slate-500 mt-3"><span class="inline-block w-3 h-3 rounded border border-amber-400 bg-amber-50 align-middle mr-1"></span>
+          Campo em amarelo = vazio, para conferir ou preencher à mão.</p>`)}
+
+      ${caixa('Cargo e contrato', `
+        <div class="grid grid-cols-6 gap-4">
+          <div class="col-span-6 sm:col-span-3">
+            <label class="block text-xs font-medium text-slate-600 mb-1">Função / cargo</label>
+            <input id="adm_f_funcao" list="admListaFuncoes" value="${esc(val('f_funcao'))}" oninput="admCor(this)" autocomplete="off" class="${ADM_CLS_CAMPO} uppercase">
+            <datalist id="admListaFuncoes">${Object.keys(ADM_CATALOGO).map(k => `<option value="${esc(k)}">`).join('')}</datalist>
+          </div>
+          ${admCampoHTML(['f_salario','Salário (R$)',1,'','00,00'], val('f_salario'))}
+          ${admCampoHTML(['f_admissao','Data de admissão',2,'date'], val('f_admissao') || (a ? '' : isoToday()))}
+          <div class="col-span-6 sm:col-span-2">
+            <label class="block text-xs font-medium text-slate-600 mb-1">Sexo</label>
+            <select id="adm_sexo" class="${ADM_CLS_CAMPO}">
+              <option value="">— selecione —</option>
+              <option value="F" ${s.sexo === 'F' ? 'selected' : ''}>Feminino</option>
+              <option value="M" ${s.sexo === 'M' ? 'selected' : ''}>Masculino</option>
+            </select>
+            <p class="text-[11px] text-slate-400 mt-1">não sai na ficha — define os exames da medicina do trabalho</p>
+          </div>
+        </div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-4">
+          <div class="rounded-lg border border-slate-200 p-3 space-y-2">
+            <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Contrato de experiência</p>
+            <label class="flex items-center gap-2 text-sm"><input type="checkbox" id="adm_cb1" ${checks.cb1 ? 'checked' : ''}
+              class="w-4 h-4 rounded border-slate-300 text-accent focus:ring-accent">1° período: 45 dias</label>
+            <label class="flex items-center gap-2 text-sm"><input type="checkbox" id="adm_cb2" ${checks.cb2 ? 'checked' : ''}
+              class="w-4 h-4 rounded border-slate-300 text-accent focus:ring-accent">Prorrogado automaticamente por mais 45 dias</label>
+          </div>
+          <div class="rounded-lg border border-slate-200 p-3 space-y-2">
+            <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Regime de trabalho</p>
+            ${ADM_REGIMES.map(r => radio('r_regime', r, r.replace('Regime de Trabalho ', ''), r === regime)).join('')}
+          </div>
+        </div>`)}
+
+      ${ADM_SECOES.map(sec => caixa(sec.t,
+        `<div class="grid grid-cols-6 gap-4">${sec.c.map(c => admCampoHTML(c, val(c[0]))).join('')}</div>`)).join('')}
+
+      ${caixa('Dependentes', `
+        <textarea id="adm_dep_raw" rows="2" placeholder="Texto da resposta sobre dependentes (apoio para conferir)"
+          class="${ADM_CLS_CAMPO} mb-2">${esc(f.depRaw || '')}</textarea>
+        <div class="overflow-x-auto"><table class="w-full text-sm">
+          <thead class="text-left text-[11px] uppercase tracking-wide text-slate-500">
+            <tr><th class="p-1">Nome</th><th class="p-1 w-40">Nascimento</th><th class="p-1 w-44">CPF</th>
+                <th class="p-1 w-36">Parentesco</th><th class="p-1 w-10"></th></tr></thead>
+          <tbody id="admDeps">${deps.map(admDepLinha).join('')}</tbody></table></div>
+        <button type="button" onclick="admAddDep()" class="mt-2 px-3 py-1.5 rounded-lg text-xs border border-slate-300 hover:bg-slate-50">
+          <i class="fa-solid fa-plus mr-1"></i>Adicionar dependente</button>`)}
+
+      ${caixa('Checklist de documentos', `
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          ${ADM_CHECKLIST.map(([nome, rot]) => `<div class="rounded-lg border border-slate-200 p-3">
+            <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-2">${esc(rot)}</p>
+            <div class="flex gap-4">${radio(nome, 'sim', 'Sim', radios[nome] === 'sim')}${radio(nome, 'nao', 'Não', radios[nome] === 'nao')}</div>
+          </div>`).join('')}
+        </div>`)}
+
+      <div class="flex flex-wrap gap-2 items-center bg-white rounded-xl border border-slate-200 p-4 no-print">
+        ${botao('Salvar', 'fa-floppy-disk', 'admSalvarForm()')}
+        ${botao('Salvar e ver a ficha', 'fa-file-lines', "admSalvarForm('ficha')", 'bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
+        ${botao('Salvar e gerar contrato', 'fa-file-signature', "admSalvarForm('contrato')", 'bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
+        ${botao('Salvar e inserir na base', 'fa-user-plus', "admSalvarForm('cadastro')", 'bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
+        ${botao('Salvar e solicitar ASO admissional', 'fa-notes-medical', "admSalvarForm('aso')", 'bg-emerald-600 text-white hover:bg-emerald-700')}
+      </div>
+    </div>`;
+  document.querySelectorAll('#view input.adm-campo').forEach(admCor);
+  if(!manterRolagem) window.scrollTo(0,0);
+}
+
+/* lê o formulário do DOM */
+function admColetar(){
+  const g = id => { const e = document.getElementById('adm_' + id); return e ? String(e.value || '').trim() : ''; };
+  const campos = {};
+  ADM_CAMPOS.forEach(id => {
+    const v = g(id);
+    campos[id] = ADM_SEM_CAIXA_ALTA.indexOf(id) >= 0 ? v : v.toLocaleUpperCase('pt-BR');
+  });
+  const marcado = nome => { const r = document.querySelector('input[name="adm_' + nome + '"]:checked'); return r ? r.value : ''; };
+  const radios = { r_regime: marcado('r_regime') };
+  ADM_CHECKLIST.forEach(([nome]) => { radios[nome] = marcado(nome); });
+  const deps = [...document.querySelectorAll('#admDeps tr')].map(tr => {
+    const i = tr.querySelectorAll('input');
+    return { nome:i[0].value.trim().toLocaleUpperCase('pt-BR'), nasc:i[1].value, cpf:i[2].value.trim(), par:i[3].value.trim() };
+  }).filter(d => d.nome || d.cpf || d.nasc);
+  return { unidadeId:g('unidade'), sexo:g('sexo'), campos,
+           checks:{ cb1:!!(document.getElementById('adm_cb1')||{}).checked, cb2:!!(document.getElementById('adm_cb2')||{}).checked },
+           radios, deps, depRaw:(document.getElementById('adm_dep_raw')||{}).value || '' };
+}
+
+async function admSalvarForm(depois){
+  const v = admColetar();
+  if(!v.unidadeId){ toast('Selecione a unidade de trabalho.', 'erro'); document.getElementById('adm_unidade').focus(); return; }
+  if(!v.campos.f_nome){ toast('Preencha ao menos o nome do candidato.', 'erro'); document.getElementById('adm_f_nome').focus(); return; }
+  const critica = criticaCpf(v.campos.f_cpf);
+  if(critica){ toast(critica.charAt(0).toUpperCase() + critica.slice(1) + ' — o CPF identifica a admissão.', 'erro');
+               document.getElementById('adm_f_cpf').focus(); return; }
+  v.campos.f_cpf = admCpfFmt(v.campos.f_cpf);
+  let a = UIAdm.edit.id ? admissao(UIAdm.edit.id) : null;
+  /* a mesma pessoa duas vezes na fila é quase sempre engano de quem digitou */
+  const outra = ADMISSOES.find(x => x !== a && !x.expurgadoEm && cpfDigitos(x.cpf) === cpfDigitos(v.campos.f_cpf));
+  if(outra && !confirm('Já existe uma admissão aberta para este CPF (' + (outra.nome || '—') + ', ' +
+                       admUniNome(outra.unidadeId) + ').\n\nGravar outra mesmo assim?')) return;
+  const nova = !a;
+  if(nova){
+    a = { id:admNovoId(), criadoEm:new Date().toISOString(), criadoPor:String(SESSAO.email||'').toLowerCase(),
+          fichaEm:'', contratoEm:'', cadastroPedidoEm:'', cadastroPedidoPor:'', colaboradorId:'', asoPedidoEm:'', expurgadoEm:'' };
+  }
+  const antes = JSON.stringify(a);
+  Object.assign(a, {
+    unidadeId:v.unidadeId, cpf:cpfDigitos(v.campos.f_cpf), nome:v.campos.f_nome,
+    funcao:v.campos.f_funcao, admissao:v.campos.f_admissao,
+    sst:{ sexo:v.sexo, nascimento:v.campos.f_nasc, rg:v.campos.f_rg, celular:v.campos.f_cel,
+          telefone:v.campos.f_recado, email:v.campos.f_email, exp1:v.checks.cb1, exp2:v.checks.cb2 },
+    ficha:{ campos:v.campos, checks:v.checks, radios:v.radios, deps:v.deps, depRaw:v.depRaw }
+  });
+  if(nova) ADMISSOES.unshift(a);
+  const r = await admSalvar(a, true);
+  if(admAvisarFalha(r, 'a ficha')){
+    if(nova) ADMISSOES = ADMISSOES.filter(x => x !== a); else Object.assign(a, JSON.parse(antes));
+    return;
+  }
+  UIAdm.edit = { id:a.id };
+  admRenderForm(true);      /* o cabeçalho e a situação mudam ao salvar; os campos voltam iguais */
+  if(depois === 'ficha'){ admImprimirFicha(a.id); return; }
+  if(depois === 'contrato'){ admAbrirContrato(a.id); return; }
+  if(depois === 'cadastro'){ admCadastrar(a.id); return; }
+  if(depois === 'aso'){ admPedirAso(a.id); return; }
+  toast('Admissão de ' + a.nome + ' salva.');
+}
+
+function admExcluir(id){
+  const a = admissao(id); if(!a) return;
+  admConfirmar('Excluir admissão',
+    `<p>Excluir a admissão de <b>${esc(a.nome || '—')}</b> (CPF ${esc(admCpfFmt(a.cpf))})?</p>
+     <p class="text-xs text-slate-500">A ficha e o contrato emitido são apagados na hora e isso não pode ser desfeito.
+       O cadastro do colaborador, se já existir, <b>não</b> é mexido.</p>`,
+    'Sim, excluir', async () => {
+      if(nuvemLigada()){
+        const { error } = await sb.from('atlas_admissao').delete().eq('id', id);
+        if(error){ toast('Não consegui excluir: ' + error.message, 'erro'); return; }
+      }
+      ADMISSOES = ADMISSOES.filter(x => x.id !== id);
+      CONTRATOS = CONTRATOS.filter(c => c.admissaoId !== id);
+      viewAdmissoes();
+      toast('Admissão excluída.');
+    });
+}
+
+/* ───────────── importação do PDF do candidato ───────────── */
+async function admImportarPdf(input){
+  const file = input.files && input.files[0];
+  if(!file) return;
+  const rot = $('#admPdfRot'), msg = $('#admPdfMsg');
+  const temNome = !!String((document.getElementById('adm_f_nome')||{}).value || '').trim();
+  if(temNome && !confirm('A ficha já tem dados preenchidos. Ler o PDF vai substituir os campos pelos do arquivo.\n\nContinuar?')){
+    input.value = ''; return;
+  }
+  rot.textContent = 'Lendo o PDF...';
+  try{
+    await admPdfjs();
+    const r = await ADMPDF.lerFicha(file);
+    Object.keys(r.campos).forEach(id => {
+      const el = document.getElementById('adm_' + id);
+      if(!el) return;
+      const v = r.campos[id] || '';
+      el.value = (ADM_SEM_CAIXA_ALTA.indexOf(id) >= 0 || el.type === 'date') ? v : String(v).toLocaleUpperCase('pt-BR');
+      admCor(el);
+    });
+    ADM_CHECKLIST.forEach(([nome]) => document.querySelectorAll('input[name="adm_' + nome + '"]').forEach(x => { x.checked = false; }));
+    $('#adm_dep_raw').value = r.depRaw || '';
+    $('#admDeps').innerHTML = '';
+    (r.deps.length ? r.deps : [{}, {}]).forEach(d => admAddDep(d));
+    rot.textContent = file.name;
+    msg.className = 'text-[11px] mt-1 ' + (r.preenchidos.length ? 'text-emerald-700' : 'text-red-600');
+    msg.textContent = r.preenchidos.length
+      ? 'Lidos do PDF: ' + r.preenchidos.join(', ') + '. Confira os campos em amarelo.'
+      : 'Nenhum campo reconhecido neste PDF — preencha à mão.';
+  }catch(e){
+    console.warn('admImportarPdf', e);
+    rot.textContent = 'Carregar PDF para preencher a ficha';
+    msg.className = 'text-[11px] mt-1 text-red-600';
+    msg.textContent = 'Não consegui ler o PDF (' + (e && e.message || e) + '). Confira se não está protegido por senha.';
+  }
+  input.value = '';
+}
+
+/* leitor de PDF sob demanda: só baixa quando alguém importa um arquivo */
+let _admPdfjs = null;
+function admPdfjs(){
+  if(window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+  if(!_admPdfjs) _admPdfjs = new Promise((ok, erro) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+    s.integrity = 'sha384-/1qUCSGwTur9vjf/z9lmu/eCUYbpOTgSjmpbMQZ1/CtX2v/WcAIKqRv+U1DUCG6e';
+    s.crossOrigin = 'anonymous';
+    s.onload = () => {
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+      ok(window.pdfjsLib);
+    };
+    s.onerror = () => { _admPdfjs = null; erro(new Error('o leitor de PDF não carregou — confira a internet')); };
+    document.head.appendChild(s);
+  });
+  return _admPdfjs;
+}
+
+/* ═════════ ficha impressa ═════════ */
+function admFichaHTML(a){
+  const f = a.ficha || {}, c = f.campos || {}, checks = f.checks || {}, radios = f.radios || {};
+  const v = (id, padrao) => esc(c[id] || padrao || '');
+  const dt = id => c[id] ? esc(fmtDate(c[id])) : '';
+  const traco = '--------------------';
+  const radio2txt = x => x === 'sim' ? '( X ) Sim  (   ) Não' : x === 'nao' ? '(   ) Sim  ( X ) Não' : '(   ) Sim  (   ) Não';
+  const box = x => `<span class="fcbbox">${x ? '✓' : ''}</span>`;
+  const deps = f.deps || [];
+  const depRows = deps.length
+    ? deps.map(d => `<tr><td>${esc(d.nome)}</td><td>${d.nasc ? esc(fmtDate(d.nasc)) : ''}</td><td>${esc(d.cpf)}</td><td>${esc(d.par)}</td></tr>`).join('')
+    : `<tr><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td></tr><tr><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td></tr>`;
+  const cru = 'style="text-transform:none"';
+  const unidade = esc(admUniRotulo(a.unidadeId));
+  const funcao=v('f_funcao'), salario=v('f_salario'), admissao=dt('f_admissao'), end=v('f_end');
+  const nome=v('f_nome'), nasc=dt('f_nasc'), natal=v('f_natal'), ecivil=v('f_ecivil');
+  const rg=v('f_rg'), orgao=v('f_orgao','SSP/'), exp=dt('f_exp'), cpf=v('f_cpf');
+  const pai=v('f_pai'), mae=v('f_mae'), cnh=v('f_cnh',traco);
+  const titulo=v('f_titulo'), zona=v('f_zona'), secao=v('f_secao');
+  const conjuge=v('f_conjuge',traco), ctps=v('f_ctps','DIGITAL'), ctpss=v('f_ctps_s',traco), ctpsuf=v('f_ctps_uf','--------');
+  const pis=v('f_pis'), instrucao=v('f_instrucao','ENSINO FUNDAMENTAL COMPLETO'), cel=v('f_cel'), recado=v('f_recado',traco), email=v('f_email');
+  const banco=v('f_banco','Itaú'), ag=v('f_ag'), conta=v('f_conta'), pix=v('f_pix');
+  const passes=v('f_passes'), vt=v('f_vt'), ctpsEmissao=v('f_ctps_emissao',traco);
+  const cb1=!!checks.cb1, cb2=!!checks.cb2, regime=esc(radios.r_regime||'');
+  const vtVal=radios.r_vt, asoVal=radios.r_aso, autodeclVal=radios.r_autodecl, fotoVal=radios.r_foto;
+  return `
+    <div class="fh">FICHA DE ADMISSÃO DE FUNCIONÁRIOS</div>
+    <div class="fu">📍 Unidade de Trabalho: ${unidade}</div>
+
+    <div class="fs">CARGO E CONTRATO</div>
+    <div class="fr">
+      <div class="ff" style="flex:3"><span class="fl">Função / Cargo</span><span class="fv">${funcao}</span></div>
+      <div class="ff" style="flex:1.5"><span class="fl">Salário (R$)</span><span class="fv">${salario}</span></div>
+      <div class="ff" style="flex:1.5"><span class="fl">Data de Admissão</span><span class="fv">${admissao}</span></div>
+    </div>
+    <div class="fbox">
+      <div class="fbt">Contrato de Experiência</div>
+      <div class="fcb">${box(cb1)} 1° Período: 45 dias</div>
+      <div class="fcb">${box(cb2)} Prorrogado automaticamente por mais 45 dias</div>
+    </div>
+    <div class="fbox">
+      <div class="fbt">Regime de Trabalho</div>
+      <div class="fcb">${regime}</div>
+    </div>
+
+    <div class="fs">DADOS PESSOAIS</div>
+    <div class="fr">
+      <div class="ff" style="flex:3"><span class="fl">Nome Completo</span><span class="fv">${nome}</span></div>
+      <div class="ff" style="flex:1.5"><span class="fl">Data de Nascimento</span><span class="fv">${nasc}</span></div>
+    </div>
+    <div class="fr">
+      <div class="ff" style="flex:3"><span class="fl">Local de Nascimento</span><span class="fv">${natal}</span></div>
+      <div class="ff" style="flex:1.5"><span class="fl">Estado Civil</span><span class="fv">${ecivil}</span></div>
+    </div>
+    <div class="fr">
+      <div class="ff" style="flex:3"><span class="fl">Nome do Cônjuge</span><span class="fv">${conjuge}</span></div>
+      <div class="ff" style="flex:1.5"><span class="fl">Celular</span><span class="fv">${cel}</span></div>
+    </div>
+    <div class="fr">
+      <div class="ff" style="flex:3"><span class="fl">E-mail</span><span class="fv" ${cru}>${email}</span></div>
+      <div class="ff" style="flex:1.5"><span class="fl">N Tel. Fixo ou Recado</span><span class="fv">${recado}</span></div>
+    </div>
+    <div class="fr"><div class="ff"><span class="fl">Endereço Completo</span><span class="fv">${end}</span></div></div>
+
+    <div class="fs">DOCUMENTOS</div>
+    <div class="fr">
+      <div class="ff" style="flex:1.5"><span class="fl">N° RG</span><span class="fv">${rg}</span></div>
+      <div class="ff" style="flex:1.5"><span class="fl">Órgão Emissor/Estado</span><span class="fv">${orgao}</span></div>
+      <div class="ff" style="flex:1.5"><span class="fl">Data Expedição</span><span class="fv">${exp}</span></div>
+      <div class="ff" style="flex:1.5"><span class="fl">N° CPF</span><span class="fv">${cpf}</span></div>
+    </div>
+    <div class="fr">
+      <div class="ff" style="flex:1.5"><span class="fl">N° PIS</span><span class="fv">${pis}</span></div>
+      <div class="ff" style="flex:2"><span class="fl">Escolaridade</span><span class="fv">${instrucao}</span></div>
+      <div class="ff" style="flex:1.5"><span class="fl">N° Título de Eleitor</span><span class="fv">${titulo}</span></div>
+      <div class="ff" style="flex:.7"><span class="fl">Zona</span><span class="fv">${zona}</span></div>
+      <div class="ff" style="flex:.7"><span class="fl">Seção</span><span class="fv">${secao}</span></div>
+    </div>
+    <div class="fr">
+      <div class="ff" style="flex:3"><span class="fl">Carteira de Habilitação/Estado</span><span class="fv">${cnh}</span></div>
+      <div class="ff" style="flex:1.2"><span class="fl">CTPS N°</span><span class="fv">${ctps}</span></div>
+      <div class="ff" style="flex:1.2"><span class="fl">Série - Estado</span><span class="fv">${ctpss}</span></div>
+      <div class="ff" style="flex:.8"><span class="fl">UF</span><span class="fv">${ctpsuf}</span></div>
+      <div class="ff" style="flex:1.2"><span class="fl">Emissão CTPS</span><span class="fv">${ctpsEmissao}</span></div>
+    </div>
+
+    <div class="fs">FILIAÇÃO</div>
+    <div class="fr">
+      <div class="ff" style="flex:3"><span class="fl">Nome do Pai</span><span class="fv">${pai}</span></div>
+      <div class="ff" style="flex:3"><span class="fl">Nome da Mãe</span><span class="fv">${mae}</span></div>
+    </div>
+
+    <div class="fs">DADOS BANCÁRIOS E VALE-TRANSPORTE</div>
+    <div class="fr">
+      <div class="ff" style="flex:2"><span class="fl">Banco</span><span class="fv">${banco}</span></div>
+      <div class="ff" style="flex:1.2"><span class="fl">Agência</span><span class="fv">${ag}</span></div>
+      <div class="ff" style="flex:1.5"><span class="fl">Conta</span><span class="fv">${conta}</span></div>
+      <div class="ff" style="flex:2"><span class="fl">Chave PIX</span><span class="fv" ${cru}>${pix}</span></div>
+    </div>
+    <div class="fr">
+      <div class="ff" style="flex:1.2"><span class="fl">N° Passes/Dia</span><span class="fv">${passes}</span></div>
+      <div class="ff" style="flex:1.5"><span class="fl">Valor Diário VT (R$)</span><span class="fv">${vt}</span></div>
+      <div style="flex:3"></div>
+    </div>
+
+    <div class="fs">DEPENDENTES</div>
+    <table><thead><tr>
+      <th>Nome</th><th>Data Nasc.</th><th>CPF</th><th>Parentesco</th>
+    </tr></thead><tbody>${depRows}</tbody></table>
+
+    <div class="fs">CHECKLIST DE DOCUMENTOS</div>
+    <div class="fchk">
+      <div class="fchki"><div class="fbt">Vale-Transporte</div><div>${radio2txt(vtVal)}</div></div>
+      <div class="fchki"><div class="fbt">Exame Adm. ASO</div><div>${radio2txt(asoVal)}</div></div>
+      <div class="fchki"><div class="fbt">Auto-Declaração</div><div>${radio2txt(autodeclVal)}</div></div>
+      <div class="fchki"><div class="fbt">Foto</div><div>${radio2txt(fotoVal)}</div></div>
+    </div>
+
+    <div class="fs">DOCUMENTAÇÃO NECESSÁRIA</div>
+    <div class="fdoc">
+      <strong>Originais:</strong> Carteira de Trabalho, N° PIS, 1 Foto 3x4, Exame Admissional (ASO)<br>
+      <strong>Cópias simples:</strong> RG, CNH, CPF, Título de Eleitor, Comprovante de Residência, Certidões de Nascimento dos Dependentes, Certidão de Casamento
+    </div>
+
+    <div class="fhr">
+      <div class="fbt">USO EXCLUSIVO RH — ADVANTAGE</div>
+      <div class="fhrg">
+        ${['Contrato Banco de Horas','Cartão VA Alimentação','Lançamento na Planilha','Pgto Inicial VT + VA','Docs Digitalizados e Devolvidos','Contrato de Trabalho (Arquivo Digital)']
+          .map(l=>`<div><div class="fhrl">${l}</div><div class="fhri"></div></div>`).join('')}
+      </div>
+    </div>`;
+}
+function admFichaDoc(a){
+  const [prim, acc] = admTema(a.unidadeId);
+  const titulo = 'FICHA DE ADMISSÃO ' + (a.nome || '') + ' - ' + admUniRotulo(a.unidadeId);
+  return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${esc(titulo)}</title>
+  <style>
+    @page { size:A4; margin:0; }
+    body { margin:0; background:#fff; }
+    @media screen { body { background:#e4e8ec; padding:22px; } #ficha { box-shadow:0 4px 24px rgba(0,0,0,.14); } }
+    .barra { text-align:center; margin:0 0 14px; font-family:Arial,sans-serif; }
+    .barra button { padding:9px 18px; border:0; border-radius:8px; background:#37474F; color:#fff; font-size:13px; cursor:pointer; }
+    @media print { .barra { display:none; } #ficha { page-break-inside:avoid; break-inside:avoid; } }
+        #ficha { background: white; font-family: Arial, sans-serif; font-size: 9pt; width: 190mm; margin: 0 auto; color: #000; padding: 7mm; }
+        #ficha .fh  { background: var(--brand-accent); color: white; text-align: center; padding: 7px; font-size: 11.5pt; font-weight: bold; text-transform: uppercase; letter-spacing: 1px; }
+        #ficha .fu  { background: var(--brand-primary); color: white; text-align: center; padding: 4px 8px; font-size: 8.2pt; font-weight: bold; text-transform: uppercase; margin-bottom: 7px; }
+        #ficha .fs  { background: #d1d9e0; font-size: 7.8pt; font-weight: bold; text-transform: uppercase; letter-spacing: .5px; padding: 3px 8px; margin: 6px 0 4px; border-left: 3px solid var(--brand-primary); }
+        #ficha .fr  { display: flex; gap: 9px; margin-bottom: 6px; }
+        #ficha .ff  { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+        #ficha .fl  { font-size: 6.8pt; color: #555; font-weight: bold; text-transform: uppercase; letter-spacing: .3px; margin-bottom: 2px; }
+        #ficha .fv  { border-bottom: 1px solid #333; min-height: 16px; font-size: 8.8pt; line-height: 1.35; padding: 1px 3px; }
+        #ficha .fbox{ border: 1px solid #999; padding: 5px 9px; font-size: 7.4pt; margin-bottom: 6px; }
+        #ficha .fbt { font-weight: bold; text-transform: uppercase; font-size: 7pt; letter-spacing: .4px; margin-bottom: 4px; }
+        #ficha .fcb { display: flex; align-items: center; gap: 6px; font-size: 7.8pt; margin: 3px 0; }
+        #ficha .fcbbox { width: 10px; height: 10px; border: 1.5px solid #333; display: inline-flex; align-items: center; justify-content: center; font-size: 7.5pt; flex-shrink: 0; }
+        #ficha table { width: 100%; border-collapse: collapse; }
+        #ficha table th { border: 1px solid #999; padding: 4px 6px; background: #f0f0f0; font-weight: bold; text-transform: uppercase; font-size: 7.2pt; }
+        #ficha table td { border: 1px solid #999; padding: 5px 6px; font-size: 7.8pt; }
+        /* Checklist de documentos */
+        #ficha .fchk { display: grid; grid-template-columns: repeat(4,1fr); gap: 6px; margin-bottom: 3px; }
+        #ficha .fchki{ border: 1px solid #999; padding: 5px 8px; font-size: 7.4pt; }
+        #ficha .fdoc { font-size: 7.4pt; line-height: 1.55; padding: 2px 0; }
+        #ficha .fhr  { border: 1px solid #999; margin-top: 7px; padding: 5px 9px; font-size: 7pt; }
+        #ficha .fhrg { display: grid; grid-template-columns: repeat(3,1fr); gap: 5px 9px; margin-top: 5px; }
+        #ficha .fhri { border-bottom: 1px solid #aaa; min-height: 14px; }
+        #ficha .fhrl { font-size: 6.2pt; color: #555; font-weight: bold; margin-bottom: 2px; }
+        #ficha .fv, #ficha table td, #ficha .fdoc { text-transform: uppercase; }
+  </style></head><body>
+  <div class="barra"><button onclick="window.print()">Imprimir / salvar em PDF</button></div>
+  <div id="ficha" style="--brand-primary:${prim};--brand-accent:${acc}">${admFichaHTML(a)}</div>
+  <script>
+    /* encaixa a ficha em uma folha A4: se passar da altura, reduz por zoom */
+    (function(){
+      var f = document.getElementById('ficha'), mm = 96/25.4, alvo = 297*mm - 4*mm;
+      function ajustar(){ f.style.zoom = ''; var h = f.scrollHeight;
+        if(h > alvo) f.style.zoom = String(Math.max(0.62, Math.floor((alvo/h)*100)/100)); }
+      ajustar(); window.addEventListener('load', ajustar);
+    })();
+  <\/script></body></html>`;
+}
+async function admImprimirFicha(id){
+  const a = admissao(id); if(!a || !a.ficha) return;
+  abrirRelatorio(admFichaDoc(a));
+  registrarAtividade('imprimiu_ficha_admissao', { admissao_id:id });
+  if(!a.fichaEm){
+    a.fichaEm = new Date().toISOString();
+    admAvisarFalha(await admSalvar(a), 'a data da ficha');
+    if(!UIAdm.edit) viewAdmissoes();
+  }
+}
+
+/* ═════════ contrato ═════════ */
+function admContratoHTML(d){
+  const u = ADM_CONTRATO_UNI[d.uniKey] || {};
+  const uni = { sede:esc(u.sede), trabalho:esc(u.trabalho), local:esc(u.local), nomeFull:esc(u.nomeFull) };
+  const nome = esc(d.nome), cpf = esc(d.cpf), end = esc(d.endereco), sal = esc(d.salario),
+        func = esc(d.funcao), desc = esc(d.descricao);
+  const dt = d.data ? String(d.data).split('-').reverse().join('/') : '____/____/' + HOJE.getFullYear();
+    return `
+        <div class="text-center text-bold">CONTRATO INDIVIDUAL DE TRABALHO POR PRAZO INDETERMINADO</div>
+        <div class="spacer"></div>
+        <p>Pelo presente instrumento particular, que entre si, fazem, de um lado como EMPREGADORA, ${uni.sede}, neste ato representada por quem de direito, e de outro lado, como EMPREGADO(A) <span class="text-bold">${nome}</span>, portador do CPF inscrito sob n° ${cpf}, portador da Carteira de Trabalho e Previdência Social – CLT DIGITAL, residente e domiciliado(a) na ${end}, firmam o presente CONTRATO INDIVIDUAL DE TRABALHO, nos termos seguinte:</p>
+
+        <p><span class="text-bold">CLÁUSULA PRIMEIRA – DO OBJETO:</span><br>
+        1.1 O objeto do presente contrato é a prestação de serviços pelo(a) EMPREGADO(A) à EMPREGADORA em caráter de dedicação compatível com a jornada contratada, comprometendo-se o(a) EMPREGADO(A) a não exercer atividade que configure conflito de interesse, concorrência direta ou incompatibilidade de jornada com suas funções durante a vigência deste contrato.<br>
+        1.2 O presente contrato não substituirá eventuais contratos de experiência anteriormente celebrados, entrando em vigor somente após o término do respectivo período de experiência, inclusive de sua prorrogação, caso esta venha a ocorrer. A conversão para o presente contrato pressupõe a extinção regular do contrato de experiência anterior, sendo prerrogativa exclusiva do empregador a decisão sobre seu encerramento, eventual prorrogação ou transformação em contrato por prazo indeterminado.<br>
+        1.3 Decorrido o prazo de experiência sem manifestação contrária das partes, o presente contrato passará a vigorar por prazo indeterminado, permanecendo inalteradas as demais cláusulas contratuais.<br>
+        1.4. O contrato de experiência e eventual prorrogação será firmado por meio de instrumento apartado.<br>
+        O(A) EMPREGADO(A) declara, no ato da assinatura deste contrato, não exercer atividade remunerada, vínculo empregatício ou prestação de serviços com terceiros ao contrato, estabelecendo as partes que há exclusividade na prestação de serviços em prol do EMPREGADOR no presente contrato, comprometendo-se a comunicar previamente qualquer alteração dessa condição durante a vigência do contrato. A omissão ou declaração falsa poderá ensejar rescisão por justa causa, nos termos do art. 482, alínea "a", da CLT.</p>
+
+        <p><span class="text-bold">CLÁUSULA SEGUNDA – DA FUNÇÃO</span><br>
+        2.1 O(A) EMPREGADO(A) compromete-se a prestar seus serviços junto ao quadro de funcionários da EMPREGADORA, para exercer o cargo de <span class="text-bold">${func}</span>, cujas atividades consistem em: ${desc}, competindo-lhe, além das atribuições inerentes à função, além de outras atividades correlatas, compatíveis com sua qualificação, condição pessoal e necessidades do serviço, bem como aquelas que lhe forem regularmente determinadas pela EMPREGADORA, por meio de ordens verbais ou escritas, nos termos do art. 456 da CLT.<br>
+        2.2. Durante a vigência deste contrato, o(a) EMPREGADO(A) poderá ser designado(a) para o exercício de outra função compatível com sua qualificação profissional, condição pessoal e necessidade do serviço, por conveniência da EMPREGADORA, desde que observadas as disposições legais aplicáveis e, quando exigido por lei, mediante anuência do(a) EMPREGADO(A).</p>
+
+        <p><span class="text-bold">CLÁUSULA TERCEIRA – DA REMUNERAÇÃO</span><br>
+        3.1. Como contraprestação pelos serviços prestados, a EMPREGADORA pagará ao(à) EMPREGADO(A), mensalmente, o valor de <span class="text-bold">R$ ${sal}</span>, a título de salário.<br>
+        3.2. Fica desde já ajustado que poderão ser efetuados sobre o salário do(a) EMPREGADO(A) os descontos legais obrigatórios, aqueles decorrentes de adiantamentos salariais concedidos pela EMPREGADORA, os autorizados expressamente pelo(a) EMPREGADO(A), os previstos em Acordo ou Convenção Coletiva de Trabalho, bem como os decorrentes de danos causados pelo(a) EMPREGADO(A), em caso de dolo ou culpa, nos termos do art. 462 da CLT.<br>
+        3.3. O(A) EMPREGADO(A) está de acordo com eventuais modificações posteriores do sistema de pagamento, quer quanto à forma, quer quanto à periodicidade, na hipótese dessas modificações se tornarem necessárias, a critério da EMPREGADORA, conquanto que das mesmas não resulte redução salarial.<br>
+        3.4. O pagamento salarial será realizado diretamente ao(à) EMPREGADO(A), até o 5º (quinto) dia útil do mês subsequente ao vencido, em moeda nacional, mediante depósito bancário, transferência eletrônica, cheque ou outra forma legalmente admitida, a critério da EMPREGADORA.<br>
+        3.5. No ato da assinatura do presente contrato, o(a) EMPREGADO(A) informará à EMPREGADORA sobre a sua necessidade de utilização do benefício de vale transporte, mediante solicitação por escrito, comprometendo-se, igualmente, a comunicar por escrito qualquer alteração, suspensão ou cancelamento da necessidade do benefício.<br>
+        3.6 Os benefícios eventualmente concedidos pela EMPREGADORA observarão a natureza jurídica prevista na legislação aplicável, nos instrumentos coletivos e no regulamento interno da empresa, não integrando a remuneração do empregado, quando expressamente excluídos da natureza salarial, nos termos do artigo 458, § 2º, da CLT.<br>
+        3.7. As partes poderão, a qualquer tempo durante a vigência deste contrato, firmar Termo de Quitação Anual de Obrigações Trabalhistas, na forma do art. 507-B da CLT, perante o sindicato da categoria, declarando expressamente a quitação das obrigações e direitos decorrentes da relação de emprego no período correspondente, com eficácia liberatória das parcelas nele especificadas.</p>
+
+        <div class="page-break"></div>
+        <p><span class="text-bold">CLÁUSULA QUARTA – DOS DESCONTOS</span><br>
+        4.1 O(A) EMPREGADO(A) compromete-se a zelar pelos equipamentos, ferramentas, máquinas, veículos, utensílios, uniformes e demais bens disponibilizados pela EMPREGADORA para a execução de suas atividades, responsabilizando-se pelos danos causados em decorrência de dolo ou culpa, nos termos do art. 462, §1º, da CLT.<br>
+        4.2 O(A) EMPREGADO(A) obriga-se a restituir à EMPREGADORA, ao término do contrato de trabalho ou quando solicitado, os materiais, uniformes, equipamentos e demais bens que lhe tenham sido confiados, autorizando o desconto dos valores correspondentes em verbas rescisórias, em caso de não devolução injustificada ou dano comprovadamente causado por dolo ou culpa.<br>
+        4.3 O(A) EMPREGADO(A) declara ciência de que deverá zelar pelo patrimônio da EMPREGADORA, de terceiros, bem como pelos bens, valores, documentos, equipamentos, materiais e demais itens que estejam sob sua guarda, utilização ou responsabilidade em razão das atividades exercidas.<br>
+        4.4 Na hipótese de o(a) EMPREGADO(A), por dolo ou culpa, causar dano, extravio, perda, retenção indevida, violação, utilização inadequada ou qualquer prejuízo ao patrimônio da EMPREGADORA ou de terceiros, inclusive clientes, fornecedores, parceiros comerciais ou usuários dos serviços da empresa, poderá a EMPREGADORA efetuar os descontos legalmente admitidos, observados os limites do art. 462 da CLT, sem prejuízo da adoção das medidas administrativas, civis, trabalhistas e judiciais cabíveis, inclusive para ressarcimento integral dos prejuízos comprovadamente suportados.<br>
+        4.4.1. O desconto previsto no item acima também poderá ocorrer quando da não devolução pelo empregado ao empregador de credenciais, uniformes e demais materiais, desde já concordando o empregado com eventuais descontos pela não devolução ou extravio desses itens.<br>
+        4.5 O(A) EMPREGADO(A) autoriza que, nas hipóteses de suspensão do contrato de trabalho ou de rescisão contratual, sejam efetuados os descontos legalmente admitidos relativos a débitos líquidos, certos e exigíveis regularmente constituídos perante a EMPREGADORA, observados os limites e condições previstos na legislação trabalhista aplicável.<br>
+        4.6 O(A) EMPREGADO(A) declara ter pleno conhecimento dos termos e condições estabelecidos na cartilha informativa divulgada pelo Governo Federal referente ao crédito consignado do trabalhador privado, reconhecendo que a contratação de tal modalidade de empréstimo constitui relação jurídica exclusiva entre o(a) EMPREGADO(A) e a instituição financeira escolhida, regida integralmente pelas normas e diretrizes fixadas pelo Governo Federal, sem qualquer ingerência, responsabilidade ou participação da EMPREGADORA na celebração, execução ou encerramento do referido contrato de crédito, concordando, desde já, com os descontos efetuados a tal título caso opte por fazer o referido empréstimo.</p>
+
+        <p><span class="text-bold">CLÁUSULA QUINTA – DA JORNADA DE TRABALHO</span><br>
+        5.1 A jornada de trabalho será de 44 (quarenta e quatro) horas semanais, distribuídas pelos dias e horários definidos pela EMPREGADORA, conforme necessidade do serviço, observados os limites legais, com intervalo de 1 (uma) hora para repouso e alimentação.<br>
+        5.2. O(A) EMPREGADO(A) gozará de repouso semanal remunerado de, no mínimo, 24 (vinte e quatro) horas consecutivas, preferencialmente aos domingos, além dos feriados civis e religiosos conforme o artigo 67 da Consolidação das Leis do Trabalho.<br>
+        5.3. O(A) EMPREGADO(A) compromete-se a cumprir a jornada ajustada, podendo haver prestação de horas extraordinárias, observados os limites legais e constitucionais aplicáveis. As horas excedentes poderão ser objeto de compensação, na forma da legislação vigente e de eventual acordo de compensação ou banco de horas firmado entre as partes. Na impossibilidade de compensação, as horas extraordinárias serão remuneradas com o adicional legal ou normativo aplicável.<br>
+        5.4. O(A) EMPREGADO(A) declara ciência de que sua jornada e horários de trabalho poderão ser ajustados pela EMPREGADORA, conforme necessidade do serviço, mediante comunicação prévia e observadas as disposições legais aplicáveis, comprometendo-se a laborar nos turnos existentes na empresa compatíveis com sua função e com os limites legais da jornada de trabalho.<br>
+        5.5. As partes pactuam, desde já, a possibilidade de adoção de regime de compensação de jornada e/ou banco de horas, conforme disposto no artigo 59, §5º da CLT, que será formalizado por meio de termo aditivo ao presente contrato.<br>
+        5.6 Poderá ser dispensado o acréscimo salarial relativo às horas extraordinárias quando estas forem devidamente compensadas por meio de banco de horas ou regime de compensação de jornada, na forma da legislação trabalhista vigente.<br>
+        5.7 Na hipótese de ausência injustificada ou atraso do(a) EMPREGADO(A), poderá haver o desconto proporcional correspondente em sua remuneração, ressalvadas as hipóteses legalmente justificadas, autorizadas por lei ou posteriormente compensadas mediante banco de horas ou regime de compensação de jornada.<br>
+        5.8 O descanso semanal remunerado e os feriados civis e religiosos observarão a legislação aplicável, podendo eventual labor nesses períodos ser remunerado na forma da lei ou objeto de compensação, conforme necessidade do serviço.<br>
+        5.9. O(A) EMPREGADO(A) obriga-se a registrar pontualmente sua jornada de trabalho por meio do sistema de controle de ponto adotado pela EMPREGADORA, seja eletrônico, biométrico, por aplicativo ou outro meio legalmente admitido, no início e no término de cada período de trabalho, bem como na saída e retorno do intervalo intrajornada. O não registro injustificado, a adulteração ou o registro por terceiro poderá ser considerado falta disciplinar, sujeita às penalidades cabíveis, inclusive rescisão por justa causa em caso de reincidência ou dolo, nos termos do art. 482 da CLT. A EMPREGADORA reserva-se o direito de adotar o sistema de controle de ponto que melhor atenda às suas necessidades operacionais, comunicando previamente ao(à) EMPREGADO(A) eventuais alterações.</p>
+
+        <p><span class="text-bold">CLÁUSULA SEXTA – DO LOCAL DE TRABALHO</span><br>
+        6.1. O(A) EMPREGADO(A) desempenhará sua função, já estabelecida no presente contrato, à EMPREGADORA, no seguinte endereço:<br>
+        <span class="text-bold">${uni.trabalho}</span>.<br>
+        6.2. Durante a vigência deste contrato, o(a) EMPREGADO(A) poderá ser transferido(a) em caráter provisório ou definitivo, para exercer sua função em localidade diversa da inicialmente ajustada, desde que haja a sua anuência ou estejam presentes as hipóteses legalmente previstas, nos termos do artigo 469 da Consolidação das Leis do Trabalho.<br>
+        6.3. Na hipótese de transferência provisória que implique mudança de domicílio do(a) EMPREGADO(A), este(a) fará jus ao adicional de transferência correspondente a, no mínimo, 25% (vinte e cinco por cento) do seu salário, enquanto perdurar a situação, conforme disposto no artigo 469, §3º, da CLT.<br>
+        6.4. É responsabilidade do(a) EMPREGADO(A) informar corretamente o percurso percorrido até seu local de trabalho para fins de cálculo de vale transporte, devendo, também, informar eventuais mudanças de trajeto que repercutam no valor disponibilizado pelo empregador; o não cumprimento desta cláusula poderá acarretar medidas punitivas e eventual rescisão contratual por justa causa.<br>
+        6.5. O(A) EMPREGADO(A) declara, no ato da assinatura deste contrato, que tem plena ciência de sua responsabilidade pelo cumprimento do trajeto habitual entre sua residência e o local de trabalho, comprometendo-se a comunicar à EMPREGADORA, por escrito, qualquer alteração relevante em seu endereço residencial ou rota habitual. O(A) EMPREGADO(A) declara ainda ter ciência de que a caracterização de acidente de trajeto depende da comprovação do percurso habitual declarado, sendo de sua exclusiva responsabilidade a veracidade das informações prestadas, não respondendo a EMPREGADORA por omissões ou declarações inverídicas que impliquem prejuízo ao empregado no reconhecimento do benefício previdenciário correspondente.</p>
+
+        <p><span class="text-bold">CLÁUSULA SÉTIMA – SAÚDE, SEGURANÇA E NORMAS INTERNAS</span><br>
+        7.1 O(A) EMPREGADO(A) declara ciência de que as atividades exercidas nas dependências aeroportuárias da EMPREGADORA estão sujeitas a normas internas e rígidos protocolos de saúde, higiene, segurança do trabalho, prevenção de acidentes, gerenciamento de riscos ocupacionais, controle de acesso, proteção patrimonial, atendimento ao público e segurança operacional, comprometendo-se a observar integralmente as disposições aplicáveis às atividades desempenhadas, inclusive aquelas decorrentes das Normas Regulamentadoras do Ministério do Trabalho e Emprego, especialmente a NR-1, bem como os procedimentos e orientações emitidos pela EMPREGADORA e pelas autoridades aeroportuárias competentes.<br>
+        7.2 O(A) EMPREGADO(A) compromete-se, ainda, a participar dos treinamentos, capacitações e orientações fornecidos pela EMPREGADORA, bem como utilizar corretamente os equipamentos de proteção individual e coletiva eventualmente disponibilizados, comunicando imediatamente qualquer situação de risco, incidente, acidente ou condição insegura de que tenha conhecimento.<br>
+        7.3 O(A) EMPREGADO(A) declara ciência de que poderá solicitar, por escrito, a substituição, troca ou reposição dos equipamentos, uniformes ou materiais disponibilizados pela EMPREGADORA sempre que verificar desgaste, dano, inadequação ou necessidade de substituição, sendo de sua responsabilidade comunicar imediatamente tais situações à EMPREGADORA, não podendo permanecer utilizando item inadequado sem a devida comunicação.<br>
+        7.4 O descumprimento injustificado das normas de segurança, dos procedimentos internos ou da utilização obrigatória de equipamentos de proteção poderá ensejar a adoção das medidas disciplinares cabíveis, nos termos da legislação trabalhista aplicável.<br>
+        7.5 O(A) EMPREGADO(A) deverá comunicar imediatamente a EMPREGADORA acerca de sua ausência e apresentar atestado médico ou documento comprobatório válido no prazo de até 48 (quarenta e oito) horas, contadas do início da ausência, sob pena de a falta ser considerada injustificada, observadas as hipóteses legais.<br>
+        7.6 O(A) EMPREGADO(A) declara ciência de que a EMPREGADORA adota política de tolerância zero em relação ao consumo de bebidas alcoólicas, substâncias entorpecentes ou qualquer droga ilícita durante o exercício das atividades laborais ou nas dependências da empresa e do aeroporto, inclusive em períodos de intervalo e descanso. O(A) EMPREGADO(A) anui, desde já, com a eventual realização de testes de alcoolemia ou triagem toxicológica, sempre que solicitado pela EMPREGADORA ou pelas autoridades aeroportuárias competentes, em conformidade com a legislação vigente. O descumprimento desta política poderá ensejar rescisão por justa causa, nos termos do art. 482 da CLT, sem prejuízo das responsabilidades administrativas e legais cabíveis.<br>
+        7.7. Em razão da natureza das atividades desempenhadas em ambiente de sala VIP aeroportuária, com atendimento a passageiros premium, o(a) EMPREGADO(A) compromete-se a manter, durante toda a jornada de trabalho, padrão de apresentação pessoal condizente com as normas internas da EMPREGADORA, incluindo uso obrigatório e correto do uniforme fornecido, higiene pessoal adequada, postura profissional e linguagem respeitosa no trato com clientes, colegas e demais envolvidos. O não cumprimento reiterado dos padrões de apresentação e conduta estabelecidos poderá ensejar advertência, suspensão ou rescisão por justa causa, conforme a gravidade e reincidência da conduta, nos termos da legislação trabalhista aplicável.<br>
+        7.8. O(A) EMPREGADO(A) declara ciência de que a EMPREGADORA adota política expressa de prevenção e combate ao assédio moral, assédio sexual e quaisquer formas de violência no ambiente de trabalho, nos termos da Lei nº 14.457/2023 e demais normativas aplicáveis. O(A) EMPREGADO(A) compromete-se a observar integralmente tais diretrizes, abstendo-se de condutas que configurem assédio, discriminação, intimidação ou constrangimento a colegas, superiores, subordinados, clientes ou terceiros. O descumprimento desta política poderá ensejar as medidas disciplinares cabíveis, inclusive rescisão por justa causa, nos termos do art. 482 da CLT, sem prejuízo das responsabilidades civil e penal aplicáveis.<br>
+        7.9. O(A) EMPREGADO(A) declara ciência da existência e funcionamento da Comissão Interna de Prevenção de Acidentes (CIPA) e/ou da Comissão de Representação dos Empregados, quando aplicável, comprometendo-se a colaborar com suas atividades e a comunicar a essas instâncias quaisquer situações de risco, assédio ou irregularidade no ambiente de trabalho, dando ciência à existência de canal de denúncia: compliance@vipadvantage.com.br<br>
+        7.10. O(A) EMPREGADO(A) declara ter participado do processo de integração admissional promovido pela EMPREGADORA, ocasião em que foram apresentados as normas internas, os procedimentos operacionais, as políticas de conduta, os equipamentos de proteção disponíveis e as diretrizes de segurança aplicáveis à sua função. O(A) EMPREGADO(A) reconhece ter recebido todas as orientações necessárias ao adequado desempenho de suas atividades, não podendo alegar desconhecimento das normas e procedimentos apresentados.</p>
+
+        <p><span class="text-bold">CLÁUSULA OITAVA – DA CONFIDENCIALIDADE, REDES SOCIAIS E SEGURANÇA OPERACIONAL</span><br>
+        8.1 O(A) EMPREGADO(A) obriga-se a manter sigilo sobre todas as informações às quais tiver acesso em razão do exercício de suas atividades, incluindo dados relativos à EMPREGADORA, seus clientes, fornecedores, parceiros, operações, procedimentos internos e quaisquer informações de natureza operacional, estratégica ou comercial.<br>
+        8.2 Para fins do presente contrato, considera-se informação confidencial toda e qualquer informação não pública relacionada às atividades da EMPREGADORA, incluindo, mas não se limitando, a dados comerciais, financeiros, operacionais, estratégicos, projetos, métodos, know-how, propriedade intelectual, precificação, fornecedores e clientes.<br>
+        8.3 É vedado ao(à) EMPREGADO(A) divulgar, compartilhar ou repassar a terceiros quaisquer informações confidenciais, salvo mediante autorização prévia e expressa da EMPREGADORA.<br>
+        8.4 O(A) EMPREGADO(A) compromete-se a não divulgar, publicar, comentar ou compartilhar, por qualquer meio de comunicação, inclusive redes sociais, aplicativos de mensagens, internet ou veículos de mídia, informações, imagens, situações ou ocorrências relacionadas às atividades da EMPREGADORA ou ao ambiente operacional, especialmente aquelas ocorridas em área aeroportuária ou envolvendo clientes e usuários da sala VIP.<br>
+        8.5 É vedado ao(à) EMPREGADO(A) utilizar a marca, logotipo, nome comercial, identidade visual ou qualquer elemento de propriedade intelectual da EMPREGADORA em perfis pessoais em redes sociais, aplicativos ou qualquer outro meio digital, sem autorização prévia e expressa. Da mesma forma, é vedado ao(à) EMPREGADO(A) se apresentar publicamente como representante ou porta-voz da EMPREGADORA fora dos limites de sua função, bem como emitir opiniões, comentários ou declarações que possam ser associados à empresa sem autorização formal. O descumprimento poderá ensejar rescisão por justa causa e responsabilização civil pelos danos reputacionais causados.<br>
+        8.6 É vedado ao(à) EMPREGADO(A) realizar registros, gravações, fotografias, cópias ou qualquer forma de reprodução de informações, documentos, sistemas ou ambientes internos da EMPREGADORA, salvo mediante autorização prévia e expressa.<br>
+        8.7 É vedado ao(à) EMPREGADO(A) o uso de telefone celular ou qualquer dispositivo eletrônico pessoal durante o atendimento ao cliente ou enquanto estiver em área operacional da EMPREGADORA, salvo em casos de urgência ou mediante autorização expressa do superior imediato. Fica expressamente proibida a realização de gravações de áudio ou vídeo, fotografias ou qualquer forma de registro do ambiente operacional, de clientes, de colegas ou de informações internas por meio de dispositivos pessoais, independentemente da finalidade alegada. O descumprimento desta cláusula poderá ensejar a adoção de medidas disciplinares, inclusive rescisão por justa causa, nos termos do art. 482 da CLT.<br>
+        8.8 O(A) EMPREGADO(A) declara ciência de que suas atividades são desempenhadas em ambiente aeroportuário sujeito a rigorosos protocolos de segurança operacional, controle de acesso e proteção patrimonial, comprometendo-se a observar integralmente tais normas e a preservar a confidencialidade de todas as informações sensíveis a que tiver acesso.<br>
+        8.9 O dever de sigilo e confidencialidade permanece vigente durante todo o contrato de trabalho e após o seu término, independentemente do motivo da rescisão.<br>
+        8.10 O(A) EMPREGADO(A) compromete-se a não exercer, pelo prazo de 12 (doze) meses contados do término do vínculo empregatício, por conta própria ou em benefício de terceiros, atividade idêntica ou similar à desempenhada na EMPREGADORA, especialmente aquelas voltadas à operação de salas VIP, lounges aeroportuários ou serviços correlatos em aeroportos onde a EMPREGADORA atue ou tenha atuado durante a vigência do contrato. Fica igualmente vedado ao(à) EMPREGADO(A), no mesmo período, captar, aliciar ou manter relacionamento comercial direto com clientes, fornecedores ou parceiros da EMPREGADORA, sob pena de pagamento de indenização por perdas e danos, sem prejuízo das demais medidas legais cabíveis.<br>
+        8.11 O descumprimento desta cláusula poderá caracterizar falta grave, nos termos do art. 482, alínea "g", da CLT, sem prejuízo da responsabilização civil pelos danos causados e demais medidas legais cabíveis.</p>
+
+        <p><span class="text-bold">CLÁUSULA NONA – DA PRIVACIDADE, TECNOLOGIA E PROPRIEDADE INDUSTRIAL</span><br>
+        9.1 Em observância à Lei nº 13.709/18 – Lei Geral de Proteção de Dados Pessoais e demais normativas aplicáveis sobre proteção de Dados Pessoais, o(a) EMPREGADO(A) declara ciência de que seus dados pessoais fornecidos na admissão e durante a vigência do contrato de trabalho serão tratados para as finalidades específicas, de forma sigilosa e confidencial, mantendo-os em ambiente seguro e utilizando as bases legais da execução do contrato de trabalho, legítimo interesse do controlador, cumprimento de obrigação legal ou regulatória, bem como exercício regular de direitos.<br>
+        9.2 O tratamento de dados pessoais do(a) EMPREGADO(A) não relacionado à execução do contrato de trabalho, legítimo interesse do controlador, cumprimento de obrigação legal ou para exercício regular de direitos, somente será realizado com consentimento do(a) EMPREGADO(A), o que se dará mediante coleta de autorização em termo apartado não vinculado ao contrato de trabalho.<br>
+        9.3 Para os fins desta cláusula, considera-se dado pessoal toda informação relacionada à pessoa natural identificada ou identificável, nos termos da legislação vigente.<br>
+        9.4 O(A) EMPREGADO(A) autoriza o envio de comunicados internos por parte da empresa através do e-mail e do telefone pessoal, informados no momento da contratação, inclusive através de mensagens e por redes sociais, para comunicados relacionados ao trabalho.<br>
+        9.5 O(A) EMPREGADO(A) autoriza, de forma gratuita e por prazo indeterminado, o uso de sua imagem e voz pela EMPREGADORA para fins institucionais, incluindo materiais internos, treinamentos, comunicações corporativas e divulgação em canais oficiais da empresa, desde que tal uso não implique exposição vexatória ou descontextualizada. Esta autorização poderá ser revogada por escrito a qualquer tempo pelo(a) EMPREGADO(A), produzindo efeitos a partir da data do recebimento pela EMPREGADORA, sem efeito retroativo sobre os materiais já produzidos e publicados.<br>
+        9.6 Todas as criações, desenvolvimentos, obras, projetos, metodologias, processos, conteúdos e materiais produzidos pelo(a) EMPREGADO(A) no exercício de suas funções ou em razão delas, ainda que fora do horário de trabalho, pertencem exclusivamente à EMPREGADORA, nos termos dos artigos 4º e 88 da Lei nº 9.279/96 e do art. 11 da Lei nº 9.610/98. O(A) EMPREGADO(A) cede, desde já, de forma irrevogável e a título gratuito, todos os direitos patrimoniais sobre tais criações à EMPREGADORA, comprometendo-se a assinar os documentos necessários para a formalização dessa titularidade sempre que solicitado.<br>
+        9.7 O(A) EMPREGADO(A) declara ciência de que os sistemas de informação, equipamentos, e-mail corporativo, aplicativos, plataformas e demais ferramentas tecnológicas fornecidas pela EMPREGADORA são de uso exclusivamente profissional e constituem patrimônio da empresa, podendo ser monitorados a qualquer tempo, mediante critérios de razoabilidade, para fins de segurança da informação, controle operacional e cumprimento de obrigações legais. O monitoramento não representa violação à privacidade do(a) EMPREGADO(A), que desde já consente expressamente com tal prática ao utilizar os recursos tecnológicos disponibilizados.</p>
+
+        <p><span class="text-bold">CLÁUSULA DÉCIMA – DA COMUNICAÇÃO DO ESTADO GRAVÍDICO E DO DIREITO À REINTEGRAÇÃO</span><br>
+        10.1 O(A) EMPREGADO(A) compromete-se a comunicar à EMPREGADORA, por escrito e no prazo de 48h contados da ciência do estado gravídico, sempre que tal condição seja de seu conhecimento, inclusive quando já iniciado eventual procedimento de rescisão contratual. A comunicação deverá ser acompanhada de documento médico comprobatório, como exame laboratorial ou declaração de médico assistente, e endereçada diretamente ao setor de Recursos Humanos e à Gerência imediata da EMPREGADORA.<br>
+        10.2 Acordam as partes que na hipótese em que a rescisão contratual já tenha sido formalizada sem que a EMPREGADORA tivesse conhecimento do estado gravídico, o(a) EMPREGADO(A) obriga-se a comunicar o fato à EMPREGADORA imediatamente após a confirmação, oportunizando expressamente a reintegração ao posto de trabalho antes de adotar qualquer outra medida, inclusive o ajuizamento de reclamação trabalhista ou o requerimento de indenização substitutiva ao período de estabilidade.<br>
+        10.3 O(A) EMPREGADO(A) declara ciência de que a EMPREGADORA, uma vez comunicada nos termos desta cláusula, terá o prazo de 15 (quinze) dias úteis para manifestar-se sobre a reintegração, sendo este o meio preferencial e prioritário de tutela do direito, em conformidade com o entendimento consolidado na Súmula 244 do TST, o que desde já o(a) EMPREGADO(A) manifesta sua expressa concordância.<br>
+        10.4 O(A) EMPREGADO(A) reconhece e concorda que a reintegração ao emprego constitui a forma primária e preferencial de proteção à gestante, declarando sua expressa preferência por esse instituto em detrimento de eventual indenização substitutiva, comprometendo-se a oportunizar à EMPREGADORA a efetivação da reintegração antes do ingresso em qualquer ação judicial que verse sobre o tema.</p>
+
+        <div class="page-break"></div>
+        <p><span class="text-bold">CLÁUSULA DÉCIMA PRIMEIRA – DA RESCISÃO</span><br>
+        11.1 O presente contrato poderá ser rescindido por qualquer das partes, na forma da legislação trabalhista aplicável, observadas as disposições relativas ao aviso prévio, verbas rescisórias e demais obrigações legais.<br>
+        11.2 Na hipótese de desligamento, o(a) EMPREGADO(A) compromete-se a devolver à EMPREGADORA os documentos, equipamentos, uniformes, crachás, materiais e demais bens que estejam sob sua posse em razão do contrato de trabalho.<br>
+        11.3 Permanecem aplicáveis, mesmo após o encerramento do vínculo empregatício, as obrigações relacionadas ao sigilo, confidencialidade, proteção de dados e uso adequado de informações internas da EMPREGADORA, nos termos da legislação vigente.<br>
+        11.4. O pedido de demissão somente produzirá efeitos jurídicos quando formalizado por escrito, mediante documento assinado pelo(a) EMPREGADO(A) e recebido pela EMPREGADORA, não sendo reconhecida a validade de comunicação verbal, informal ou realizada por meios não documentados. Na hipótese de recusa injustificada à formalização, a EMPREGADORA poderá registrar o fato por meio de notificação ou boletim de ocorrência, preservando seus direitos quanto ao aviso prévio e demais obrigações rescisórias.</p>
+
+        <p><span class="text-bold">CLÁUSULA DÉCIMA SEGUNDA – DAS CONSIDERAÇÕES FINAIS</span><br>
+        12.1 Este contrato é o único instrumento que regula todas as obrigações e direitos das partes contratantes. Eventuais inclusões, exclusões ou alterações de direitos e deveres aqui previstos serão consignadas através de aditivo contratual, firmado entre as partes por escrito.<br>
+        12.2. Eventuais instrumentos ou contratos de trabalho anteriormente firmados entre as partes, quando existentes, passam a ser substituídos pelo presente contrato, ressalvadas as situações já integralmente encerradas.<br>
+        12.3 Durante a vigência deste contrato, o(a) EMPREGADO(A) compromete-se a informar e manter regularidade quanto à inexistência de outros vínculos ou atividades que possam gerar conflito com suas funções, quando aplicável à natureza do cargo, observada a legislação trabalhista vigente.<br>
+        12.4 O(A) EMPREGADO(A) declara serem verdadeiras as informações prestadas no ato de sua contratação e cadastro funcional, comprometendo-se a atualizá-las sempre que houver alteração relevante. A constatação de falsidade ou omissão relevante poderá ensejar a adoção das medidas disciplinares cabíveis, inclusive rescisão por justa causa, nos termos da legislação aplicável.<br>
+        12.5 O(A) EMPREGADO(A) declara ter recebido o Regulamento Interno da EMPREGADORA e o Código de Ética e Conduta, comprometendo-se a observar integralmente suas disposições, que passam a integrar as diretrizes de execução do presente contrato, sem prejuízo da legislação trabalhista vigente.<br>
+        12.6 Este contrato poderá coexistir com contratos por prazo determinado anteriormente firmados entre as partes, os quais permanecerão regidos por suas condições próprias até o seu término, passando a vigorar o presente instrumento a partir de sua eventual conversão ou continuidade do vínculo, conforme decisão da EMPREGADORA e nos limites da legislação aplicável.</p>
+
+        <p>E, por estarem assim justas e contratadas, firmam as partes o presente instrumento em duas vias de igual teor e forma, na presença de testemunhas, para que produza seus efeitos legais.</p>
+
+        <p style="text-align:right">${uni.local}, ${dt}.</p>
+
+        <div class="sig-row">
+            <div><div class="sig-line"></div>Empregado: ${nome}</div>
+            <div><div class="sig-line"></div>Empregador: ${uni.nomeFull}<br>Sócia: Rute Aparecida W. Scheliga</div>
+        </div>
+
+        <div style="margin-top:40px;"><p class="text-bold">TESTEMUNHAS:</p></div>
+        <div class="sig-row" style="margin-top:40px;">
+            <div><div class="sig-line"></div>1) Nome:<br>CPF:</div>
+            <div><div class="sig-line"></div>2) Nome:<br>CPF:</div>
+        </div>
+
+        <div class="page-break"></div>
+        <div class="text-center text-bold">ACORDO INDIVIDUAL DE BANCO DE HORAS E COMPENSAÇÃO DE JORNADA</div>
+        <div class="spacer"></div>
+        <p>Pelo presente instrumento particular, de um lado:</p>
+        <p><span class="text-bold">EMPREGADOR:</span> ${uni.sede}</p>
+        <p>E, de outro lado:</p>
+        <p><span class="text-bold">EMPREGADO:</span> ${nome}, portador do CPF inscrito sob n° ${cpf}, portador da Carteira de Trabalho e Previdência Social – CLT DIGITAL, residente e domiciliado(a) na ${end}.</p>
+        <p>As partes acima identificadas firmam o presente ACORDO INDIVIDUAL DE BANCO DE HORAS E COMPENSAÇÃO DE JORNADA, que se regerá pelas cláusulas seguintes:</p>
+
+        <p>1. O presente acordo tem por objeto a compensação de jornada e instituição de banco de horas, consoante disposto no art. 59, §2º da CLT e Súmula 85 do TST, permitindo a compensação de horas extraordinárias conforme estabelecido neste instrumento.</p>
+        <p>2. As horas de trabalho que excederem a jornada diária contratual, limitadas a 2 (duas) horas extras diárias, poderão ser destinadas ao banco de horas para futura compensação, sem incidência imediata do adicional legal, desde que respeitadas as regras deste acordo.</p>
+        <p>3. A compensação das horas lançadas em banco de horas será realizada mediante ajuste entre as partes, conforme escala e necessidade operacional da empresa.</p>
+        <p>4. A compensação deverá ocorrer dentro do prazo máximo de 6 (seis) meses contados da realização das horas extraordinárias.</p>
+        <p>5. A ausência de compensação dentro do prazo estipulado implicará o pagamento das horas com o adicional legal de 50% (cinquenta por cento), ou outro mais benéfico previsto em norma coletiva.</p>
+        <p>6. Na hipótese de saldo negativo de banco de horas, as horas correspondentes poderão ser compensadas mediante redução de jornada futura, sem acréscimos legais, respeitada a legislação trabalhista vigente.</p>
+        <p>7. Em caso de rescisão do contrato de trabalho, por iniciativa de qualquer das partes, eventual saldo positivo de banco de horas será pago com adicional de 50% (cinquenta por cento), juntamente com as verbas rescisórias.</p>
+        <p>8. Eventual saldo negativo poderá ser compensado ou descontado, observados os limites legais do art. 462 da CLT.</p>
+        <p>9. O eventual trabalho realizado em dias destinados ao repouso ou folgas previamente programadas será registrado em banco de horas e compensado oportunamente, conforme escala e necessidade operacional.</p>
+        <p>10. A prestação de serviços em dias destinados ao repouso ou folga, incluindo domingos, enquanto houver saldo de compensação, não caracteriza labor extraordinário, desde que haja a correspondente compensação na forma deste acordo.</p>
+        <p>11. A compensação deverá ocorrer mediante ajuste entre as partes, observada a escala da empresa e a disponibilidade do empregado, dentro do prazo de vigência deste instrumento, sem ônus adicional às partes.</p>
+        <p>12. A compensação das horas lançadas em razão de folgas deverá ocorrer, obrigatoriamente, no prazo máximo de 6 (seis) meses.</p>
+        <p>13. Na hipótese de não compensação no prazo estipulado, as horas correspondentes às folgas não compensadas serão pagas com adicional de 100% (cem por cento) sobre o valor da hora normal. Caso haja saldo negativo do empregado, este poderá ser compensado ou descontado na forma do art. 462 da CLT.</p>
+        <p>14. Em caso de rescisão do contrato de trabalho, por iniciativa de qualquer das partes, e não havendo a compensação integral das folgas trabalhadas, estas serão remuneradas com adicional de 100% (cem por cento), juntamente com as verbas rescisórias.</p>
+        <p>15. As partes assinam o presente acordo em duas vias, vigorando a compensação pelo período em que perdurar a relação de emprego, a partir da sua assinatura.</p>
+
+        <p style="text-align:right">${uni.local}, ${dt}.</p>
+
+        <div class="sig-row">
+            <div><div class="sig-line"></div>Empregado: ${nome}</div>
+            <div><div class="sig-line"></div>Empregador: ${uni.nomeFull}<br>Sócia: Rute Aparecida W. Scheliga</div>
+        </div>
+    `;
+}
+function admContratoDoc(d, unidadeRotulo){
+  const titulo = 'Contrato - ' + (d.nome || '') + (unidadeRotulo ? ' - ' + unidadeRotulo : '');
+  return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${esc(titulo)}</title>
+  <style>
+    @page { size:A4; margin:15mm; }
+    body { margin:0; background:#fff; }
+    #documento-final { font-family:Arial,sans-serif; font-size:12pt; color:#000; line-height:1.55; text-align:justify;
+      -webkit-hyphens:auto; hyphens:auto; }
+    #documento-final .text-center { text-align:center; }
+    #documento-final .text-bold { font-weight:bold; }
+    #documento-final .spacer { height:20px; }
+    #documento-final .sig-row { display:grid; grid-template-columns:1fr 1fr; gap:40px; margin-top:60px; text-align:center; }
+    #documento-final .sig-line { border-top:1px solid #000; margin-bottom:5px; }
+    #documento-final .page-break { page-break-before:always; height:1px; }
+    .barra { text-align:center; margin:0 0 14px; font-family:Arial,sans-serif; }
+    .barra button { padding:9px 18px; border:0; border-radius:8px; background:#37474F; color:#fff; font-size:13px; cursor:pointer; }
+    @media screen { body { background:#e4e8ec; padding:22px; }
+      #documento-final { width:210mm; max-width:100%; box-sizing:border-box; margin:0 auto; padding:18mm 16mm; background:#fff;
+        box-shadow:0 4px 24px rgba(0,0,0,.14); } }
+    @media print { .barra { display:none; } }
+  </style></head><body>
+  <div class="barra"><button onclick="window.print()">Imprimir / salvar em PDF</button></div>
+  <div id="documento-final">${admContratoHTML(d)}</div></body></html>`;
+}
+
+function admAbrirContrato(id){
+  const a = admissao(id); if(!a) return;
+  if(a.expurgadoEm){ toast('Os dados desta ficha já foram apagados pelo prazo de guarda.', 'alerta'); return; }
+  const cu = admContratoUni(a.unidadeId);
+  if(!cu){
+    toast('O contrato ainda não está configurado para ' + admUniNome(a.unidadeId) +
+          ' — só as unidades do grupo Advantage têm o texto cadastrado.', 'alerta');
+    return;
+  }
+  const ja = admContratoDe(a);
+  const c = (a.ficha && a.ficha.campos) || {};
+  const s = a.sst || {};
+  /* a data do contrato por prazo indeterminado é o fim da experiência */
+  const fimExp = a.admissao ? addDays(a.admissao, s.exp2 === false ? 44 : 89) : '';
+  const valores = ja ? Object.assign({}, ja.dados)
+    : { nome:a.nome, cpf:admCpfFmt(a.cpf), endereco:c.f_end || '', funcao:c.f_funcao || a.funcao || '',
+        salario:(c.f_salario && c.f_salario !== '00,00') ? c.f_salario : '', data:fimExp };
+  /* a função da ficha vem em caixa alta; o contrato usa a grafia do catálogo */
+  const chave = Object.keys(ADM_CATALOGO).find(k => k.trim().toLowerCase() === String(valores.funcao||'').trim().toLowerCase());
+  if(chave) valores.funcao = chave;
+  openForm({
+    title: (ja ? 'Retificar contrato — ' : 'Gerar contrato — ') + (a.nome || ''),
+    fields: [
+      { type:'html', name:'cabContrato', html:`<div class="sm:col-span-2 space-y-2">
+          <div class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+            <b>Empregadora:</b> ${esc(cu.nomeFull)}<br><b>Local de trabalho:</b> ${esc(cu.trabalho)}</div>
+          ${ja ? `<div class="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+            <i class="fa-solid fa-clock mr-1"></i>Contrato emitido em <b>${fmtDate(String(ja.emitidoEm).slice(0,10))}</b>.
+            Salvar aqui gera a versão retificada e <b>recomeça</b> a contagem de ${ADM_DIAS_GUARDA} dias.</div>` : ''}
+          <label class="flex items-center gap-3 px-3 py-2 rounded-lg border-2 border-dashed border-slate-300 cursor-pointer hover:border-accent hover:bg-white">
+            <i class="fa-solid fa-file-arrow-up text-slate-400"></i>
+            <span id="admPdfCtRot" class="text-sm text-slate-600">Opcional: preencher pelo PDF do contrato de experiência</span>
+            <input type="file" accept=".pdf" class="hidden" onchange="admImportarPdfContrato(this)"></label>
+          <p id="admPdfCtMsg" class="text-[11px] text-slate-500"></p></div>` },
+      { name:'nome', label:'Nome do empregado', req:true, col:'sm:col-span-2' },
+      { name:'cpf', label:'CPF', req:true },
+      { name:'salario', label:'Salário mensal (R$)', req:true, ph:'Ex.: 2.600,00' },
+      { name:'endereco', label:'Endereço residencial', req:true, col:'sm:col-span-2', ph:'Logradouro, número, bairro, cidade - UF' },
+      { name:'funcao', label:'Função / cargo', type:'datalist', req:true, col:'sm:col-span-2',
+        options:Object.keys(ADM_CATALOGO), hint:'escolha da lista — o contrato leva a descrição das atividades da função' },
+      { type:'painel', name:'admDescFuncao', col:'sm:col-span-2' },
+      { name:'data', label:'Data do contrato', type:'date', req:true,
+        hint:'vai na linha de local e data — por padrão, o último dia da experiência' }
+    ],
+    values: valores,
+    afterRender: form => {
+      const inp = form.elements['funcao'], alvo = form.querySelector('#admDescFuncao');
+      const pintar = () => {
+        const d = admDescricaoFuncao(inp.value);
+        alvo.innerHTML = d
+          ? `<div class="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600"><b>Atividades:</b> ${esc(d)}</div>`
+          : (inp.value ? `<div class="rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-800">
+              <i class="fa-solid fa-circle-exclamation mr-1"></i>Esta função não tem descrição cadastrada —
+              o contrato não pode ser gerado sem ela. Escolha uma função da lista.</div>` : '');
+      };
+      inp.addEventListener('input', pintar); pintar();
+      $('#modalFoot').querySelector('button[onclick="submitForm()"]').innerHTML =
+        '<i class="fa-solid fa-file-signature mr-1"></i>' + (ja ? 'Retificar e abrir' : 'Gerar contrato');
+      if(ja) $('#modalFoot').insertAdjacentHTML('afterbegin', `<button onclick="admReabrirContrato('${a.id}')"
+        class="px-4 py-2 rounded-lg text-sm border border-slate-300 text-slate-700 hover:bg-slate-50 mr-auto">
+        <i class="fa-solid fa-print mr-1"></i>Só reabrir o emitido</button>`);
+    },
+    onSave: async v => {
+      const desc = admDescricaoFuncao(v.funcao);
+      if(!desc){ toast('A função "' + v.funcao + '" não tem descrição no catálogo. Escolha uma função da lista.', 'erro'); return; }
+      const maius = x => String(x||'').toLocaleUpperCase('pt-BR');
+      const dados = { uniKey:cu.chave, nome:maius(v.nome), cpf:admCpfFmt(v.cpf), endereco:maius(v.endereco),
+                      funcao:Object.keys(ADM_CATALOGO).find(k => k.trim().toLowerCase() === v.funcao.trim().toLowerCase()),
+                      descricao:desc, salario:v.salario, data:v.data };
+      const agora = new Date();
+      let reg = { id:(ja && ja.id) || admNovoId(), admissaoId:a.id, unidadeId:a.unidadeId, nome:dados.nome, dados,
+                    emitidoEm:agora.toISOString(), emitidoPor:String(SESSAO.email||'').toLowerCase(),
+                    disponivelAte:new Date(agora.getTime() + ADM_DIAS_GUARDA*86400000).toISOString() };
+      if(nuvemLigada()){
+        /* um contrato por admissão: a retificação cai em cima do anterior */
+        const { data, error } = await sb.from('atlas_contrato').upsert({ admissao_id:a.id, unidade_id:a.unidadeId,
+          nome:reg.nome, dados, emitido_em:reg.emitidoEm, emitido_por:reg.emitidoPor, disponivel_ate:reg.disponivelAte },
+          { onConflict:'admissao_id' }).select().single();
+        if(error){ toast('Não consegui gravar o contrato: ' + error.message, 'erro'); return; }
+        if(data) reg = admContratoDaLinha(data);
+      }
+      CONTRATOS = CONTRATOS.filter(x => x.admissaoId !== a.id).concat([reg]);
+      a.contratoEm = reg.emitidoEm;
+      admAvisarFalha(await admSalvar(a), 'a data do contrato');
+      registrarAtividade('emitiu_contrato', { admissao_id:a.id, retificacao:!!ja });
+      closeModal();
+      abrirRelatorio(admContratoDoc(dados, admUniRotulo(a.unidadeId)));
+      if(UIAdm.edit) admRenderForm(true); else viewAdmissoes();
+    }
+  });
+}
+function admReabrirContrato(id){
+  const a = admissao(id), ja = a && admContratoDe(a);
+  if(!ja) return;
+  closeModal();
+  abrirRelatorio(admContratoDoc(ja.dados, admUniRotulo(a.unidadeId)));
+  registrarAtividade('abriu_contrato', { admissao_id:id });
+}
+async function admImportarPdfContrato(input){
+  const file = input.files && input.files[0];
+  if(!file) return;
+  const rot = $('#admPdfCtRot'), msg = $('#admPdfCtMsg'), form = $('#modalForm');
+  rot.textContent = 'Lendo o PDF...';
+  try{
+    await admPdfjs();
+    const r = await ADMPDF.lerContrato(file);
+    Object.keys(r.campos).forEach(k => { if(form.elements[k] && r.campos[k]) form.elements[k].value = r.campos[k]; });
+    form.elements['funcao'].dispatchEvent(new Event('input'));
+    rot.textContent = file.name;
+    msg.className = 'text-[11px] ' + (r.preenchidos.length ? 'text-emerald-700' : 'text-red-600');
+    msg.textContent = r.preenchidos.length ? 'Lidos do PDF: ' + r.preenchidos.join(', ') + '. Confira antes de gerar.'
+                                           : 'Nenhum campo reconhecido neste PDF.';
+  }catch(e){
+    rot.textContent = 'Opcional: preencher pelo PDF do contrato de experiência';
+    msg.className = 'text-[11px] text-red-600';
+    msg.textContent = 'Não consegui ler o PDF (' + (e && e.message || e) + ').';
+  }
+  input.value = '';
+}
+
+/* ═════════ inserir na base e pedir o ASO ═════════ */
+function admCadastrar(id){
+  const a = admissao(id); if(!a) return;
+  const ja = admNoCadastro(a);
+  if(ja){ toast(a.nome + ' já está no cadastro de colaboradores.', 'info'); return; }
+  if(a.cadastroPedidoEm){ toast('O cadastro de ' + a.nome + ' já foi enviado e aguarda a Atlas.', 'info'); return; }
+  admConfirmar('Inserir na base de colaboradores',
+    `<p>Quer inserir <b>${esc(a.nome)}</b> na base de colaboradores do Atlas?</p>
+     <p class="text-xs text-slate-500">Vai para o cadastro só o que a medicina do trabalho usa: nome, CPF, RG, nascimento,
+       sexo, contatos, unidade, função e data de admissão. Banco, PIX, dependentes, filiação e os outros dados da ficha
+       <b>não</b> vão.</p>
+     ${ACESSO.irrestrito ? '' : `<p class="text-xs text-slate-500">O colaborador entra na base quando a Atlas abrir o sistema.</p>`}`,
+    'Sim, inserir', async () => {
+      if(ACESSO.irrestrito){
+        const pre = admParaColab(a);
+        if(!pre.funcao && a.funcao) setTimeout(() => toast('A função "' + a.funcao + '" não está no catálogo do Atlas — escolha a equivalente.', 'alerta'), 400);
+        pre._aposSalvar = (c, em) => admCadastrado(a.id, c, em);
+        editarColab(null, pre);
+        return;
+      }
+      a.cadastroPedidoEm = new Date().toISOString();
+      a.cadastroPedidoPor = String(SESSAO.email||'').toLowerCase();
+      if(admAvisarFalha(await admSalvar(a), 'o pedido de cadastro')){ a.cadastroPedidoEm = ''; a.cadastroPedidoPor = ''; return; }
+      if(UIAdm.edit) admRenderForm(true); else viewAdmissoes();
+      toast('Cadastro de ' + a.nome + ' enviado para a Atlas.');
+    });
+}
+/* volta do formulário de colaborador (só o master passa por aqui) */
+async function admCadastrado(aid, c, em){
+  const a = admissao(aid); if(!a) return;
+  a.colaboradorId = c.id;
+  if(em) a.asoPedidoEm = new Date().toISOString();
+  admAvisarFalha(await admSalvar(a), 'o vínculo com o cadastro');
+  if(!em){ UIAdm.edit = null; go('admissoes'); }
+}
+
+function admPedirAso(id){
+  const a = admissao(id); if(!a) return;
+  if(a.asoPedidoEm){ toast('O ASO admissional de ' + a.nome + ' já foi solicitado.', 'info'); return; }
+  if(ACESSO.irrestrito){
+    const c = colabPorCpf(a.cpf, null);
+    /* sem cadastro não há a quem ligar o exame: o formulário de colaborador já
+       tem o "Salvar e solicitar ASO admissional" */
+    if(!c){
+      admConfirmar('Solicitar ASO admissional',
+        `<p><b>${esc(a.nome)}</b> ainda não está no cadastro de colaboradores.</p>
+         <p class="text-xs text-slate-500">Vou abrir o cadastro já preenchido com os dados de SST da ficha. Lá, use
+           <b>Salvar e solicitar ASO admissional</b>.</p>`,
+        'Abrir o cadastro', () => {
+          const pre = admParaColab(a);
+          pre._aposSalvar = (col, em) => admCadastrado(a.id, col, em);
+          editarColab(null, pre);
+        });
+      return;
+    }
+    admConfirmar('Solicitar ASO admissional',
+      `<p>Criar o exame <b>admissional</b> de <b>${esc(c.nome)}</b> em Agendamento de exames, como Solicitado?</p>
+       <p class="text-xs text-slate-500">Os exames da matriz da função (${esc(c.funcao || 'sem função')}) já vão sugeridos.</p>`,
+      'Sim, solicitar', async () => {
+        solicitarAsoDoCadastro(c, true, 'ADMISSIONAL');
+        a.asoPedidoEm = new Date().toISOString();
+        if(!a.colaboradorId) a.colaboradorId = c.id;
+        admAvisarFalha(await admSalvar(a), 'o pedido de ASO');
+        if(UIAdm.edit) admRenderForm(true); else viewAdmissoes();
+        toast('Exame admissional de ' + c.nome + ' criado como Solicitado.');
+      });
+    return;
+  }
+  admConfirmar('Solicitar ASO admissional',
+    `<p>Pedir à Atlas o exame <b>admissional</b> de <b>${esc(a.nome)}</b>?</p>
+     <p class="text-xs text-slate-500">O pedido entra na fila da Atlas, que agenda o exame na clínica da unidade.</p>`,
+    'Sim, pedir', async () => {
+      const r = await nuvemAbrirSolicitacao({ unidadeId:a.unidadeId, colaboradorId:'', nome:a.nome, cpf:a.cpf,
+        funcao:a.funcao || '', tipoExame:'ADMISSIONAL', observacao:'Pedido pela ficha de admissão' });
+      if(!r.ok){ toast('Não consegui enviar o pedido: ' + (r.motivo || 'motivo desconhecido'), 'erro'); return; }
+      a.asoPedidoEm = new Date().toISOString();
+      admAvisarFalha(await admSalvar(a), 'o pedido de ASO');
+      if(UIAdm.edit) admRenderForm(true); else viewAdmissoes();
+      toast('Pedido de ASO admissional enviado para a Atlas.');
+    });
+}
+
+/* ═════════ experiência e férias ═════════
+   Tudo sai da data de admissão.
+   Experiência: 45 dias, prorrogáveis por mais 45 (o 1º período termina no 45º
+   dia, o 2º no 90º).
+   Férias (CLT): cada 12 meses de casa dão direito a 30 dias, e a empresa tem
+   os 12 meses seguintes para conceder — passou disso, são devidas em dobro.
+   Os dias tirados abatem sempre do período mais antigo. */
+function admAddAnos(iso, n){
+  const d = parseISO(iso); if(!d) return '';
+  d.setFullYear(d.getFullYear() + n); return toISO(d);
+}
+function admDiasFerias(f){
+  const a = parseISO(f.inicio), b = parseISO(f.fim);
+  return (a && b ? Math.round((b - a) / 86400000) + 1 : 0) + (Number(f.abono) || 0);
+}
+function admPessoas(){
+  const mapa = new Map();
+  admQuadro().forEach(c => {
+    if(STATUS_INATIVOS.indexOf(c.status) >= 0) return;
+    mapa.set(c.cpf || c.id, { cpf:c.cpf, nome:c.nome, funcao:c.funcao, unidadeId:c.unidadeId,
+                              admissao:c.admissao, exp1:true, exp2:true, origem:'cadastro' });
+  });
+  /* quem tem ficha e ainda não chegou ao cadastro também é acompanhado */
+  ADMISSOES.forEach(a => {
+    const k = cpfDigitos(a.cpf);
+    const p = mapa.get(k);
+    const s = a.sst || {};
+    if(p){ if(!p.admissao) p.admissao = a.admissao; p.exp1 = s.exp1 !== false; p.exp2 = s.exp2 !== false; return; }
+    if(a.colaboradorId) return;     /* já foi para o cadastro e saiu de lá (desligado): não volta por aqui */
+    mapa.set(k, { cpf:k, nome:a.nome, funcao:a.funcao, unidadeId:a.unidadeId, admissao:a.admissao,
+                  exp1:s.exp1 !== false, exp2:s.exp2 !== false, origem:'ficha' });
+  });
+  return [...mapa.values()];
+}
+function admExperiencia(p){
+  if(!p.admissao || !p.exp1) return { fase:'sem' };
+  const f1 = addDays(p.admissao, 44), f2 = p.exp2 ? addDays(p.admissao, 89) : '';
+  const d1 = diasPara(f1), d2 = f2 ? diasPara(f2) : null;
+  const fim = f2 || f1, dFim = f2 ? d2 : d1;
+  if(dFim < 0) return { fase:'concluida', f1, f2 };
+  return { fase: d1 >= 0 ? 'primeiro' : 'segundo', f1, f2, d1, d2, prox: d1 >= 0 ? d1 : d2, fim };
+}
+function admFeriasDe(p){
+  if(!p.admissao) return null;
+  const hoje = isoToday();
+  let completos = 0;
+  while(completos < 60 && admAddAnos(p.admissao, completos + 1) <= hoje) completos++;
+  const lanc = FERIAS.filter(f => f.cpf === p.cpf).sort((a,b) => a.inicio.localeCompare(b.inicio));
+  const tirados = lanc.reduce((s,f) => s + admDiasFerias(f), 0);
+  const direito = completos * 30;
+  const quitados = Math.min(completos, Math.floor(tirados / 30));     /* períodos já gozados por inteiro */
+  const pendente = quitados < completos;
+  /* limite para conceder o período pendente mais antigo */
+  const limite = pendente ? addDays(admAddAnos(p.admissao, quitados + 2), -1) : '';
+  return { completos, direito, tirados, saldo: direito - tirados, lanc, pendente, limite,
+           diasLimite: limite ? diasPara(limite) : null,
+           periodo: pendente ? fmtDate(admAddAnos(p.admissao, quitados)) + ' a ' + fmtDate(addDays(admAddAnos(p.admissao, quitados + 1), -1)) : '',
+           proximo: admAddAnos(p.admissao, completos + 1) };
+}
+const ADM_AVISO_EXP = 10, ADM_AVISO_FERIAS = 60;
+/* contador da aba: experiência acabando ou férias vencidas / perto de vencer */
+function admAlertas(){
+  return admPessoas().filter(p => {
+    const e = admExperiencia(p);
+    if((e.fase === 'primeiro' || e.fase === 'segundo') && e.prox <= ADM_AVISO_EXP) return true;
+    const f = admFeriasDe(p);
+    return !!(f && f.pendente && f.diasLimite <= ADM_AVISO_FERIAS);
+  }).length;
+}
+
+function admAcompanhar(){
+  const q = norm(UIAdm.qAc);
+  const todas = admPessoas();
+  const semData = todas.filter(p => !p.admissao).length;
+  const lista = todas.filter(p => p.admissao).map(p => ({ p, e:admExperiencia(p), f:admFeriasDe(p) })).filter(x => {
+    if(UIAdm.uniAc && x.p.unidadeId !== UIAdm.uniAc) return false;
+    if(UIAdm.qAc && !norm(x.p.nome).includes(q)) return false;
+    if(UIAdm.filtroAc === 'exp') return x.e.fase === 'primeiro' || x.e.fase === 'segundo';
+    if(UIAdm.filtroAc === 'vencer') return x.f.pendente && x.f.diasLimite >= 0 && x.f.diasLimite <= ADM_AVISO_FERIAS;
+    if(UIAdm.filtroAc === 'vencidas') return x.f.pendente && x.f.diasLimite < 0;
+    if(UIAdm.filtroAc === 'saldo') return x.f.saldo > 0;
+    return true;
+  }).sort((a,b) => {
+    /* o que vence primeiro sobe: experiência em curso, depois limite de férias */
+    const ka = (a.e.prox != null) ? a.e.prox : (a.f.pendente ? 1000 + a.f.diasLimite : 99999);
+    const kb = (b.e.prox != null) ? b.e.prox : (b.f.pendente ? 1000 + b.f.diasLimite : 99999);
+    return ka - kb || a.p.nome.localeCompare(b.p.nome, 'pt-BR');
+  });
+  const pg = paginar(lista, UIAdm.pageAc);
+  const expHTML = e => {
+    if(e.fase === 'sem') return '<span class="text-slate-400">sem experiência</span>';
+    if(e.fase === 'concluida') return badge('concluída em ' + fmtDate(e.f2 || e.f1), 'bg-slate-100 text-slate-500');
+    const cor = d => d <= 3 ? 'bg-red-100 text-red-700' : d <= ADM_AVISO_EXP ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700';
+    const linha = (rot, fim, d) => `<div class="whitespace-nowrap">${rot} até <b>${fmtDate(fim)}</b> ${
+      d < 0 ? badge('encerrado', 'bg-slate-100 text-slate-500') : badge(d === 0 ? 'termina hoje' : 'faltam ' + d + ' dia(s)', cor(d))}</div>`;
+    return linha('1º', e.f1, e.d1) + (e.f2 ? linha('2º', e.f2, e.d2) : '');
+  };
+  const limHTML = f => {
+    if(!f.pendente) return `<span class="text-slate-500 whitespace-nowrap">próximo período completa em ${fmtDate(f.proximo)}</span>`;
+    const d = f.diasLimite;
+    const b = d < 0 ? badge('vencidas há ' + (-d) + ' dia(s)', 'bg-red-100 text-red-700')
+            : d <= ADM_AVISO_FERIAS ? badge('vence em ' + d + ' dia(s)', 'bg-amber-100 text-amber-700')
+            : badge('em ' + d + ' dia(s)', 'bg-emerald-100 text-emerald-700');
+    return `<div class="whitespace-nowrap">tirar até <b>${fmtDate(f.limite)}</b> ${b}</div>
+            <div class="text-[11px] text-slate-400 whitespace-nowrap">período ${f.periodo}</div>`;
+  };
+  const linhas = pg.itens.map(({ p, e, f }) => `<tr class="hover:bg-slate-50 align-top">
+      <td class="px-4 py-3 font-medium text-slate-700">${esc(p.nome)}
+        <div class="text-[11px] text-slate-500 font-normal">${esc(p.funcao || 'sem função')}${
+          p.origem === 'ficha' ? ' · <span class="text-indigo-600">ainda fora do cadastro</span>' : ''}</div></td>
+      <td class="px-4 py-3 text-xs text-slate-600">${esc(admUniNome(p.unidadeId))}</td>
+      <td class="px-4 py-3 text-xs text-slate-600 whitespace-nowrap">${fmtDate(p.admissao)}</td>
+      <td class="px-4 py-3 text-xs space-y-1">${expHTML(e)}</td>
+      <td class="px-4 py-3 text-xs">${limHTML(f)}</td>
+      <td class="px-4 py-3 text-xs text-right whitespace-nowrap">${f.direito}</td>
+      <td class="px-4 py-3 text-xs text-right whitespace-nowrap">${f.tirados}</td>
+      <td class="px-4 py-3 text-xs text-right whitespace-nowrap font-semibold ${f.saldo > 0 ? 'text-slate-800' : f.saldo < 0 ? 'text-red-600' : 'text-slate-400'}">${f.saldo}</td>
+      <td class="px-4 py-3 text-right no-print"><button onclick="admAbrirFerias('${esc(p.cpf)}')"
+        class="px-2.5 py-1.5 rounded-lg text-xs border border-slate-300 hover:bg-slate-50 whitespace-nowrap"
+        title="Apontar as férias tiradas"><i class="fa-solid fa-umbrella-beach mr-1"></i>Férias</button></td></tr>`).join('');
+  const ativo = !!(UIAdm.qAc || UIAdm.uniAc || UIAdm.filtroAc);
+  $('#abaAdm').innerHTML = `
+    <div class="space-y-4">
+      ${semData ? `<div class="rounded-xl border border-amber-300 bg-amber-50 px-5 py-3 text-xs text-amber-900">
+        <i class="fa-solid fa-triangle-exclamation mr-1"></i><b>${semData}</b> colaborador(es) ativo(s) estão sem data de admissão
+        no cadastro e por isso não aparecem aqui — experiência e férias são contadas a partir dela.</div>` : ''}
+      <div class="bg-white rounded-xl border border-slate-200">
+        ${barraFiltros([
+            inputBusca('admBuscaAc', 'Buscar por nome...', "UIAdm.qAc=this.value;UIAdm.pageAc=1;admAcompanhar();focarBusca('admBuscaAc')", UIAdm.qAc, COL4),
+            selectFiltro('admUniAc', 'Todas as unidades', admUnidades().map(u => ({ v:u.id, l:u.nome })),
+                         "UIAdm.uniAc=this.value;UIAdm.pageAc=1;admAcompanhar()", UIAdm.uniAc, COL4),
+            selectFiltro('admFiltroAc', 'Todos', [
+                { v:'exp', l:'Em experiência' }, { v:'vencer', l:'Férias a vencer (até ' + ADM_AVISO_FERIAS + ' dias)' },
+                { v:'vencidas', l:'Férias vencidas' }, { v:'saldo', l:'Com saldo de férias' } ],
+              "UIAdm.filtroAc=this.value;UIAdm.pageAc=1;admAcompanhar()", UIAdm.filtroAc, COL4)
+          ], [], { ativo, onClick:"UIAdm.qAc='';UIAdm.uniAc='';UIAdm.filtroAc='';UIAdm.pageAc=1;admAcompanhar()" })}
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm data">
+            <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
+              <tr><th class="px-4 py-3">Colaborador</th><th class="px-4 py-3">Unidade</th><th class="px-4 py-3">Admissão</th>
+                  <th class="px-4 py-3">Experiência (45 + 45)</th><th class="px-4 py-3">Férias — prazo</th>
+                  <th class="px-4 py-3 text-right whitespace-nowrap" title="30 dias por ano completo de casa">Direito</th>
+                  <th class="px-4 py-3 text-right whitespace-nowrap" title="dias gozados + dias vendidos">Tirados</th>
+                  <th class="px-4 py-3 text-right whitespace-nowrap">Saldo</th>
+                  <th class="px-4 py-3 no-print"></th></tr></thead>
+            <tbody class="divide-y divide-slate-100">
+              ${lista.length ? linhas : vazio(ativo ? 'Ninguém neste filtro.' : 'Nenhum colaborador com data de admissão.')}
+            </tbody></table>
+        </div>
+        ${paginador(lista.length, pg.p, 'admPaginaAc')}
+      </div>
+      <p class="text-[11px] text-slate-400">Direito, tirados e saldo em dias. Cada ano completo de casa dá 30 dias; a empresa tem
+        os 12 meses seguintes para conceder. O que você aponta em <b>Férias</b> abate do período mais antigo.</p>
+    </div>`;
+}
+function admPaginaAc(p){ UIAdm.pageAc = p; admAcompanhar(); }
+
+function admAbrirFerias(cpf){
+  const p = admPessoas().find(x => x.cpf === cpf); if(!p) return;
+  const f = admFeriasDe(p);
+  const cls = 'w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-accent/40';
+  openInfo('Férias — ' + p.nome, `
+    <div class="space-y-4">
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
+        ${[['Admissão', fmtDate(p.admissao)], ['Direito', f.direito + ' dias'], ['Tirados', f.tirados + ' dias'],
+           ['Saldo', f.saldo + ' dias']].map(([k, v]) => `<div class="rounded-lg border border-slate-200 px-3 py-2">
+          <p class="text-[10px] uppercase tracking-wide text-slate-500">${k}</p><p class="text-sm font-semibold text-slate-800">${v}</p></div>`).join('')}
+      </div>
+      ${f.pendente ? `<p class="text-xs text-slate-600">Período em aberto: <b>${f.periodo}</b> — tirar até <b>${fmtDate(f.limite)}</b>.</p>`
+                   : `<p class="text-xs text-slate-500">Nenhum período em aberto. O próximo se completa em ${fmtDate(f.proximo)}.</p>`}
+      <table class="w-full text-sm">
+        <thead class="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+          <tr><th class="py-2">Início</th><th class="py-2">Fim</th><th class="py-2 text-right">Dias</th>
+              <th class="py-2 text-right">Vendidos</th><th class="py-2 pl-3">Observação</th><th></th></tr></thead>
+        <tbody class="divide-y divide-slate-100">
+          ${f.lanc.length ? f.lanc.map(x => `<tr>
+            <td class="py-2">${fmtDate(x.inicio)}</td><td class="py-2">${fmtDate(x.fim)}</td>
+            <td class="py-2 text-right">${admDiasFerias(x) - x.abono}</td><td class="py-2 text-right">${x.abono || '—'}</td>
+            <td class="py-2 pl-3 text-xs text-slate-500">${esc(x.observacao || '')}</td>
+            <td class="py-2 text-right"><button onclick="admExcluirFerias('${x.id}','${esc(cpf)}')"
+              class="text-slate-400 hover:text-danger px-1.5" title="Excluir este lançamento"><i class="fa-solid fa-trash"></i></button></td></tr>`).join('')
+            : '<tr><td colspan="6" class="py-4 text-center text-xs text-slate-400">Nenhuma férias apontada.</td></tr>'}
+        </tbody></table>
+      <div class="rounded-lg border border-slate-200 bg-slate-50 p-3">
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-2">Apontar férias tiradas</p>
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          <div><label class="block text-[11px] text-slate-600 mb-1">Início</label><input id="admFerIni" type="date" onpaste="colarData(event)" class="${cls}"></div>
+          <div><label class="block text-[11px] text-slate-600 mb-1">Fim</label><input id="admFerFim" type="date" onpaste="colarData(event)" class="${cls}"></div>
+          <div><label class="block text-[11px] text-slate-600 mb-1">Dias vendidos</label><input id="admFerAbono" type="number" min="0" max="10" value="0" class="${cls}"></div>
+          <div class="flex items-end"><button onclick="admGravarFerias('${esc(cpf)}')"
+            class="w-full px-3 py-2 rounded-lg text-sm bg-accent text-white hover:bg-blue-700"><i class="fa-solid fa-plus mr-1"></i>Apontar</button></div>
+          <div class="col-span-2 sm:col-span-4"><input id="admFerObs" placeholder="Observação (opcional)" class="${cls}"></div>
+        </div>
+      </div>
+    </div>`, 'max-w-2xl');
+}
+async function admGravarFerias(cpf){
+  const p = admPessoas().find(x => x.cpf === cpf); if(!p) return;
+  const ini = $('#admFerIni').value, fim = $('#admFerFim').value;
+  const abono = Math.max(0, Math.min(10, Number($('#admFerAbono').value) || 0));
+  if(!ini || !fim){ toast('Informe o início e o fim das férias.', 'erro'); return; }
+  if(fim < ini){ toast('O fim não pode ser antes do início.', 'erro'); return; }
+  if(cpfDigitos(cpf).length !== 11){ toast('Esta pessoa está sem CPF válido no cadastro — corrija antes de apontar férias.', 'erro'); return; }
+  const reg = { id:admNovoId(), unidadeId:p.unidadeId, cpf, nome:p.nome, inicio:ini, fim, abono,
+                observacao:$('#admFerObs').value.trim() };
+  if(nuvemLigada()){
+    const { error } = await sb.from('atlas_ferias').insert({ id:reg.id, unidade_id:reg.unidadeId, cpf:reg.cpf, nome:reg.nome,
+      inicio:reg.inicio, fim:reg.fim, abono:reg.abono, observacao:reg.observacao || null });
+    if(error){ toast('Não consegui gravar as férias: ' + error.message, 'erro'); return; }
+  }
+  FERIAS.push(reg);
+  admAbrirFerias(cpf); viewAdmissoes();
+  toast('Férias apontadas.');
+}
+async function admExcluirFerias(id, cpf){
+  if(!confirm('Excluir este lançamento de férias?')) return;
+  if(nuvemLigada()){
+    const { error } = await sb.from('atlas_ferias').delete().eq('id', id);
+    if(error){ toast('Não consegui excluir: ' + error.message, 'erro'); return; }
+  }
+  FERIAS = FERIAS.filter(f => f.id !== id);
+  admAbrirFerias(cpf); viewAdmissoes();
+}
+
+/* ═════════ a gerente: contratos para assinatura ═════════
+   Ela não vê ficha nem admissão — só o contrato emitido, e só enquanto a
+   política do banco deixar (30 dias). O que está aqui já chegou filtrado. */
+function contratosDaGerente(){
+  const agora = new Date().toISOString();
+  return CONTRATOS.filter(c => daUnidadeGer(c.unidadeId) && (!c.disponivelAte || c.disponivelAte >= agora))
+    .sort((a,b) => String(b.emitidoEm).localeCompare(String(a.emitidoEm)));
+}
+function gerContratos(){
+  const lista = contratosDaGerente();
+  $('#abaGer').innerHTML = `
+    <div class="space-y-4">
+      <div class="rounded-xl border border-blue-200 bg-blue-50 px-5 py-3 text-xs text-blue-900 flex items-start gap-3">
+        <i class="fa-solid fa-circle-info mt-0.5"></i>
+        <div>Os contratos emitidos pela equipe de admissão ficam aqui por <b>${ADM_DIAS_GUARDA} dias</b>, para impressão e
+          assinatura. Depois desse prazo saem desta tela.</div>
+      </div>
+      <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
+        <div class="overflow-x-auto"><table class="w-full text-sm data">
+          <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
+            <tr><th class="px-4 py-3">Empregado</th><th class="px-4 py-3">Função</th><th class="px-4 py-3">Emitido em</th>
+                <th class="px-4 py-3">Disponível até</th><th class="px-4 py-3 text-right">Contrato</th></tr></thead>
+          <tbody class="divide-y divide-slate-100">
+            ${lista.length ? lista.map(c => { const d = diasPara(String(c.disponivelAte).slice(0,10)); return `<tr class="hover:bg-slate-50">
+              <td class="px-4 py-3 font-medium text-slate-700">${esc(c.nome)}</td>
+              <td class="px-4 py-3 text-xs text-slate-600">${esc((c.dados||{}).funcao || '—')}</td>
+              <td class="px-4 py-3 text-xs text-slate-600">${fmtDate(String(c.emitidoEm).slice(0,10))}</td>
+              <td class="px-4 py-3 text-xs">${fmtDate(String(c.disponivelAte).slice(0,10))}
+                ${badge(d <= 0 ? 'último dia' : 'mais ' + d + ' dia(s)', d <= 7 ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600')}</td>
+              <td class="px-4 py-3 text-right"><button onclick="gerAbrirContrato('${c.id}')"
+                class="px-3 py-1.5 rounded-lg text-xs bg-accent text-white hover:bg-blue-700 whitespace-nowrap">
+                <i class="fa-solid fa-print mr-1"></i>Abrir para imprimir</button></td></tr>`; }).join('')
+              : vazio('Nenhum contrato disponível para assinatura.')}
+          </tbody></table></div>
+      </div>
+    </div>`;
+}
+function gerAbrirContrato(id){
+  const c = contratosDaGerente().find(x => x.id === id);
+  if(!c){ toast('Este contrato não está mais disponível.', 'alerta'); return; }
+  abrirRelatorio(admContratoDoc(c.dados, uniNome(c.unidadeId)));
+  registrarAtividade('abriu_contrato', { contrato_id:id });
+}
+
+/* histórico do colaborador: o que houve na admissão (quando ainda há registro) */
+function admHistoricoHTML(c, secao, campo){
+  const a = ADMISSOES.find(x => x.colaboradorId === c.id) || ADMISSOES.find(x => cpfDigitos(x.cpf) === cpfDigitos(c.cpf) && cpfDigitos(c.cpf));
+  if(!a) return '';
+  const dia = v => v ? fmtDate(String(v).slice(0,10)) : '';
+  return `${secao('Admissão')}
+  <table class="dados">
+    ${campo('Ficha de admissão', a.fichaEm ? 'gerada em ' + dia(a.fichaEm) : 'preenchida, ainda não impressa')}
+    ${campo('Contrato', a.contratoEm ? 'emitido em ' + dia(a.contratoEm) : 'não emitido')}
+    ${campo('ASO admissional', a.asoPedidoEm ? 'solicitado em ' + dia(a.asoPedidoEm) : 'não solicitado pela ficha')}
+    ${campo('Dados de RH da ficha', a.expurgadoEm ? 'apagados em ' + dia(a.expurgadoEm) + ' (prazo de guarda)'
+                                  : a.contratoEm ? 'serão apagados em ' + fmtDate(admApagaEm(a)) : 'em guarda até a emissão do contrato')}
+  </table>`;
+}
+
+/* ═════════ leitura dos PDFs ═════════
+   Vindo do sistema de admissão, com a mesma lógica de reconhecimento. A
+   diferença é que aqui nada escreve na tela: as funções devolvem os campos e
+   quem chamou decide o que fazer. Nada do PDF vai para o console. */
+const ADMPDF = (() => {
+  const catalogo = ADM_CATALOGO;
+function limparTexto(str) {
+    return str ? str.replace(/\s+/g, ' ').trim() : '';
+}
+
+/**
+ * Tenta mapear o cargo extraído do PDF para uma chave exata do catálogo.
+ * Estratégia: exata → extraído contém chave → chave contém extraído.
+ */
+function mapearFuncao(cargoExtraido) {
+    if (!cargoExtraido) return '';
+    const norm = limparTexto(cargoExtraido).toLowerCase();
+    const chaves = Object.keys(catalogo);
+    let match = chaves.find(k => k.toLowerCase() === norm);
+    if (match) return match;
+    match = chaves.find(k => norm.includes(k.toLowerCase()));
+    if (match) return match;
+    match = chaves.find(k => k.toLowerCase().includes(norm));
+    if (match) return match;
+    return limparTexto(cargoExtraido);
+}
+
+/**
+ * Converte data do PDF (DD/MM/YYYY ou "DD de [mês] de YYYY")
+ * para YYYY-MM-DD, formato obrigatório do <input type="date">.
+ * A exibição no contrato gerado já ocorre em pt-BR (dia/mês/ano)
+ * via toLocaleDateString('pt-BR') na função gerarDocumento().
+ */
+function parsearDataPtBR(dataStr) {
+    if (!dataStr) return '';
+    const meses = {
+        'janeiro':'01','fevereiro':'02','março':'03','marco':'03',
+        'abril':'04','maio':'05','junho':'06','julho':'07',
+        'agosto':'08','setembro':'09','outubro':'10',
+        'novembro':'11','dezembro':'12'
+    };
+    // DD/MM/YYYY ou DD-MM-YYYY — lê na ordem dia → mês → ano
+    const m1 = dataStr.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
+    if (m1) return `${m1[3]}-${m1[2].padStart(2,'0')}-${m1[1].padStart(2,'0')}`;
+    // "DD de [mês] de YYYY"
+    const m2 = dataStr.match(/(\d{1,2})\s+de\s+(\w+)\s+de\s+(\d{4})/i);
+    if (m2) {
+        const mes = meses[m2[2].toLowerCase()];
+        if (mes) return `${m2[3]}-${mes}-${m2[1].padStart(2,'0')}`;
+    }
+    return '';
+}
+
+function fmtCPF(v) {
+  const digits = String(v || '').replace(/\D/g, '');
+  if (digits.length === 11) return digits.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, '$1.$2.$3-$4');
+  return String(v || '').replace(/\s+/g, ' ').trim();
+}
+function depNoValue(v) {
+  const s = String(v || '').trim().toLowerCase();
+  return !s || /^(n[aã]o|nao|n[aã]o tenho|sem filhos?|não\.?)$/.test(s) || s === 'mao';
+}
+function depParentesco(txt) {
+  const s = String(txt || '').toLowerCase();
+  if (s.includes('filha')) return 'Filha';
+  if (s.includes('filho adot')) return 'Filho adotivo';
+  if (s.includes('filho')) return 'Filho';
+  if (s.includes('depend')) return 'Dependente';
+  return 'Filho(a)';
+}
+function limparNomeDep(txt) {
+  return String(txt || '')
+    .replace(/\b(cpf|sim|tenho|tem|filhos?|filhas?|uma filha|um filho|dois filhos|duas filhas|menor(?:es)? de 14 anos?|anos?|idade|quantos?|quais?|se\s+sim|se\s+n[aã]o|e|adotivo|adotiva)\b/gi, ' ')
+    .replace(/[()]/g, ' ')
+    .replace(/\b\d{1,2}\b/g, ' ')
+    .replace(/[.,:;\/-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+function nomeValidoDep(nome) {
+  const n = String(nome || '').trim();
+  return /[A-Za-zÀ-ÿ]/.test(n) && (n.split(/\s+/).length >= 2 || n.length >= 4);
+}
+function parseDependentes(raw) {
+  if (depNoValue(raw)) return [];
+  let txt = String(raw || '')
+    .replace(/\r/g, '\n')
+    .replace(/cpf\s*[:\-]?/gi, ' CPF ')
+    .replace(/[•;]/g, '\n')
+    .replace(/\n{2,}/g, '\n')
+    .trim();
+
+  const cpfRegex = /\d[\d.\-\s]{8,18}\d/g;
+  const matches = [...txt.matchAll(cpfRegex)].filter(m => {
+    const n = m[0].replace(/\D/g, '');
+    return n.length >= 10 && n.length <= 12;
+  });
+
+  const deps = [];
+
+  if (matches.length) {
+    matches.forEach((m, i) => {
+      const prevEnd = i === 0 ? 0 : matches[i - 1].index + matches[i - 1][0].length;
+      const nextStart = i === matches.length - 1 ? txt.length : matches[i + 1].index;
+      const before = txt.slice(prevEnd, m.index).trim();
+      const after = txt.slice(m.index + m[0].length, nextStart).trim();
+      let nome = limparNomeDep(before);
+      if (!nomeValidoDep(nome)) nome = limparNomeDep(after);
+      if (!nomeValidoDep(nome) && i === 0 && matches.length === 1) {
+        const semCpf = limparNomeDep(txt.replace(m[0], ' '));
+        if (nomeValidoDep(semCpf)) nome = semCpf;
+      }
+      deps.push({
+        nome: nome || `Dependente ${i + 1}`,
+        nasc: '',
+        cpf: fmtCPF(m[0]),
+        par: depParentesco(before + ' ' + after)
+      });
+    });
+  } else {
+    const partes = txt
+      .replace(/[()]/g, '\n')
+      .split(/\n|\//)
+      .map(limparNomeDep)
+      .filter(nomeValidoDep);
+    partes.forEach((nome, i) => deps.push({ nome, nasc: '', cpf: '', par: 'Filho(a)' }));
+  }
+
+  const vistos = new Set();
+  return deps.filter(d => {
+    const key = `${d.nome}|${d.cpf}`.toLowerCase();
+    if (vistos.has(key)) return false;
+    vistos.add(key);
+    return d.nome || d.cpf;
+  }).slice(0, 4);
+}
+
+// ── Conversão de data BR (DD/MM/AAAA) → ISO (AAAA-MM-DD) para <input type=date> ──
+function isoFromBR(d) {
+  const m = String(d||'').match(/(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})/);
+  if (!m) return '';
+  let [, dd, mm, yy] = m;
+  if (yy.length === 2) yy = (parseInt(yy,10) > 30 ? '19' : '20') + yy;
+  return `${yy}-${mm.padStart(2,'0')}-${dd.padStart(2,'0')}`;
+}
+
+/**
+ * Extrai a Data de Nascimento das LINHAS da resposta, ignorando os placeholders
+ * do campo de data do Google Forms ("DDMMAAAA" e "//") e aceitando:
+ *  - DD/MM/AAAA (com separadores)
+ *  - 8 dígitos DDMMAAAA  (ex.: "03041998")
+ *  - 6 dígitos DDMMAA
+ */
+function acharDataNascimento(linhas) {
+  const resp = coletarRespostaLinhas(linhas, /sua\s+data\s+de\s+nascimento|qual\s+sua\s+data/i);
+  for (const l of resp) {
+    const t = String(l).trim();
+    if (!t) continue;
+    if (/^[\/\s.\-]+$/.test(t)) continue;       // só barras/pontos/traços ("//")
+    if (/^[A-Za-zÀ-ÿ]+$/.test(t)) continue;     // placeholder só com letras ("DDMMAAAA")
+
+    // 1) data com separadores
+    const iso = isoFromBR(t);
+    if (iso) return iso;
+
+    // 2) dígitos puros (sem separador)
+    const dig = t.replace(/\D/g, '');
+    if (dig.length === 8) {                      // DDMMAAAA
+      const dd = dig.slice(0,2), mm = dig.slice(2,4), yy = dig.slice(4);
+      if (+dd>=1 && +dd<=31 && +mm>=1 && +mm<=12) return `${yy}-${mm}-${dd}`;
+    }
+    if (dig.length === 6) {                      // DDMMAA
+      const dd = dig.slice(0,2), mm = dig.slice(2,4);
+      let yy = dig.slice(4);
+      yy = (parseInt(yy,10) > 30 ? '19' : '20') + yy;
+      if (+dd>=1 && +dd<=31 && +mm>=1 && +mm<=12) return `${yy}-${mm}-${dd}`;
+    }
+  }
+  return '';
+}
+
+// ── Valor monetário BR ("R$ 4,50" / "4,50" / "4.50") → número ──
+function parseValorBR(s) {
+  if (!s) return NaN;
+  const m = String(s).match(/\d[\d.,]*/);
+  if (!m) return NaN;
+  let t = m[0];
+  if (t.includes(',')) t = t.replace(/\./g,'').replace(',', '.'); // vírgula = decimal
+  const v = parseFloat(t);
+  return isNaN(v) ? NaN : v;
+}
+function fmtValorBR(n) {
+  return n.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+/**
+ * Extrai dependentes (Nome + Data de Nascimento + CPF) de um texto livre.
+ * Cada membro vira uma linha da grade. Campos ausentes ficam vazios (amarelo).
+ */
+function parseDependentesCompleto(raw) {
+  if (depNoValue(raw)) return [];
+  const txt = String(raw||'').replace(/\r/g,' ').replace(/\s+/g,' ').trim();
+  const cpfRe  = /\d{3}\.?\d{3}\.?\d{3}-?\d{2}/g;
+  const dateRe = /\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}/;
+  const cpfs = [...txt.matchAll(cpfRe)];
+  const deps = [];
+
+  if (cpfs.length) {
+    // Ancora por CPF: o trecho ANTES de cada CPF contém nome + data daquele membro
+    cpfs.forEach((m, i) => {
+      const ini = i === 0 ? 0 : cpfs[i-1].index + cpfs[i-1][0].length;
+      const seg = txt.slice(ini, m.index);
+      const dM  = seg.match(dateRe);
+      const nasc = dM ? isoFromBR(dM[0]) : '';
+      const nome = limparNomeDep(seg.replace(/\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}/g,' '));
+      deps.push({ nome: nomeValidoDep(nome) ? nome : '', nasc, cpf: fmtCPF(m[0]) });
+    });
+  } else {
+    const dates = [...txt.matchAll(/\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}/g)];
+    if (dates.length) {
+      dates.forEach((m, i) => {
+        const ini = i === 0 ? 0 : dates[i-1].index + dates[i-1][0].length;
+        const nome = limparNomeDep(txt.slice(ini, m.index));
+        deps.push({ nome: nomeValidoDep(nome) ? nome : '', nasc: isoFromBR(m[0]), cpf: '' });
+      });
+    } else {
+      // Sem CPF nem data → cada nome separado por vírgula / quebra de linha / "e"
+      const partes = txt
+        .split(/\n|;|,|\/|\s+e\s+/i)
+        .map(limparNomeDep)
+        .filter(nomeValidoDep);
+      const vistos = new Set();
+      partes.forEach(nome => {
+        const key = nome.toLowerCase();
+        if (!vistos.has(key)) { vistos.add(key); deps.push({ nome, nasc: '', cpf: '' }); }
+      });
+    }
+  }
+
+  // Remove entradas completamente vazias e limita a 4
+  return deps.filter(d => d.nome || d.cpf || d.nasc).slice(0, 4);
+}
+
+/**
+ * Parser ROBUSTO de dependentes a partir das LINHAS da resposta (preserva quebras).
+ * Lida com formatos variados:
+ *  - "Sim, 3: Maria, João, Pedro"           (nomes por vírgula)
+ *  - uma linha por dependente                (nome [data] [cpf])
+ *  - campos em linhas separadas              (nome / data / cpf cada um na sua linha)
+ *  - "Nome 10/05/2015 123.456.789-00; ..."   (vários por linha, com CPF)
+ * Retorna [{nome, nasc(ISO), cpf}], campos ausentes ficam vazios (laranja).
+ */
+function parseDependentesV2(linhasResp) {
+  const cpfRe  = /\d{3}\.?\d{3}\.?\d{3}-?\d{2}/;
+  const dateRe = /\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}/;
+
+  let lines = (linhasResp || []).map(s => String(s).trim()).filter(Boolean);
+  if (!lines.length) return [];
+  // remove "Sim/Não" e a contagem ("3", "3 filhos") do começo
+  lines[0] = lines[0]
+    .replace(/^\s*(sim|n[aã]o)\b[\s.,:;-]*/i, '')
+    .replace(/^\s*\d+\s*(filhos?|filhas?|crian[çc]as?|depend\w*)?\s*[\s.,:;-]*/i, '')
+    .trim();
+  lines = lines.filter(Boolean);
+  if (!lines.length || depNoValue(lines.join(' '))) return [];
+
+  // Define as "entradas" (uma por dependente)
+  let entradas;
+  if (lines.length >= 2) {
+    entradas = lines;                          // cada linha = uma entrada (ou continuação)
+  } else {
+    const linha = lines[0];
+    const cpfs = [...linha.matchAll(/\d{3}\.?\d{3}\.?\d{3}-?\d{2}/g)];
+    if (cpfs.length >= 2) {                     // vários CPFs na mesma linha → corta após cada CPF
+      entradas = []; let start = 0;
+      cpfs.forEach(m => { const end = m.index + m[0].length; entradas.push(linha.slice(start, end)); start = end; });
+      if (linha.slice(start).trim()) entradas.push(linha.slice(start));
+    } else {                                    // nomes separados por vírgula / ";" / " e "
+      entradas = linha.split(/[;,]|\s+e\s+/i);
+    }
+  }
+
+  const deps = [];
+  entradas.forEach(seg => {
+    seg = String(seg).trim();
+    if (!seg) return;
+    const cpfM = seg.match(cpfRe), dateM = seg.match(dateRe);
+    const cpf = cpfM ? fmtCPF(cpfM[0]) : '';
+    const nasc = dateM ? isoFromBR(dateM[0]) : '';
+    let nome = seg;
+    if (cpfM) nome = nome.replace(cpfM[0], ' ');
+    if (dateM) nome = nome.replace(dateM[0], ' ');
+    nome = limparNomeDep(nome);
+    const temNome = nomeValidoDep(nome);
+
+    if (temNome) {
+      deps.push({ nome, nasc, cpf });
+    } else if ((cpf || nasc) && deps.length) {
+      // linha só com data/CPF → completa o último dependente
+      const last = deps[deps.length - 1];
+      if (!last.nasc && nasc) last.nasc = nasc;
+      if (!last.cpf && cpf) last.cpf = cpf;
+    } else if (cpf || nasc) {
+      deps.push({ nome: '', nasc, cpf });
+    }
+  });
+
+  // dedup simples
+  const vistos = new Set();
+  return deps.filter(d => {
+    const key = (d.nome + '|' + d.cpf).toLowerCase().trim();
+    if (key === '|') return false;
+    if (vistos.has(key)) return false;
+    vistos.add(key);
+    return d.nome || d.cpf || d.nasc;
+  }).slice(0, 6);
+}
+
+/**
+ * Detecta a escolaridade. Prioridade:
+ *  1) a OPÇÃO MARCADA (radio preenchido) detectada pelos gráficos do PDF;
+ *  2) varredura de texto pela opção (impreciso — pode pegar a 1ª da lista).
+ * Ignora a linha da própria pergunta.
+ */
+function acharEscolaridade(linhas, selecionadas) {
+  const opcao = /\b((ensino\s+)?(fundamental|m[eé]dio|superior)(\s+(in)?completo)?|p[oó]s[\s-]?gradua\w*|t[eé]cnico\w*|tecn[oó]log\w*|mestrado|doutorado|analfabeto|alfabetizado)\b/i;
+  const ehPerguntaEsc = l => /escolaridade|descrever\s+o\s+grau|qual\s+a\s+sua\s+escolar/i.test(l);
+
+  // 1) Opção realmente marcada no formulário
+  if (selecionadas && selecionadas.length) {
+    const m = selecionadas.find(s => opcao.test(s) && !ehPerguntaEsc(s));
+    if (m) return m.replace(/\s+/g, ' ').trim();
+  }
+  // 2) Fallback por texto (menos confiável)
+  for (const l of linhas) {
+    if (ehPerguntaEsc(l)) continue;
+    if (opcao.test(l) && l.length <= 60) return l.replace(/\s+/g, ' ').trim();
+  }
+  return '';
+}
+
+// Indícios de início da PRÓXIMA pergunta (para saber onde a resposta termina).
+const PROX_PERGUNTA = /^(escrev[ae]\b|qual\b|tem\s+(conta|pis)\b|valor\s*\(|status\s+civil\b|estado\s+civil\b|local\s+do\s+seu\b|transporte\s+p[uú]blico\b|chave\s*pix\b|t[ií]tulo\b|escolaridade\b|sua\s+data\s+de\s+nascimento\b|nome\s+completo\b|n[uú]mero\s+do\s+seu\b)/i;
+
+/**
+ * Coleta TODAS as linhas da resposta da pergunta de dependentes, mesmo que
+ * tenham quebras (enter) entre os dados. Para apenas na PRÓXIMA pergunta real
+ * (linha terminada em "*" ou iniciada por verbo de pergunta) — assim NÃO para
+ * nas linhas "Cpf NNN" dos dependentes (que pareciam uma nova pergunta).
+ */
+function coletarRespostaDependentes(linhas) {
+  let i = linhas.findIndex(l => /cpf['´’`]?s\b|seus\s+cpf|nascimento\s+e\s+os/i.test(l));
+  if (i < 0) i = linhas.findIndex(l => /tem\s+filho|filhos?\s+menor(es)?\s+de\s+14|dependentes?/i.test(l));
+  if (i < 0) return [];
+  const val = [];
+  for (let j = i + 1; j < linhas.length; j++) {
+    const l = String(linhas[j] || '').trim();
+    if (!l) continue;                 // ignora linhas vazias (enters)
+    if (ehBoilerplate(l)) continue;   // ignora cabeçalho de página, links etc.
+    // próxima pergunta de verdade → encerra
+    if (/\*\s*$/.test(l) || PROX_PERGUNTA.test(l)) break;
+    val.push(l);
+  }
+  return val;
+}
+
+/**
+ * Retorna o NÚMERO da resposta após a âncora, pulando linhas de continuação da
+ * pergunta (URLs, CNPJ, "abrir conta no Itaú", "segue o link"). Ideal para
+ * Agência/Conta, cujas perguntas trazem link e CNPJ no meio.
+ */
+function respostaNumeroLimpa(linhas, re) {
+  for (let i = 0; i < linhas.length; i++) {
+    if (re.test(linhas[i])) {
+      for (let j = i + 1; j < linhas.length; j++) {
+        const l = String(linhas[j] || '').trim();
+        if (!l) continue;
+        if (ehBoilerplate(l)) continue;
+        // continuação da própria pergunta (link, CNPJ, "abrir conta no Itaú"...)
+        if (/https?:\/\/|cnpj|ita[uú]|abrir\s+a?\s*conta|segue\s+o\s+link|caso\s+n[aã]o\s+tenha|\bbanco\b/i.test(l)) continue;
+        // pula CNPJ "solto" (ex.: "22.963.976/0001-00)") — é parte da legenda da pergunta
+        if (/\d{2}\.?\d{3}\.?\d{3}\/\d{3,4}-?\d{2}/.test(l)) continue;
+        if (PROX_PERGUNTA.test(l) || /\*\s*$/.test(l)) break;   // próxima pergunta
+        // número da resposta (ignora "/" para não capturar restos de CNPJ)
+        const m = l.match(/\d[\d.\-xX]*\d|\d/);
+        if (m) return m[0].replace(/[.\s]+$/, '').trim();
+      }
+      return '';
+    }
+  }
+  return '';
+}
+
+/**
+ * Catálogo de PERGUNTAS do formulário (Google Forms).
+ * Cada item liga um campo da ficha (id) a um ou mais padrões de rótulo (re).
+ * A lista também serve para detectar onde termina a resposta de cada campo
+ * (a resposta vai do fim de um rótulo até o início do próximo rótulo conhecido).
+ * Ajuste os padrões aqui caso algum campo não seja reconhecido no seu PDF.
+ */
+const PERGUNTAS = [
+  { id:'f_nome',      re:/nome\s+completo/i },
+  { id:'f_funcao',    re:/(qual\s+)?(cargo|fun[cç][aã]o)(\s+(ir[aá]|vai|que)\s+ocupar)?|ocupar/i },
+  { id:'f_cpf',       re:/^(?!.*(?:filho|nascimento|dependente)).*\bcpf\b/i },
+  { id:'f_rg',        re:/n[uú]mero\s+do\s+seu\s+rg|\brg\b/i },
+  { id:'f_cel',       re:/telefone|celular|whats/i },
+  { id:'f_email',     re:/e-?mail/i },
+  { id:'f_ecivil',    re:/estado\s+civil|status\s+civil|estado\s+conjugal/i },
+  { id:'f_nasc',      re:/sua\s+data\s+de\s+nascimento|qual\s+sua\s+data/i },
+  { id:'f_natal',     re:/local\s+do\s+seu\s+nascimento|local\s+d[eo]\s+nascimento/i },
+  { id:'f_instrucao', re:/escolaridade|instru[cç][aã]o|grau\s+de\s+instru/i },
+  { id:'f_titulo',    re:/t[ií]tulo\s+(de\s+)?eleitor|eleitoral/i },
+  { id:'f_pis',       re:/\bpis\b|pis\/?pasep|nit\b/i },
+  { id:'f_pix',       re:/chave\s*pix|\bpix\b/i },
+  { id:'_itau',       re:/conta\s+no\s+banco\s+ita[uú]/i },
+  { id:'_ag',         re:/ag[eê]ncia\s+do\s+banco\s+ita[uú]|n[uú]mero\s+da\s+sua\s+ag[eê]ncia/i },
+  { id:'_conta',      re:/qual\s+a\s+conta\s+do\s+banco\s+ita[uú]|conta\s+do\s+banco\s+ita[uú]/i },
+  { id:'_vt_ida',     re:/transporte\s+p[uú]blico\s+para\s+ida|para\s+ida\s+ao\s+trabalho/i },
+  { id:'_vt_volta',   re:/transporte\s+p[uú]blico\s+para\s+volta|para\s*volta\b/i },
+  { id:'f_end',       re:/endere[cç]o\s+completo|endere[cç]o/i },
+  { id:'_deps',       re:/tem\s+filho|filhos?\s+menor(es)?\s+de\s+14|dependentes?/i },
+];
+
+/** Lixo comum em PDFs de resposta do Google Forms — ignorado nas respostas. */
+function ehBoilerplate(linha) {
+  return /^(\*?\s*indica.*obrigat|este\s+conte|google\s+(forms|llc)|formul[aá]rio|p[aá]gina\s+\d|\d+\s*\/\s*\d+|enviar|limpar|nunca\s+envie|denunciar|resposta\b)/i.test(linha)
+      || /^\*+$/.test(linha)
+      || /^https?:\/\//i.test(linha);
+}
+
+/** Uma linha é "pergunta" se casar com algum rótulo conhecido. */
+function ehPergunta(linha) {
+  return PERGUNTAS.some(p => p.re.test(linha));
+}
+
+/**
+ * Dado o array de linhas (em ordem de leitura), devolve a resposta logo após
+ * a primeira linha que casar com `re`, juntando linhas seguintes até encontrar
+ * a próxima pergunta conhecida (ou um trecho de boilerplate).
+ */
+function respostaApos(linhas, re) {
+  for (let i = 0; i < linhas.length; i++) {
+    if (re.test(linhas[i])) {
+      // Caso "Rótulo: valor" na mesma linha
+      const mesma = linhas[i].split(/:\s*/);
+      if (mesma.length > 1 && mesma.slice(1).join(': ').trim()) {
+        const inline = mesma.slice(1).join(': ').trim();
+        if (inline && !ehBoilerplate(inline)) return inline;
+      }
+      const val = [];
+      for (let j = i + 1; j < linhas.length; j++) {
+        const l = linhas[j];
+        if (!l) { if (val.length) break; else continue; }
+        if (ehPergunta(l)) break;
+        if (ehBoilerplate(l)) continue;
+        val.push(l);
+        break; // resposta normalmente em 1 linha; endereço é tratado à parte
+      }
+      return val.join(' ').replace(/\s+/g, ' ').trim();
+    }
+  }
+  return '';
+}
+
+/** Versão multilinha (para endereço que pode quebrar em 2+ linhas). */
+function respostaAposMulti(linhas, re) {
+  for (let i = 0; i < linhas.length; i++) {
+    if (re.test(linhas[i])) {
+      const val = [];
+      for (let j = i + 1; j < linhas.length; j++) {
+        const l = linhas[j];
+        if (!l) { if (val.length) break; else continue; }
+        if (ehPergunta(l)) break;
+        if (ehBoilerplate(l)) continue;
+        val.push(l);
+      }
+      return val.join(', ').replace(/\s+/g, ' ').replace(/\s*,\s*,/g, ',').trim();
+    }
+  }
+  return '';
+}
+
+/** Como respostaAposMulti, mas retorna o ARRAY de linhas da resposta (sem juntar). */
+function coletarRespostaLinhas(linhas, re) {
+  for (let i = 0; i < linhas.length; i++) {
+    if (re.test(linhas[i])) {
+      const val = [];
+      for (let j = i + 1; j < linhas.length; j++) {
+        const l = linhas[j];
+        if (!l) { if (val.length) break; else continue; }
+        if (ehPergunta(l)) break;
+        if (ehBoilerplate(l)) continue;
+        val.push(l);
+      }
+      return val;
+    }
+  }
+  return [];
+}
+
+/**
+ * Retorna a primeira linha COM dígitos após a âncora (até a próxima pergunta).
+ * Útil para respostas numéricas (valores, agência/conta), pois pula
+ * continuações de pergunta que ficaram em outra linha (sem números).
+ */
+function respostaNumericaApos(linhas, re) {
+  for (let i = 0; i < linhas.length; i++) {
+    if (re.test(linhas[i])) {
+      for (let j = i + 1; j < linhas.length; j++) {
+        const l = linhas[j];
+        if (!l) continue;
+        if (ehPergunta(l)) break;
+        if (ehBoilerplate(l)) continue;
+        if (/\d/.test(l)) return l.trim();
+        // linha sem dígitos = provável continuação da pergunta → ignora e segue
+      }
+      return '';
+    }
+  }
+  return '';
+}
+
+/**
+ * Detecta os "pontos preenchidos" (radio/checkbox marcados) de uma página,
+ * analisando a lista de operadores gráficos do pdf.js. Um radio SELECIONADO
+ * desenha um círculo PREENCHIDO (fill); os não selecionados são apenas
+ * contorno (stroke). Retorna os centros {x, y} no mesmo espaço dos textos.
+ */
+async function coletarDotsPreenchidos(pagina) {
+  const dots = [];
+  try {
+    const OPS = pdfjsLib.OPS;
+    const ol = await pagina.getOperatorList();
+    let ctm = [1, 0, 0, 1, 0, 0];
+    const stack = [];
+    const mul = (m, n) => [
+      m[0]*n[0]+m[2]*n[1], m[1]*n[0]+m[3]*n[1],
+      m[0]*n[2]+m[2]*n[3], m[1]*n[2]+m[3]*n[3],
+      m[0]*n[4]+m[2]*n[5]+m[4], m[1]*n[4]+m[3]*n[5]+m[5]
+    ];
+    const apply = (m, x, y) => [m[0]*x+m[2]*y+m[4], m[1]*x+m[3]*y+m[5]];
+    let pend = null;
+    for (let i = 0; i < ol.fnArray.length; i++) {
+      const fn = ol.fnArray[i], a = ol.argsArray[i];
+      if (fn === OPS.save) stack.push(ctm.slice());
+      else if (fn === OPS.restore) { if (stack.length) ctm = stack.pop(); }
+      else if (fn === OPS.transform) ctm = mul(ctm, [a[0],a[1],a[2],a[3],a[4],a[5]]);
+      else if (fn === OPS.constructPath) {
+        const coords = a[1] || [];
+        let minx=Infinity, miny=Infinity, maxx=-Infinity, maxy=-Infinity;
+        for (let k = 0; k + 1 < coords.length; k += 2) {
+          const x = coords[k], y = coords[k+1];
+          if (x<minx) minx=x; if (x>maxx) maxx=x;
+          if (y<miny) miny=y; if (y>maxy) maxy=y;
+        }
+        pend = (minx === Infinity) ? null : { minx, miny, maxx, maxy };
+      }
+      else if (fn === OPS.fill || fn === OPS.eoFill || fn === OPS.fillStroke || fn === OPS.eoFillStroke) {
+        if (pend) {
+          const cx = (pend.minx+pend.maxx)/2, cy = (pend.miny+pend.maxy)/2;
+          const sx = Math.hypot(ctm[0], ctm[1]), sy = Math.hypot(ctm[2], ctm[3]);
+          const wAbs = (pend.maxx-pend.minx)*sx, hAbs = (pend.maxy-pend.miny)*sy;
+          // ponto pequeno e ~circular (descarta retângulos/realces grandes)
+          if (wAbs>1 && wAbs<16 && hAbs>1 && hAbs<16 && Math.abs(wAbs-hAbs)<6) {
+            const [ax, ay] = apply(ctm, cx, cy);
+            dots.push({ x: ax, y: ay });
+          }
+        }
+        pend = null;
+      }
+    }
+  } catch (e) { console.warn('Detecção de marcas (radio) indisponível:', e); }
+  return dots;
+}
+
+/**
+ * Detecta, por ANÁLISE DE PIXELS, qual das opções (radio) está marcada.
+ * Para cada opção: acha o CENTRO do círculo (centroide dos pixels escuros do
+ * radio, na faixa à esquerda do texto) e mede se o MIOLO está preenchido.
+ * O radio marcado tem o miolo cheio; os não marcados têm o miolo branco.
+ * Funciona mesmo quando o radio é imagem/rasterizado. Retorna o texto ou ''.
+ */
+async function detectarMarcadaPorPixel(pagina, opts) {
+  const scale = 2;
+  const viewport = pagina.getViewport({ scale });
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.ceil(viewport.width);
+  canvas.height = Math.ceil(viewport.height);
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  await pagina.render({ canvasContext: ctx, viewport }).promise;
+
+  const T = viewport.transform;
+  const ap = (x, y) => [T[0]*x + T[2]*y + T[4], T[1]*x + T[3]*y + T[5]];
+  const lumAt = (d, k) => (d[k+3] < 10 ? 255 : 0.299*d[k] + 0.587*d[k+1] + 0.114*d[k+2]);
+
+  const scores = [];
+  for (const o of opts) {
+    // Faixa à ESQUERDA do texto (radio), Y restrito à linha p/ não pegar a pergunta acima
+    const c1 = ap(o.xMin - 44, o.y - 4);
+    const c2 = ap(o.xMin - 4,  o.y + 10);
+    const x0 = Math.max(0, Math.floor(Math.min(c1[0], c2[0])));
+    const x1 = Math.min(canvas.width,  Math.ceil(Math.max(c1[0], c2[0])));
+    const y0 = Math.max(0, Math.floor(Math.min(c1[1], c2[1])));
+    const y1 = Math.min(canvas.height, Math.ceil(Math.max(c1[1], c2[1])));
+    let fill = 0;
+    if (x1 > x0 && y1 > y0) {
+      const w = x1 - x0, h = y1 - y0;
+      const d = ctx.getImageData(x0, y0, w, h).data;
+      // centroide dos pixels escuros (centro do anel/disco do radio)
+      let sx = 0, sy = 0, n = 0;
+      for (let yy = 0; yy < h; yy++) for (let xx = 0; xx < w; xx++) {
+        if (lumAt(d, (yy*w + xx)*4) < 170) { sx += xx; sy += yy; n++; }
+      }
+      if (n >= 6) {
+        const cx = sx / n, cy = sy / n;
+        const r = Math.max(2, Math.round(scale)); // raio do miolo (~1 unidade)
+        let cd = 0, ct = 0;
+        for (let yy = Math.max(0, Math.floor(cy - r)); yy <= Math.min(h-1, Math.ceil(cy + r)); yy++)
+          for (let xx = Math.max(0, Math.floor(cx - r)); xx <= Math.min(w-1, Math.ceil(cx + r)); xx++) {
+            ct++; if (lumAt(d, (yy*w + xx)*4) < 170) cd++;
+          }
+        fill = ct ? cd / ct : 0;
+      }
+    }
+    scores.push({ opcao: o.text, miolo: +fill.toFixed(2) });
+  }
+
+  let best = null, bestF = -1, secondF = -1;
+  scores.forEach(s => {
+    if (s.miolo > bestF) { secondF = bestF; bestF = s.miolo; best = s; }
+    else if (s.miolo > secondF) { secondF = s.miolo; }
+  });
+  // selecionada = miolo claramente preenchido e destacado das demais
+  if (best && bestF >= 0.5 && bestF >= secondF + 0.25) return best.opcao;
+  return '';
+}
+
+/**
+ * Lê o PDF e reconstrói as linhas (agrupando itens por posição Y).
+ * Retorna { linhas, selecionadas, escolaridadeMarcada }.
+ */
+async function extrairLinhasPdf(file) {
+  const buffer = await file.arrayBuffer();
+  const pdfDoc = await pdfjsLib.getDocument({ data: buffer }).promise;
+  const linhas = [];
+  const selecionadas = [];
+  let escolaridadeMarcada = '';
+  const OPT_ESC = /^(ensino\s+(fundamental|m[eé]dio|superior)\s+(in)?completo|p[oó]s[\s-]?gradua\w*|t[eé]cnico\w*|tecn[oó]log\w*|mestrado|doutorado|analfabeto)/i;
+
+  for (let p = 1; p <= pdfDoc.numPages; p++) {
+    const pagina = await pdfDoc.getPage(p);
+    const conteudo = await pagina.getTextContent();
+    const porLinha = {};
+    conteudo.items.forEach(it => {
+      if (!it.str || !it.str.trim()) return;
+      const y = Math.round(it.transform[5]);
+      (porLinha[y] = porLinha[y] || []).push(it);
+    });
+    const lineObjs = Object.keys(porLinha)
+      .map(Number)
+      .sort((a, b) => b - a) // topo → base
+      .map(y => {
+        const arr = porLinha[y].sort((a, b) => a.transform[4] - b.transform[4]);
+        return { y, xMin: arr[0].transform[4], text: arr.map(i => i.str).join('').replace(/\s+/g, ' ').trim() };
+      });
+    lineObjs.forEach(l => { if (l.text) linhas.push(l.text); });
+
+    // (1) Radios VETORIAIS — casa marca preenchida com a opção (quando existir)
+    try {
+      const dots = await coletarDotsPreenchidos(pagina);
+      dots.forEach(d => {
+        let best = null, bestd = Infinity;
+        lineObjs.forEach(l => {
+          if (!l.text) return;
+          if (l.xMin > d.x - 2) { const dd = Math.abs(l.y - d.y); if (dd < bestd) { bestd = dd; best = l; } }
+        });
+        if (best && bestd <= 12) selecionadas.push(best.text);
+      });
+    } catch (e) { /* ignora */ }
+
+    // (2) Escolaridade por PIXEL (radio marcado, mesmo sendo imagem/rasterizado)
+    if (!escolaridadeMarcada) {
+      const opts = lineObjs.filter(l => OPT_ESC.test(l.text) && l.text.length <= 45);
+      if (opts.length >= 2) {
+        try { escolaridadeMarcada = await detectarMarcadaPorPixel(pagina, opts); }
+        catch (e) { console.warn('Detecção por pixel falhou:', e); }
+      }
+    }
+  }
+  if (escolaridadeMarcada) selecionadas.unshift(escolaridadeMarcada);
+  return { linhas, selecionadas, escolaridadeMarcada };
+}
+
+
+  /* contrato de experiência → campos do contrato por prazo indeterminado */
+  async function lerContrato(file){
+    const buffer = await file.arrayBuffer();
+    const pdfDoc = await pdfjsLib.getDocument({ data: buffer }).promise;
+    let texto = '';
+    for (let p = 1; p <= pdfDoc.numPages; p++) {
+      const pagina   = await pdfDoc.getPage(p);
+      const conteudo = await pagina.getTextContent();
+      texto += conteudo.items.map(i => i.str).join(' ') + ' ';
+    }
+    const campos = {}, preenchidos = [];
+        // ─── NOME DO EMPREGADO ────────────────────────────────────────────────
+        // O PDF tem o nome em 3 seções distintas. Ordem de prioridade:
+        // 1) eSocial:        "Nome: NOME Matrícula"       → mais limpo
+        // 2) Contrato:       "EMPREGADO: NOME CTPS"       → all-caps, para em CTPS
+        // 3) Vale-Transporte:"Empregado: NOME Rg:"        → misto, para em Rg
+        const nomeRx1 = texto.match(/\bNome:\s*([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s]+?)(?=\s+(?:Matr[ií]cula|CPF\b))/i);
+        const nomeRx2 = texto.match(/\bEMPREGADO:\s*([A-ZÀÁÂÃÉÊÍÓÔÕÚÇ\s]+?)(?=\s+CTPS\b)/);
+        const nomeRx3 = texto.match(/\bEmpregado:\s*([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s]+?)(?=\s+(?:Rg:|RG:|CPF\b))/i);
+        const nomeValor = limparTexto(nomeRx1?.[1] || nomeRx2?.[1] || nomeRx3?.[1] || '');
+        if (nomeValor) {
+            campos.nome = nomeValor;
+            preenchidos.push('Nome do Empregado');
+        }
+
+        // ─── CPF DO EMPREGADO ─────────────────────────────────────────────────
+        // Formato XXX.XXX.XXX-XX — presente em múltiplas seções; pega o primeiro.
+        const cpfRx = texto.match(/\bCPF:\s*(\d{3}\.\d{3}\.\d{3}-\d{2})/i)
+                   || texto.match(/(\d{3}\.\d{3}\.\d{3}-\d{2})/);
+        if (cpfRx?.[1]) {
+            campos.cpf = limparTexto(cpfRx[1]);
+            preenchidos.push('CPF');
+        }
+
+        // ─── ENDEREÇO RESIDENCIAL ─────────────────────────────────────────────
+        // Fonte única: Declaração de Encargos de Família (âncora: "Declarante:").
+        // Sem CEP — apenas logradouro, número, complemento, bairro, cidade e estado.
+        let endValor = null;
+
+        // Campo "Endereço:" — para no primeiro delimitador confiável:
+        // linha de assinatura (____), Estado Civil, CPF, Carteira ou "Sempre que".
+        // NÃO usa "CEP" como parada, pois em alguns PDFs o CEP fica em posição distante.
+        const declEndRx = texto.match(
+            /Declarante:[\s\S]+?Endere[çc]o:\s*([\s\S]+?)(?=\s*(?:_{4,}|Estado\s+Civil:|CPF:|Carteira:|Sempre\s+que))/i
+        );
+
+        // Campo "Cidade:" — capturado separadamente para PDFs onde a cidade não está
+        // embutida no campo "Endereço:" (limitado a 60 chars para evitar captura excessiva).
+        const declCidRx = texto.match(
+            /Declarante:[\s\S]+?\bCidade:\s*(.{1,60}?)(?=\s+(?:Estado\s+Civil:|CPF:|Carteira:|Sempre\s+que|$))/i
+        );
+
+        if (declEndRx?.[1]) {
+            let base = limparTexto(declEndRx[1]).replace(/[,\s]+$/, '');
+
+            // Remove qualquer texto que apareça após a sigla do estado (ex.: "- SP ANA CELIA...")
+            base = base.replace(/(-\s[A-Z]{2})[\s\S]+$/, '$1');
+
+            const cidade = declCidRx?.[1] ? limparTexto(declCidRx[1]).replace(/[,\s]+$/, '') : '';
+
+            // Adiciona cidade somente se o endereço ainda não terminar com "CIDADE - UF"
+            const jaTemCidade = /\s-\s[A-Z]{2}$/.test(base);
+            endValor = (cidade && !jaTemCidade) ? `${base}, ${cidade}` : base;
+        }
+
+        if (endValor) {
+            campos.endereco = endValor;
+            preenchidos.push('Endereço Residencial');
+        }
+
+        // ─── CARGO / FUNÇÃO ───────────────────────────────────────────────────
+        // Fonte 1: eSocial — "Cargo: NOME CBO:" (mais limpo)
+        // Fonte 2: contrato — "FUNÇÃO: NOME" ou "Função: NOME"
+        const cargoRx1 = texto.match(/\bCargo:\s*([A-Za-zÀ-ÿ\(\)\s]+?)(?=\s+(?:CBO\b|\d{4,}|\n|$))/i);
+        const cargoRx2 = texto.match(/\bFUN[ÇC][ÃA]O:\s*([^\n,;]+)/i);
+        const cargoVal = limparTexto(cargoRx1?.[1] || cargoRx2?.[1] || '');
+        if (cargoVal) {
+            campos.funcao = mapearFuncao(cargoVal);
+            preenchidos.push('Função');
+        }
+
+        // ─── SALÁRIO MENSAL ───────────────────────────────────────────────────
+        // Fonte 1: eSocial — "Salário base: X.XXX,XX"
+        // Fonte 2: contrato — "REMUNERAÇÃO: R$ X.XXX,XX"
+        // Fonte 3: genérico — "Salário[...]: R$ X.XXX,XX"
+        const salRx = texto.match(/Salário base:\s*([\d.,]+)/i)
+                   || texto.match(/REMUNERA[ÇC][ÃA]O:\s*R\$\s*([\d.,]+)/i)
+                   || texto.match(/Sal[aá]rio\s*(?:Mensal|Base|Bruto)?\s*[:\-]\s*(?:R\$\s*)?([\d.,]+)/i);
+        if (salRx?.[1]) {
+            campos.salario = limparTexto(salRx[1]);
+            preenchidos.push('Salário Mensal');
+        }
+
+        // ─── DATA DE INÍCIO ───────────────────────────────────────────────────
+        // Seção "Termo de Prorrogação": "Prorrogado até o dia DD/MM/YYYY."
+        const dataRx = texto.match(
+            /[Pp]rorrogado\s+at[eé]\s+o\s+dia\s+(\d{1,2}\/\d{1,2}\/\d{2,4}|\d{1,2}\s+de\s+\w+\s+de\s+\d{4})/i
+        );
+        if (dataRx?.[1]) {
+            const dataISO = parsearDataPtBR(limparTexto(dataRx[1]));
+            if (dataISO) {
+                campos.data = dataISO;
+                preenchidos.push('Data de Início');
+            }
+        }
+    return { campos, preenchidos };
+  }
+
+  /* resposta do candidato (Google Forms) → campos da ficha */
+  async function lerFicha(file){
+    const { linhas, selecionadas } = await extrairLinhasPdf(file);
+    const campos = {};
+    const setA = (id, v) => { campos[id] = v || ''; };
+    const setM = id => { campos[id] = ''; };
+    const preenchidos = [];
+    const texto = linhas.join('  ');
+    const reg = (id, valor, rotulo) => {
+      setA(id, valor);
+      if (valor && valor.trim()) preenchidos.push(rotulo);
+    };
+  // ── Campos diretos por rótulo ──
+  reg('f_nome',      respostaApos(linhas, /nome\s+completo/i), 'Nome');
+  reg('f_funcao',    respostaApos(linhas, /(qual\s+)?(cargo|fun[cç][aã]o)|ocupar/i), 'Cargo');
+  reg('f_ecivil',    respostaApos(linhas, /estado\s+civil|status\s+civil|estado\s+conjugal/i), 'Estado Civil');
+
+  // ── Data de Nascimento (pergunta "Qual sua data de nascimento?") ──
+  // Ignora os placeholders do campo de data ("DDMMAAAA" e "//") e aceita
+  // valor sem separadores (ex.: "03041998"). Âncora em "sua data de nascimento"
+  // para não confundir com a pergunta de dependentes.
+  reg('f_nasc', acharDataNascimento(linhas), 'Data de Nascimento');
+
+  // ── Local de Nascimento (pergunta "Escreva o local do seu nascimento, Cidade/Estado.") ──
+  reg('f_natal', respostaApos(linhas, /local\s+do\s+seu\s+nascimento|local\s+d[eo]\s+nascimento/i), 'Local de Nascimento');
+  // Escolaridade (radio): usa a OPÇÃO MARCADA detectada pelos gráficos do PDF.
+  // Fallbacks: padrão de texto e âncora pelo final da pergunta ("...grau").
+  reg('f_instrucao', acharEscolaridade(linhas, selecionadas)
+                  || respostaApos(linhas, /descrever\s+o\s+grau|\bgrau\b/i)
+                  || respostaApos(linhas, /escolaridade|instru[cç][aã]o/i), 'Escolaridade');
+  reg('f_end',       respostaAposMulti(linhas, /endere[cç]o\s+completo|endere[cç]o/i), 'Endereço');
+
+  // ── CPF do candidato (ignora a pergunta de dependentes, que também cita "CPF's") ──
+  let cpf = respostaApos(linhas, /^(?!.*(?:filho|nascimento|dependente)).*\bcpf\b/i);
+  const cpfM = cpf.match(/\d{3}\.?\d{3}\.?\d{3}-?\d{2}/);
+  if (cpfM) cpf = fmtCPF(cpfM[0]); else cpf = '';
+  reg('f_cpf', cpf, 'CPF');
+
+  // ── RG ──
+  let rg = respostaApos(linhas, /n[uú]mero\s+do\s+seu\s+rg|\brg\b/i);
+  rg = rg.replace(/^(rg|n[uú]mero)\s*[:\-]?\s*/i, '').trim();
+  reg('f_rg', rg, 'RG');
+
+  // ── E-mail (padrão) ──
+  let email = respostaApos(linhas, /e-?mail/i);
+  const emailM = (email.match(/[\w.+-]+@[\w.-]+\.\w{2,}/) || texto.match(/[\w.+-]+@[\w.-]+\.\w{2,}/));
+  email = emailM ? emailM[0] : '';
+  reg('f_email', email, 'E-mail');
+
+  // ── Celular (DDD): pergunta "Telefone com DDD" ──
+  // Ancora especificamente nessa pergunta e extrai o número SÓ da resposta dela
+  // (sem varrer o documento inteiro, o que trazia números de outros campos).
+  let cel = respostaApos(linhas, /telefone\s+com\s+ddd/i)
+         || respostaApos(linhas, /telefone|celular|whats/i);
+  const celM = cel.match(/\(?\d{2}\)?\s?9?\d{4}[-\s]?\d{4}/);
+  cel = celM ? celM[0].trim() : cel.replace(/[^\d()\-\s]/g, '').trim();
+  reg('f_cel', cel, 'Celular');
+
+  // ── Título de eleitor ──
+  reg('f_titulo', respostaApos(linhas, /t[ií]tulo\s+(de\s+)?eleitor|eleitoral/i), 'Título de Eleitor');
+
+  // ── PIS ──
+  let pis = respostaApos(linhas, /\bpis\b|pis\/?pasep|nit\b/i);
+  if (/n[aã]o\s*tenho|^n[aã]o$/i.test(pis)) pis = '';
+  reg('f_pis', pis, 'PIS');
+
+  // ── PIX + Banco ──
+  const pixRaw = respostaApos(linhas, /chave\s*pix|\bpix\b/i);
+  let pixVal = pixRaw, banco = '';
+  const si = pixRaw.lastIndexOf(' - ');
+  if (si > -1) { pixVal = pixRaw.substring(0, si).trim(); banco = pixRaw.substring(si + 3).trim(); }
+  else { const m = pixRaw.match(/\b(Itaú|Bradesco|Caixa|Santander|Nubank|Inter|C6|BB|Sicoob|Sicredi|PicPay|Mercado Pago)\b/i); if (m) banco = m[1]; }
+  reg('f_pix', pixVal || pixRaw, 'Chave PIX');
+
+  // ── Agência e Conta do Itaú (agora PERGUNTAS SEPARADAS) ──
+  // Agência: "Qual o número da sua agência do banco Itaú? ... (link/CNPJ)"
+  // Conta:   "Qual a conta do banco Itaú?"
+  // respostaNumeroLimpa pula a continuação da pergunta (URL, CNPJ, "abrir conta").
+  let ag = respostaNumeroLimpa(linhas, /ag[eê]ncia\s+do\s+banco\s+ita[uú]|n[uú]mero\s+da\s+sua\s+ag[eê]ncia/i);
+  let ct = respostaNumeroLimpa(linhas, /qual\s+a\s+conta\s+do\s+banco\s+ita[uú]|\bconta\s+do\s+banco\s+ita[uú]/i);
+
+  // Fallback: formato antigo (pergunta única "agência e conta")
+  if (!ag && !ct) {
+    const itauRaw = respostaApos(linhas, /abrir\s+(a\s+)?conta\s+no\s+banco\s+ita[uú]|qual\s+ag[eê]ncia\s+e\s+conta/i)
+                 || respostaApos(linhas, /conta\s+no\s+banco\s+ita[uú]/i);
+    if (itauRaw && !/^\s*n[aã]o\b/i.test(itauRaw)) {
+      const ma = itauRaw.match(/ag[eê]ncia\.?:?\s*n?[ºo]?\.?\s*([\d.\-]+)/i);
+      const mc = itauRaw.match(/conta\.?:?\s*(?:corrente)?\s*n?[ºo]?\.?\s*([\d.\-]+)/i);
+      if (ma) ag = ma[1].replace(/\.$/,''); if (mc) ct = mc[1].replace(/\.$/,'');
+      if (!ag && !ct) { const ns = itauRaw.match(/\d{2,6}[-/]?\d*/g); if (ns && ns.length >= 2) { ag = ns[0]; ct = ns[1]; } else if (ns) { ct = ns[0]; } }
+    }
+  }
+  if ((ag || ct) && !banco) banco = 'Itaú';
+  setA('f_banco', banco);
+  setA('f_ag', ag);
+  setA('f_conta', ct);
+  if (ag) preenchidos.push('Agência');
+  if (ct) preenchidos.push('Conta');
+  else if (banco && !preenchidos.includes('Banco')) preenchidos.push('Banco');
+
+  // ── Vale-Transporte = soma do valor de IDA + valor de VOLTA ──
+  // Perguntas: "Valor (R$) diário do transporte público para ida ao trabalho." e "... para volta"
+  const vtIdaRaw   = respostaNumericaApos(linhas, /ida\s+ao\s+trabalho|transporte\s+p[uú]blico\s+para\s+ida/i);
+  const vtVoltaRaw = respostaNumericaApos(linhas, /transporte\s+p[uú]blico\s+para\s+volta|para\s*volta\b/i);
+  const vIda   = parseValorBR(vtIdaRaw);
+  const vVolta = parseValorBR(vtVoltaRaw);
+  let vtTotal = NaN;
+  if (!isNaN(vIda) && !isNaN(vVolta)) vtTotal = vIda + vVolta;
+  else if (!isNaN(vIda))   vtTotal = vIda;
+  else if (!isNaN(vVolta)) vtTotal = vVolta;
+  reg('f_vt', isNaN(vtTotal) ? '' : fmtValorBR(vtTotal), 'Valor Diário VT');
+
+  // ── Campos sempre manuais (não vêm do formulário) ──
+  ['f_pai','f_mae','f_conjuge','f_recado','f_zona','f_secao','f_cnh','f_ctps','f_ctps_s','f_ctps_uf','f_ctps_emissao','f_passes','f_exp'].forEach(setM);
+    campos.f_salario = '';
+    campos.f_orgao = 'SSP/';
+    campos.f_admissao = isoToday();
+    const depsLinhas = coletarRespostaDependentes(linhas);
+    let deps = parseDependentesV2(depsLinhas);
+    if (!deps.length) deps = parseDependentesCompleto(depsLinhas.join(', '));
+    if (deps.length) preenchidos.push('Dependentes');
+    return { campos, preenchidos, depRaw: depsLinhas.join('\n'),
+             deps: deps.map(d => ({ nome:d.nome, nasc:d.nasc, cpf:d.cpf, par:'Filho(a)' })) };
+  }
+  return { lerFicha, lerContrato };
+})();
+/* ADM-FIM */
+
 /* ═══════════════════════════ BOOT ═══════════════════════════ */
 $('#hojeLabel').textContent = HOJE.toLocaleDateString('pt-BR', { weekday:'long', day:'2-digit', month:'long', year:'numeric' });
 
@@ -13194,6 +15804,9 @@ $('#hojeLabel').textContent = HOJE.toLocaleDateString('pt-BR', { weekday:'long',
     const peds = await comLimite(nuvemLerSolicitacoes(), 8000);
     if(peds) SOLICITACOES = peds;
   }
+
+  /* admissões: tabelas à parte, lidas depois do acesso pelo mesmo motivo */
+  try{ await admIniciar(); }catch(e){ console.warn('admIniciar', e); }
 
   go('dashboard');
 
