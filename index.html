@@ -108,11 +108,14 @@ tailwind.config = {
   <div id="banner" class="no-print"></div>
   <main id="view" class="flex-1 p-4 sm:p-6"></main>
 
-  <!-- só aparece quando o arquivo traz a base das planilhas embutida (build local) -->
-  <footer id="rodapePlanilha" class="hidden px-6 py-4 text-[11px] text-slate-500 border-t border-slate-200 bg-white no-print">
-    <button onclick="sincronizarPlanilha()" class="underline hover:text-accent">sincronizar novidades da planilha</button>
-    ·
-    <button onclick="resetToSeed()" class="underline hover:text-danger">recarregar base das planilhas</button>
+  <!-- 2026.10.01-2065437 é preenchido no build: data + commit do código publicado -->
+  <footer class="px-6 py-4 text-[11px] text-slate-500 border-t border-slate-200 bg-white no-print">
+    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.01-2065437
+    <span id="rodapePlanilha" class="hidden"> ·
+      <button onclick="sincronizarPlanilha()" class="underline hover:text-accent">sincronizar novidades da planilha</button>
+      ·
+      <button onclick="resetToSeed()" class="underline hover:text-danger">recarregar base das planilhas</button>
+    </span>
   </footer>
 </div>
 
