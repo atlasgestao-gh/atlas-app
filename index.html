@@ -8028,11 +8028,6 @@ function parecidasComTokens(f1, t1, f2, t2){
 function grafiasParecidas(f1, f2){
   return parecidasComTokens(f1, tokensCargo(f1), f2, tokensCargo(f2));
 }
-function matrizIgual(m1, m2){
-  if(!m1 || !m2) return false;
-  return TIPOS_MTZ.every(t =>
-    (m1[t]||[]).slice().sort().join('|') === (m2[t]||[]).slice().sort().join('|'));
-}
 function infoCargoDup(c){
   const r = matrizDaFuncao(c.funcao);
   return { cargo:c, id:c.id, funcao:c.funcao,
@@ -8048,15 +8043,15 @@ function cargosDuplicados(){
       const motivo = parecidasComTokens(cs[i].c.funcao, cs[i].t, cs[j].c.funcao, cs[j].t);
       if(!motivo) continue;
       const a = infoCargoDup(cs[i].c), b = infoCargoDup(cs[j].c);
-      /* o caso que realmente morde: cada grafia com a SUA matriz — e diferentes.
-         Aí são duas listas de exames para a mesma função, e ninguém percebe. */
-      const duasMatrizes = !!(a.matriz && !a.via && b.matriz && !b.via);
-      out.push({ a, b, motivo, duasMatrizes,
-                 divergem: duasMatrizes && !matrizIgual(a.matriz, b.matriz) });
+      /* Matriz própria nas DUAS = alguém montou e conferiu cada uma: são funções
+         distintas de propósito (ex.: Auxiliar de limpeza × Banheirista), não
+         grafia duplicada. O alerta fica para o par em que ao menos um lado
+         ainda está sem matriz ou pegando a de outra função emprestada. */
+      if(a.matriz && !a.via && b.matriz && !b.via) continue;
+      out.push({ a, b, motivo });
     }
   }
-  return out.sort((x, y) => (y.divergem - x.divergem) || (y.duasMatrizes - x.duasMatrizes) ||
-                            ((y.a.n + y.b.n) - (x.a.n + x.b.n)));
+  return out.sort((x, y) => (y.a.n + y.b.n) - (x.a.n + x.b.n));
 }
 /* usado no Salvar do cargo: evitar a duplicata nascer é melhor do que achá-la depois */
 function cargoParecido(funcao, ignorarId){
@@ -8077,24 +8072,21 @@ function verCargosDuplicados(){
       </span>
     </div>`;
   const bloco = d => `
-    <div class="border ${d.divergem ? 'border-red-300 bg-red-50' : 'border-slate-200'} rounded-lg px-4 py-3">
+    <div class="border border-slate-200 rounded-lg px-4 py-3">
       <div class="flex items-center gap-2 mb-1">
         ${badge(d.motivo, 'bg-slate-200 text-slate-600')}
-        ${d.divergem ? badge('matrizes diferentes', 'bg-red-100 text-red-700') : ''}
       </div>
       ${lado(d.a)}
       <div class="border-t border-slate-200/70"></div>
       ${lado(d.b)}
-      ${d.divergem ? `<p class="text-[11px] text-red-800 mt-1">
-        As duas têm matriz própria e as listas de exames <b>não são iguais</b> — a mesma função
-        pede exames diferentes conforme a grafia da ficha.</p>` : ''}
     </div>`;
   openInfo('Grafias duplicadas no catálogo', `
     <div class="space-y-3">
       <p class="text-xs text-slate-600">Cada par abaixo parece ser a <b>mesma função escrita de dois jeitos</b>.
         Enquanto as duas existirem, quem estiver cadastrado com uma grafia usa a matriz dela e ignora a da outra.</p>
-      <p class="text-xs text-slate-500">Para resolver: escolha qual grafia fica, corrija a matriz dela, e só então
-        apague a outra. Apagar primeiro joga os colaboradores daquela grafia para fora do catálogo.</p>
+      <p class="text-xs text-slate-500">Para resolver: se for a mesma função, escolha qual grafia fica e só então
+        apague a outra (apagar primeiro joga os colaboradores daquela grafia para fora do catálogo). Se forem
+        funções diferentes de verdade, dê <b>matriz própria</b> às duas — par com as duas matrizes conferidas sai desta lista.</p>
       ${dups.length ? dups.map(bloco).join('')
         : '<p class="text-sm text-slate-400 text-center py-6">Nenhuma grafia duplicada no catálogo.</p>'}
     </div>`, 'max-w-2xl');
@@ -8106,13 +8098,11 @@ function abaCargos(){
   const { itens:lista, p } = paginar(todos, UICargo.page);
   const semMatriz = DB.cargos.filter(c => !matrizDaFuncao(c.funcao).matriz).length;
   const dups = cargosDuplicados();
-  const nDiverg = dups.filter(d => d.divergem).length;
   $('#abaCad').innerHTML = `
   ${dups.length ? `<div class="mb-4 rounded-xl border border-amber-300 bg-amber-50 px-5 py-4 flex items-start gap-3">
       <i class="fa-solid fa-clone text-amber-500 mt-0.5"></i>
       <div class="text-sm text-amber-900 flex-1">
-        <p class="font-semibold">${dups.length} possível(is) grafia(s) duplicada(s) no catálogo${
-          nDiverg ? ` — ${nDiverg} com matrizes de exames diferentes` : ''}</p>
+        <p class="font-semibold">${dups.length} possível(is) grafia(s) duplicada(s) no catálogo</p>
         <p class="text-xs mt-1">${dups.slice(0,3).map(d =>
           esc(d.a.funcao) + ' × ' + esc(d.b.funcao)).join(' · ')}${
           dups.length > 3 ? ' · e mais ' + (dups.length - 3) : ''}</p>
