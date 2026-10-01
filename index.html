@@ -108,9 +108,9 @@ tailwind.config = {
   <div id="banner" class="no-print"></div>
   <main id="view" class="flex-1 p-4 sm:p-6"></main>
 
-  <!-- 2026.10.01-2065437 é preenchido no build: data + commit do código publicado -->
+  <!-- 2026.10.01-862ceed é preenchido no build: data + commit do código publicado -->
   <footer class="px-6 py-4 text-[11px] text-slate-500 border-t border-slate-200 bg-white no-print">
-    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.01-2065437
+    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.01-862ceed
     <span id="rodapePlanilha" class="hidden"> ·
       <button onclick="sincronizarPlanilha()" class="underline hover:text-accent">sincronizar novidades da planilha</button>
       ·
@@ -7953,7 +7953,7 @@ function historicoColabHTML(id){
     </tbody></table>`
     : '<p>Sem atestados registrados.</p>'}
 
-  <div class="rod">${esc(ATLAS_ENDERECO)}<br>${esc(ATLAS_CONTATO)}</div>
+  <div class="rod">${esc(ATLAS_ENDERECO)}</div>
   </div></body></html>`;
 }
 function baixarHistoricoColab(id){
@@ -11405,7 +11405,6 @@ function exportarVisitas(){
 /* ═══════════════════════════ 7c. DOCUMENTOS (ofícios, orçamentos, comunicados) ═══════════════════════════ */
 const DOC_TIPO = { OFICIO:'Ofício', ORCAMENTO:'Orçamento', COMUNICADO:'Comunicado' };
 const ATLAS_ENDERECO = 'Rua Comendador Hugo Winter, n° 267 — Ribeirão Pires/SP';
-const ATLAS_CONTATO = '11 9.4335-6617 · atlas@zamith.adv.br';
 const ATLAS_CIDADE = 'Ribeirão Pires';
 const UIDoc = { q:'', tipo:'', page:1 };
 let UIDocItens = [];
@@ -11650,7 +11649,7 @@ function docHTML(doc){
           ${doc.assinaNome?`<b>${esc(doc.assinaNome)}</b><br>`:''}${esc(doc.assinaCargo||'')}
         </div>
       </div>
-      <div class="rod">${esc(ATLAS_ENDERECO)}<br>${esc(ATLAS_CONTATO)}</div>
+      <div class="rod">${esc(ATLAS_ENDERECO)}</div>
     </div></body></html>`;
 }
 function imprimirDoc(id){
@@ -12540,7 +12539,7 @@ function montarRelatorioNR01(comTimbrado, acao){
 
     ${secao('6. Registros analisados')}
     ${tabela}
-    ${comTimbrado ? `<div class="rod">${esc(ATLAS_ENDERECO)}<br>${esc(ATLAS_CONTATO)}</div>` : ''}
+    ${comTimbrado ? `<div class="rod">${esc(ATLAS_ENDERECO)}</div>` : ''}
     <div class="fim"></div>
     </div></body></html>`;
 
@@ -12761,7 +12760,7 @@ function montarRelatorioCorporativo(comTimbrado, unidadeIds, acao){
       <b>Programa de Gerenciamento de Riscos (PGR)</b>, servindo como base probatória preventiva contra o
       adoecimento ocupacional.</p>
     </div>
-    ${comTimbrado ? `<div class="rod">${esc(ATLAS_ENDERECO)}<br>${esc(ATLAS_CONTATO)}</div>` : ''}
+    ${comTimbrado ? `<div class="rod">${esc(ATLAS_ENDERECO)}</div>` : ''}
     <div class="fim"></div>
     </div></body></html>`;
 
