@@ -5318,7 +5318,12 @@ function migrarPrecos(d){
       e.custo = hit ? hit.custo : 0;
     }
   });
-  if(d.precosVersao !== 2){
+  /* SÓ para base anterior à v2. A comparação era `!== 2`, e como o bloco da v3
+     logo abaixo grava 3, este aqui rodava de novo A CADA ABERTURA: devolvia a
+     tabela para 150/80 (apagando carteirinha, mensal e dispensa, que voltavam
+     ao padrão) e rebaixava para 80 todo exame gravado a R$100. O estrago era
+     publicado no primeiro salvamento depois de abrir. */
+  if(!(Number(d.precosVersao) >= 2)){
     /* preços padrão que a Atlas cobra das unidades:
        ASO com exames laboratoriais = R$150 · ASO só clínico = R$80 */
     const antigoAso = d.precos && d.precos.aso;
@@ -5356,7 +5361,7 @@ function migrarPrecos(d){
   /* mês de faturamento da visita (separado da data da visita) */
   d.visitas.forEach(v => { if(v.fechamento == null) v.fechamento = v.mes || (v.data||'').slice(0,7); });
   /* reajuste de preços: laudo 1400→2200, visita 400→600 */
-  if(d.precosVersao !== 3){
+  if(!(Number(d.precosVersao) >= 3)){
     if(Number(d.precos.laudo) === 1400) d.precos.laudo = 2200;
     if(Number(d.precos.visita) === 400) d.precos.visita = 600;
     /* atualiza laudos e visitas que estavam no valor antigo (não toca em ajustes fora do padrão) */
