@@ -108,9 +108,9 @@ tailwind.config = {
   <div id="banner" class="no-print"></div>
   <main id="view" class="flex-1 p-4 sm:p-6"></main>
 
-  <!-- 2026.10.01-862ceed é preenchido no build: data + commit do código publicado -->
+  <!-- 2026.10.05-c93cc54 é preenchido no build: data + commit do código publicado -->
   <footer class="px-6 py-4 text-[11px] text-slate-500 border-t border-slate-200 bg-white no-print">
-    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.01-862ceed
+    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.05-c93cc54
     <span id="rodapePlanilha" class="hidden"> ·
       <button onclick="sincronizarPlanilha()" class="underline hover:text-accent">sincronizar novidades da planilha</button>
       ·
@@ -1713,10 +1713,10 @@ const LOG_ACOES = {
   abriu_ficha:'Abriu ficha de colaborador', restaurou_backup:'Restaurou backup de arquivo', trocou_senha:'Trocou a própria senha',
   incluiu:'Incluiu', alterou:'Alterou', excluiu:'Excluiu',
   abriu_ficha_admissao:'Abriu ficha de admissão', imprimiu_ficha_admissao:'Gerou ficha de admissão',
-  emitiu_contrato:'Emitiu contrato', abriu_contrato:'Abriu contrato', expurgou:'Apagou dados pelo prazo de guarda'
+  emitiu_contrato:'Emitiu contrato', abriu_contrato:'Abriu contrato', abriu_anexo_contrato:'Baixou anexo do contrato', expurgou:'Apagou dados pelo prazo de guarda'
 };
 const LOG_TABELAS = { atlas_unidade:'Dados da unidade', atlas_comum:'Dados gerais', atlas_acesso:'Acessos', atlas_solicitacao:'Pedido de gerente',
-  atlas_admissao:'Admissão', atlas_contrato:'Contrato', atlas_ferias:'Férias' };
+  atlas_admissao:'Admissão', atlas_contrato:'Contrato', atlas_contrato_anexo:'Anexo do contrato', atlas_ferias:'Férias' };
 const LOG_COLECOES = { colaboradores:'Colaboradores', emissoes:'Exames', asos:'ASOs', laudos:'Laudos', visitas:'Visitas',
   atestados:'Atestados', documentos:'Documentos', docsOficiais:'Docs oficiais', relatorios:'Relatórios',
   esocial2220:'eSocial S-2220', esocial2240:'eSocial S-2240', precos:'Tabela de preços', precosUnidade:'Preços por unidade',
@@ -13294,10 +13294,13 @@ const ADM_CAMPOS = ['f_funcao','f_salario','f_admissao']
 const ADM_SEM_CAIXA_ALTA = ['f_email','f_pix','f_nasc','f_exp','f_admissao'];
 const ADM_CHECKLIST = [['r_vt','Vale-transporte'], ['r_aso','Exame adm. ASO'],
                        ['r_autodecl','Auto-declaração'], ['r_foto','Foto']];
-const ADM_DIAS_GUARDA = 30;
+const ADM_DIAS_GUARDA = 30;          /* ficha (dado de RH): dias depois do contrato */
+const ADM_DIAS_CONTRATO = 120;       /* contrato à disposição da gerente: cobre experiência + prorrogação */
+const ADM_ANEXO_MAX = 5 * 1024 * 1024;
 
 /* ───────────── estado ───────────── */
 let ADMISSOES = [], FERIAS = [], CONTRATOS = [];
+let ANEXOS = {};      /* contratoId → { nome, tamanho } — o arquivo em si só é buscado ao abrir */
 let ADM_UNIS = null, ADM_QUADRO = null;       /* só para o perfil admissão (vêm por função do banco) */
 const UIAdm = { aba:'fichas', q:'', uni:'', page:1, pageAc:1, filtroAc:'', qAc:'', uniAc:'', edit:null };
 
@@ -13371,7 +13374,8 @@ function linhaDaAdm(a){
            atualizado_por:String(SESSAO.email||'').toLowerCase(), atualizado_em:new Date().toISOString() };
 }
 const admContratoDaLinha = r => ({ id:r.id, admissaoId:r.admissao_id, unidadeId:r.unidade_id, nome:r.nome || '',
-  dados:r.dados || {}, emitidoEm:r.emitido_em || '', emitidoPor:r.emitido_por || '', disponivelAte:r.disponivel_ate || '' });
+  dados:r.dados || {}, emitidoEm:r.emitido_em || '', emitidoPor:r.emitido_por || '', disponivelAte:r.disponivel_ate || '',
+  enviadoEm:r.enviado_em || '', enviadoPor:r.enviado_por || '' });
 const admFeriasDaLinha = r => ({ id:r.id, unidadeId:r.unidade_id, cpf:r.cpf || '', nome:r.nome || '',
   inicio:r.inicio || '', fim:r.fim || '', abono:Number(r.abono)||0, observacao:r.observacao || '' });
 
@@ -13413,6 +13417,11 @@ async function admCarregar(){
   /* a gerente só recebe contrato — e a política do banco já corta pelo prazo */
   const cs = await ler('atlas_contrato', admContratoDaLinha, 'emitido_em');
   if(cs) CONTRATOS = cs;
+  /* dos anexos vem só o nome e o tamanho: o PDF fica no banco até alguém abrir */
+  try{
+    const an = await sb.from('atlas_contrato_anexo').select('contrato_id, nome, tamanho');
+    if(!an.error){ ANEXOS = {}; (an.data || []).forEach(x => { ANEXOS[x.contrato_id] = { nome:x.nome, tamanho:x.tamanho }; }); }
+  }catch(e){ console.warn('admCarregar/anexos', e); }
   if(ACESSO.gerente) return;
   const as = await ler('atlas_admissao', admDaLinha, 'criado_em');
   if(as) ADMISSOES = as;
@@ -13581,6 +13590,9 @@ function admSituacao(a){
   }
   else if(a.fichaEm) b.push(badge('ficha gerada', 'bg-blue-100 text-blue-700'));
   else b.push(badge('em preenchimento', 'bg-slate-100 text-slate-600'));
+  const ct = admContratoDe(a);
+  if(ct) b.push(ct.enviadoEm ? badge('contrato enviado à gerente' + (ANEXOS[ct.id] ? ' + anexo' : ''), 'bg-emerald-100 text-emerald-700')
+                             : badge('contrato não enviado à gerente', 'bg-amber-100 text-amber-700'));
   if(admNoCadastro(a)) b.push(badge('no cadastro', 'bg-emerald-100 text-emerald-700'));
   else if(a.cadastroPedidoEm) b.push(badge('cadastro aguardando a Atlas', 'bg-indigo-100 text-indigo-700'));
   if(a.asoPedidoEm) b.push(badge('ASO pedido', 'bg-emerald-100 text-emerald-700'));
@@ -13600,16 +13612,16 @@ function admFichas(){
   const linhas = pg.itens.map(a => {
     const morta = !!a.expurgadoEm;
     return `<tr class="hover:bg-slate-50 align-top">
-      <td class="px-4 py-3 font-medium text-slate-700">${esc(a.nome || '—')}
+      <td class="px-4 py-3 font-medium text-slate-700 min-w-[11rem]">${esc(a.nome || '—')}
         <div class="text-[11px] text-slate-500 font-normal">${esc(a.funcao || 'sem função')}</div></td>
       <td class="px-4 py-3 text-xs text-slate-600 whitespace-nowrap">${esc(admCpfFmt(a.cpf))}</td>
-      <td class="px-4 py-3 text-xs text-slate-600">${esc(admUniNome(a.unidadeId))}</td>
+      <td class="px-4 py-3 text-xs text-slate-600 min-w-[9rem]">${esc(admUniNome(a.unidadeId))}</td>
       <td class="px-4 py-3 text-xs text-slate-600 whitespace-nowrap">${a.admissao ? fmtDate(a.admissao) : '—'}</td>
       <td class="px-4 py-3 text-xs space-y-1">${admSituacao(a)}</td>
       <td class="px-4 py-3 text-right whitespace-nowrap no-print">
         ${morta ? '' : bt('fa-pen', 'Abrir a ficha', `admEditar('${a.id}')`)}
         ${morta ? '' : bt('fa-file-lines', 'Visualizar / imprimir a ficha', `admImprimirFicha('${a.id}')`)}
-        ${morta ? '' : bt('fa-file-signature', 'Contrato', `admAbrirContrato('${a.id}')`)}
+        ${morta && !admContratoDe(a) ? '' : bt('fa-file-signature', 'Contrato', `admAbrirContrato('${a.id}')`)}
         ${admNoCadastro(a) || a.cadastroPedidoEm ? '' : bt('fa-user-plus', 'Inserir na base de colaboradores', `admCadastrar('${a.id}')`)}
         ${a.asoPedidoEm ? '' : bt('fa-notes-medical', 'Solicitar ASO admissional', `admPedirAso('${a.id}')`, 'hover:text-emerald-600')}
         ${bt('fa-trash', 'Excluir esta admissão', `admExcluir('${a.id}')`, 'hover:text-danger')}
@@ -13880,6 +13892,7 @@ function admExcluir(id){
         if(error){ toast('Não consegui excluir: ' + error.message, 'erro'); return; }
       }
       ADMISSOES = ADMISSOES.filter(x => x.id !== id);
+      CONTRATOS.filter(c => c.admissaoId === id).forEach(c => { delete ANEXOS[c.id]; });
       CONTRATOS = CONTRATOS.filter(c => c.admissaoId !== id);
       viewAdmissoes();
       toast('Admissão excluída.');
@@ -14325,7 +14338,8 @@ function admContratoDoc(d, unidadeRotulo){
 
 function admAbrirContrato(id){
   const a = admissao(id); if(!a) return;
-  if(a.expurgadoEm){ toast('Os dados desta ficha já foram apagados pelo prazo de guarda.', 'alerta'); return; }
+  /* a ficha some aos 30 dias, o contrato fica 120: enquanto ele existir dá para reabrir e retificar */
+  if(a.expurgadoEm && !admContratoDe(a)){ toast('Os dados desta ficha já foram apagados pelo prazo de guarda.', 'alerta'); return; }
   const cu = admContratoUni(a.unidadeId);
   if(!cu){
     toast('O contrato ainda não está configurado para ' + admUniNome(a.unidadeId) +
@@ -14351,7 +14365,7 @@ function admAbrirContrato(id){
             <b>Empregadora:</b> ${esc(cu.nomeFull)}<br><b>Local de trabalho:</b> ${esc(cu.trabalho)}</div>
           ${ja ? `<div class="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
             <i class="fa-solid fa-clock mr-1"></i>Contrato emitido em <b>${fmtDate(String(ja.emitidoEm).slice(0,10))}</b>.
-            Salvar aqui gera a versão retificada e <b>recomeça</b> a contagem de ${ADM_DIAS_GUARDA} dias.</div>` : ''}
+            Salvar aqui gera a versão retificada e <b>recomeça</b> a contagem de ${ADM_DIAS_CONTRATO} dias.</div>` : ''}
           <label class="flex items-center gap-3 px-3 py-2 rounded-lg border-2 border-dashed border-slate-300 cursor-pointer hover:border-accent hover:bg-white">
             <i class="fa-solid fa-file-arrow-up text-slate-400"></i>
             <span id="admPdfCtRot" class="text-sm text-slate-600">Opcional: preencher pelo PDF do contrato de experiência</span>
@@ -14380,7 +14394,7 @@ function admAbrirContrato(id){
       };
       inp.addEventListener('input', pintar); pintar();
       $('#modalFoot').querySelector('button[onclick="submitForm()"]').innerHTML =
-        '<i class="fa-solid fa-file-signature mr-1"></i>' + (ja ? 'Retificar e abrir' : 'Gerar contrato');
+        '<i class="fa-solid fa-file-signature mr-1"></i>' + (ja ? 'Retificar' : 'Gerar contrato') + ' …';
       if(ja) $('#modalFoot').insertAdjacentHTML('afterbegin', `<button onclick="admReabrirContrato('${a.id}')"
         class="px-4 py-2 rounded-lg text-sm border border-slate-300 text-slate-700 hover:bg-slate-50 mr-auto">
         <i class="fa-solid fa-print mr-1"></i>Só reabrir o emitido</button>`);
@@ -14392,27 +14406,126 @@ function admAbrirContrato(id){
       const dados = { uniKey:cu.chave, nome:maius(v.nome), cpf:admCpfFmt(v.cpf), endereco:maius(v.endereco),
                       funcao:Object.keys(ADM_CATALOGO).find(k => k.trim().toLowerCase() === v.funcao.trim().toLowerCase()),
                       descricao:desc, salario:v.salario, data:v.data };
-      const agora = new Date();
-      let reg = { id:(ja && ja.id) || admNovoId(), admissaoId:a.id, unidadeId:a.unidadeId, nome:dados.nome, dados,
-                    emitidoEm:agora.toISOString(), emitidoPor:String(SESSAO.email||'').toLowerCase(),
-                    disponivelAte:new Date(agora.getTime() + ADM_DIAS_GUARDA*86400000).toISOString() };
-      if(nuvemLigada()){
-        /* um contrato por admissão: a retificação cai em cima do anterior */
-        const { data, error } = await sb.from('atlas_contrato').upsert({ admissao_id:a.id, unidade_id:a.unidadeId,
-          nome:reg.nome, dados, emitido_em:reg.emitidoEm, emitido_por:reg.emitidoPor, disponivel_ate:reg.disponivelAte },
-          { onConflict:'admissao_id' }).select().single();
-        if(error){ toast('Não consegui gravar o contrato: ' + error.message, 'erro'); return; }
-        if(data) reg = admContratoDaLinha(data);
-      }
-      CONTRATOS = CONTRATOS.filter(x => x.admissaoId !== a.id).concat([reg]);
-      a.contratoEm = reg.emitidoEm;
-      admAvisarFalha(await admSalvar(a), 'a data do contrato');
-      registrarAtividade('emitiu_contrato', { admissao_id:a.id, retificacao:!!ja });
-      closeModal();
-      abrirRelatorio(admContratoDoc(dados, admUniRotulo(a.unidadeId)));
-      if(UIAdm.edit) admRenderForm(true); else viewAdmissoes();
+      /* gerar não é enviar: a pergunta vem antes de gravar qualquer coisa */
+      admConfirmarEnvio(a.id, dados);
     }
   });
+}
+
+/* ───────────── envio à gerente ─────────────
+   Antes o contrato e um segundo documento iam por e-mail. Agora a gerente os
+   recebe na tela dela — mas só se alguém confirmar aqui. O PDF é opcional e
+   fica guardado junto do contrato, pelo mesmo prazo. */
+let _admEnvio = null;
+function admConfirmarEnvio(aid, dados){
+  const a = admissao(aid); if(!a) return;
+  const ja = admContratoDe(a);
+  const anexo = ja && ANEXOS[ja.id];
+  _admEnvio = { aid, dados };
+  openInfo('Enviar para a gerente — ' + (a.nome || ''), `
+    <div class="space-y-4 text-sm text-slate-700">
+      <p>O contrato de <b>${esc(dados.nome)}</b> está pronto. <b>Confirma o envio para a gerente</b> de
+        ${esc(admUniNome(a.unidadeId))}?</p>
+      <p class="text-xs text-slate-500">Enviado, ele aparece na aba <b>Contratos</b> da gerente por
+        <b>${ADM_DIAS_CONTRATO} dias</b>, para impressão e assinatura. Sem enviar, o contrato é gerado e fica só aqui.</p>
+      ${ja && ja.enviadoEm ? `<div class="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+        <i class="fa-solid fa-triangle-exclamation mr-1"></i>A versão anterior foi enviada em
+        <b>${fmtDate(String(ja.enviadoEm).slice(0,10))}</b>. Se você gerar <b>sem enviar</b>, o contrato sai da tela da gerente.</div>` : ''}
+      <div class="rounded-lg border border-slate-200 p-3">
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-2">Documento que acompanha o contrato (PDF, opcional)</p>
+        ${anexo ? `<p class="text-xs text-slate-600 mb-2"><i class="fa-solid fa-paperclip mr-1"></i>Já anexado:
+          <button type="button" onclick="admAbrirAnexo('${ja.id}')" class="underline hover:text-accent">${esc(anexo.nome)}</button>
+          — escolher outro arquivo substitui este.</p>` : ''}
+        <label class="flex items-center gap-3 px-3 py-2 rounded-lg border-2 border-dashed border-slate-300 cursor-pointer hover:border-accent hover:bg-slate-50">
+          <i class="fa-solid fa-file-arrow-up text-slate-400"></i>
+          <span id="admAnexoRot" class="text-sm text-slate-600">Escolher arquivo PDF</span>
+          <input id="admAnexoArq" type="file" accept=".pdf,application/pdf" class="hidden"
+            onchange="document.getElementById('admAnexoRot').textContent = this.files[0] ? this.files[0].name : 'Escolher arquivo PDF'">
+        </label>
+        <p class="text-[11px] text-slate-400 mt-1">Até 5 MB. Fica disponível para a gerente junto com o contrato e é apagado com ele.</p>
+      </div>
+    </div>`, 'max-w-xl');
+  $('#modalFoot').innerHTML = `
+    <button onclick="closeModal()" class="px-4 py-2 rounded-lg text-sm text-slate-600 hover:bg-slate-100 mr-auto">Cancelar</button>
+    <button onclick="admConcluirContrato(false)" class="px-4 py-2 rounded-lg text-sm border border-slate-300 text-slate-700 hover:bg-slate-50">Gerar sem enviar</button>
+    <button onclick="admConcluirContrato(true)" class="px-4 py-2 rounded-lg text-sm bg-accent text-white hover:bg-blue-700">
+      <i class="fa-solid fa-paper-plane mr-1"></i>Sim, gerar e enviar</button>`;
+}
+function admLerBase64(file){
+  return new Promise((ok, erro) => {
+    const fr = new FileReader();
+    fr.onload = () => ok(String(fr.result).split(',')[1] || '');
+    fr.onerror = () => erro(fr.error || new Error('falha ao ler o arquivo'));
+    fr.readAsDataURL(file);
+  });
+}
+async function admConcluirContrato(enviar){
+  const e = _admEnvio; if(!e) return;
+  const a = admissao(e.aid); if(!a) return;
+  const dados = e.dados, ja = admContratoDe(a);
+  const file = ($('#admAnexoArq').files || [])[0] || null;
+  if(file){
+    const pdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name);
+    if(!pdf){ toast('O documento precisa ser um PDF.', 'erro'); return; }
+    if(file.size > ADM_ANEXO_MAX){ toast('O PDF tem ' + (file.size/1048576).toFixed(1) + ' MB — o limite é 5 MB.', 'erro'); return; }
+  }
+  const botoes = [...document.querySelectorAll('#modalFoot button')];
+  botoes.forEach(b => { b.disabled = true; b.classList.add('opacity-60'); });
+  const soltar = () => botoes.forEach(b => { b.disabled = false; b.classList.remove('opacity-60'); });
+  let conteudo = '';
+  try{ if(file) conteudo = await admLerBase64(file); }
+  catch(err){ toast('Não consegui ler o PDF: ' + (err && err.message || err), 'erro'); soltar(); return; }
+
+  const agora = new Date(), eu = String(SESSAO.email||'').toLowerCase();
+  let reg = { id:(ja && ja.id) || admNovoId(), admissaoId:a.id, unidadeId:a.unidadeId, nome:dados.nome, dados,
+              emitidoEm:agora.toISOString(), emitidoPor:eu,
+              disponivelAte:new Date(agora.getTime() + ADM_DIAS_CONTRATO*86400000).toISOString(),
+              enviadoEm: enviar ? agora.toISOString() : '', enviadoPor: enviar ? eu : '' };
+  if(nuvemLigada()){
+    /* um contrato por admissão: a retificação cai em cima do anterior */
+    const { data, error } = await sb.from('atlas_contrato').upsert({ admissao_id:a.id, unidade_id:a.unidadeId,
+      nome:reg.nome, dados, emitido_em:reg.emitidoEm, emitido_por:reg.emitidoPor, disponivel_ate:reg.disponivelAte,
+      enviado_em:reg.enviadoEm || null, enviado_por:reg.enviadoPor || null },
+      { onConflict:'admissao_id' }).select().single();
+    if(error){ toast('Não consegui gravar o contrato: ' + error.message, 'erro'); soltar(); return; }
+    if(data) reg = admContratoDaLinha(data);
+    if(file){
+      const r = await sb.from('atlas_contrato_anexo').upsert({ contrato_id:reg.id, unidade_id:a.unidadeId,
+        nome:file.name, tamanho:file.size, conteudo, enviado_por:eu, enviado_em:agora.toISOString() }, { onConflict:'contrato_id' });
+      if(r.error) toast('O contrato foi gravado, mas NÃO consegui gravar o PDF anexo: ' + r.error.message, 'erro');
+      else ANEXOS[reg.id] = { nome:file.name, tamanho:file.size };
+    }
+  }else if(file){
+    ANEXOS[reg.id] = { nome:file.name, tamanho:file.size, conteudo };    /* sem nuvem: só em memória */
+  }
+  CONTRATOS = CONTRATOS.filter(x => x.admissaoId !== a.id).concat([reg]);
+  a.contratoEm = reg.emitidoEm;
+  admAvisarFalha(await admSalvar(a), 'a data do contrato');
+  registrarAtividade('emitiu_contrato', { admissao_id:a.id, retificacao:!!ja, enviado:!!enviar, anexo:!!file });
+  _admEnvio = null;
+  closeModal();
+  abrirRelatorio(admContratoDoc(dados, admUniRotulo(a.unidadeId)));
+  if(UIAdm.edit) admRenderForm(true); else viewAdmissoes();
+  toast(enviar ? 'Contrato gerado e enviado para a gerente.' : 'Contrato gerado. Não foi enviado para a gerente.', enviar ? 'ok' : 'alerta');
+}
+/* busca o PDF só agora e entrega ao navegador */
+async function admAbrirAnexo(contratoId){
+  const meta = ANEXOS[contratoId];
+  if(!meta){ toast('Este documento não está mais disponível.', 'alerta'); return; }
+  let b64 = meta.conteudo || '';
+  if(!b64 && nuvemLigada()){
+    const { data, error } = await sb.from('atlas_contrato_anexo').select('conteudo').eq('contrato_id', contratoId).single();
+    if(error || !data){ toast('Não consegui abrir o documento' + (error ? ': ' + error.message : '.'), 'erro'); return; }
+    b64 = data.conteudo;
+  }
+  const bin = atob(b64), bytes = new Uint8Array(bin.length);
+  for(let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const url = URL.createObjectURL(new Blob([bytes], { type:'application/pdf' }));
+  const el = document.createElement('a');
+  el.href = url; el.download = meta.nome || 'documento.pdf';
+  document.body.appendChild(el); el.click();
+  setTimeout(() => { URL.revokeObjectURL(url); el.remove(); }, 1000);
+  registrarAtividade('abriu_anexo_contrato', { contrato_id:contratoId });
 }
 function admReabrirContrato(id){
   const a = admissao(id), ja = a && admContratoDe(a);
@@ -14751,10 +14864,11 @@ async function admExcluirFerias(id, cpf){
 
 /* ═════════ a gerente: contratos para assinatura ═════════
    Ela não vê ficha nem admissão — só o contrato emitido, e só enquanto a
-   política do banco deixar (30 dias). O que está aqui já chegou filtrado. */
+   política do banco deixar: precisa ter sido ENVIADO e estar dentro dos 120
+   dias. O que está aqui já chegou filtrado. */
 function contratosDaGerente(){
   const agora = new Date().toISOString();
-  return CONTRATOS.filter(c => daUnidadeGer(c.unidadeId) && (!c.disponivelAte || c.disponivelAte >= agora))
+  return CONTRATOS.filter(c => daUnidadeGer(c.unidadeId) && c.enviadoEm && (!c.disponivelAte || c.disponivelAte >= agora))
     .sort((a,b) => String(b.emitidoEm).localeCompare(String(a.emitidoEm)));
 }
 function gerContratos(){
@@ -14763,24 +14877,28 @@ function gerContratos(){
     <div class="space-y-4">
       <div class="rounded-xl border border-blue-200 bg-blue-50 px-5 py-3 text-xs text-blue-900 flex items-start gap-3">
         <i class="fa-solid fa-circle-info mt-0.5"></i>
-        <div>Os contratos emitidos pela equipe de admissão ficam aqui por <b>${ADM_DIAS_GUARDA} dias</b>, para impressão e
-          assinatura. Depois desse prazo saem desta tela.</div>
+        <div>Os contratos enviados pela equipe de admissão ficam aqui por <b>${ADM_DIAS_CONTRATO} dias</b>, para impressão e
+          assinatura, junto com o documento que os acompanha. Depois desse prazo saem desta tela.</div>
       </div>
       <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
         <div class="overflow-x-auto"><table class="w-full text-sm data">
           <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
-            <tr><th class="px-4 py-3">Empregado</th><th class="px-4 py-3">Função</th><th class="px-4 py-3">Emitido em</th>
-                <th class="px-4 py-3">Disponível até</th><th class="px-4 py-3 text-right">Contrato</th></tr></thead>
+            <tr><th class="px-4 py-3">Empregado</th><th class="px-4 py-3">Função</th><th class="px-4 py-3">Enviado em</th>
+                <th class="px-4 py-3">Disponível até</th><th class="px-4 py-3 text-right">Documentos</th></tr></thead>
           <tbody class="divide-y divide-slate-100">
             ${lista.length ? lista.map(c => { const d = diasPara(String(c.disponivelAte).slice(0,10)); return `<tr class="hover:bg-slate-50">
               <td class="px-4 py-3 font-medium text-slate-700">${esc(c.nome)}</td>
               <td class="px-4 py-3 text-xs text-slate-600">${esc((c.dados||{}).funcao || '—')}</td>
-              <td class="px-4 py-3 text-xs text-slate-600">${fmtDate(String(c.emitidoEm).slice(0,10))}</td>
+              <td class="px-4 py-3 text-xs text-slate-600">${fmtDate(String(c.enviadoEm || c.emitidoEm).slice(0,10))}</td>
               <td class="px-4 py-3 text-xs">${fmtDate(String(c.disponivelAte).slice(0,10))}
                 ${badge(d <= 0 ? 'último dia' : 'mais ' + d + ' dia(s)', d <= 7 ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600')}</td>
-              <td class="px-4 py-3 text-right"><button onclick="gerAbrirContrato('${c.id}')"
+              <td class="px-4 py-3 text-right whitespace-nowrap">
+                ${ANEXOS[c.id] ? `<button onclick="admAbrirAnexo('${c.id}')" title="${esc(ANEXOS[c.id].nome)}"
+                  class="px-3 py-1.5 rounded-lg text-xs border border-slate-300 text-slate-700 hover:bg-slate-50 whitespace-nowrap mr-1">
+                  <i class="fa-solid fa-paperclip mr-1"></i>Baixar anexo (PDF)</button>` : ''}
+                <button onclick="gerAbrirContrato('${c.id}')"
                 class="px-3 py-1.5 rounded-lg text-xs bg-accent text-white hover:bg-blue-700 whitespace-nowrap">
-                <i class="fa-solid fa-print mr-1"></i>Abrir para imprimir</button></td></tr>`; }).join('')
+                <i class="fa-solid fa-print mr-1"></i>Abrir contrato</button></td></tr>`; }).join('')
               : vazio('Nenhum contrato disponível para assinatura.')}
           </tbody></table></div>
       </div>
