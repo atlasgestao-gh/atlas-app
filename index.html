@@ -108,9 +108,9 @@ tailwind.config = {
   <div id="banner" class="no-print"></div>
   <main id="view" class="flex-1 p-4 sm:p-6"></main>
 
-  <!-- 2026.10.05-c93cc54 é preenchido no build: data + commit do código publicado -->
+  <!-- 2026.10.06-53ebcf1 é preenchido no build: data + commit do código publicado -->
   <footer class="px-6 py-4 text-[11px] text-slate-500 border-t border-slate-200 bg-white no-print">
-    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.05-c93cc54
+    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.06-53ebcf1
     <span id="rodapePlanilha" class="hidden"> ·
       <button onclick="sincronizarPlanilha()" class="underline hover:text-accent">sincronizar novidades da planilha</button>
       ·
@@ -3251,11 +3251,11 @@ function limparFiltrosExame(){ Object.assign(UIExame, { q:'', page:1 }); viewCad
 function filtrosAtivosEmp(){ return !!(UIEmp.q||UIEmp.empresa); }
 function limparFiltrosEmp(){ Object.assign(UIEmp, { q:'', empresa:'', page:1 }); viewEmpresas(); }
 
-function filtrosAtivosCli(){ return !!UICli.q; }
-function limparFiltrosCli(){ Object.assign(UICli, { q:'', page:1 }); viewEmpresas(); }
+function filtrosAtivosCli(){ return !!(UICli.q || UICli.status !== 'ativas'); }
+function limparFiltrosCli(){ Object.assign(UICli, { q:'', page:1, status:'ativas' }); viewEmpresas(); }
 
-function filtrosAtivosPre(){ return !!UIPre.q; }
-function limparFiltrosPre(){ Object.assign(UIPre, { q:'', page:1 }); viewEmpresas(); }
+function filtrosAtivosPre(){ return !!(UIPre.q || UIPre.status !== 'ativas'); }
+function limparFiltrosPre(){ Object.assign(UIPre, { q:'', page:1, status:'ativas' }); viewEmpresas(); }
 
 /* cls sobrescreve a largura padrão (flex) quando a barra é montada em grid */
 function inputBusca(id, ph, oninput, valor, cls){
@@ -4114,9 +4114,9 @@ function gridRecusadosAtlas(){
 /* ═══════════════════════════ 2. EMPRESAS ═══════════════════════════ */
 const UIEmp = { q:'', empresa:'', page:1, aba:'unidades' };
 function paginaEmpresas(p){ UIEmp.page = p; viewEmpresas(); }
-const UICli = { q:'', page:1 };
+const UICli = { q:'', page:1, status:'ativas' };
 function paginaClinicas(p){ UICli.page = p; viewEmpresas(); }
-const UIPre = { q:'', page:1 };
+const UIPre = { q:'', page:1, status:'ativas' };
 function paginaPrestadores(p){ UIPre.page = p; viewEmpresas(); }
 
 function viewEmpresas(){
@@ -4197,7 +4197,8 @@ function abaUnidades(){
                 <td class="px-4 py-3 text-xs text-slate-600">${esc((emp(u.empresaId)||{}).nome||'—')}</td>
                 <td class="px-4 py-3 text-xs text-slate-600 whitespace-nowrap">${esc(u.cnpj||'—')}</td>
                 <td class="px-4 py-3 text-xs text-slate-600">
-                  <p class="font-medium text-slate-700">${esc(cli?cli.nome:'—')}</p>
+                  <p class="font-medium text-slate-700">${esc(cli?cli.nome:'—')}${cli && cli.inativo
+                    ? ' <span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 whitespace-nowrap" title="Esta clínica foi inativada — escolha outra para a unidade">clínica inativa</span>' : ''}</p>
                   <p class="text-[11px] text-slate-500 truncate max-w-xs">${esc(cli?cli.endereco||'':'')}</p>
                 </td>
                 <td class="px-4 py-3 font-semibold">${contagem(u.id)}</td>
@@ -4215,18 +4216,35 @@ function abaUnidades(){
   </div>`;
 }
 
+/* ---- ativo / inativo ----
+   Clínica que parou de atender e gestora que saiu não são apagadas: o histórico
+   das unidades e dos exames aponta para elas. Inativar tira o registro das
+   listas de escolha e da visão padrão, e só. `inativo` ausente = ativo, então
+   nada do que já existe precisa ser migrado. */
+const FILTRO_STATUS = [{ v:'ativas', l:'Só ativas' }, { v:'inativas', l:'Só inativas' }, { v:'todas', l:'Ativas e inativas' }];
+function passaStatus(reg, filtro){ return filtro === 'todas' || (filtro === 'inativas') === !!reg.inativo; }
+const seloInativo = reg => reg && reg.inativo
+  ? ' <span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-slate-200 text-slate-600 whitespace-nowrap">inativa</span>' : '';
+const CAMPO_STATUS = { name:'situacao', label:'Situação', type:'select',
+  options:[{ v:'ativo', l:'Ativa' }, { v:'inativo', l:'Inativa' }] };
+
 /* ---- clínicas credenciadas ---- */
 function abaClinicas(){
   const q = norm(UICli.q);
-  const todas = (DB.clinicas||[]).filter(c => !q || norm(c.nome+c.cidade+c.endereco+(prestador(c.prestadorId)||{}).nome).includes(q))
+  const todas = (DB.clinicas||[]).filter(c => passaStatus(c, UICli.status) &&
+      (!q || norm(c.nome+c.cidade+c.endereco+(prestador(c.prestadorId)||{}).nome).includes(q)))
     .sort((a,b) => a.nome.localeCompare(b.nome,'pt-BR'));
+  const nInativas = (DB.clinicas||[]).filter(c => c.inativo).length;
   const { itens:lista, p } = paginar(todas, UICli.page);
   const usos = id => DB.unidades.filter(u => u.clinicaId === id).length;
 
   $('#abaEmp').innerHTML = `
   <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
     ${barraFiltros([
-      inputBusca('bCli','Buscar clínica, cidade ou gestora...','UICli.q=this.value;UICli.page=1;viewEmpresas();focarBusca(&quot;bCli&quot;)', UICli.q, COL6)
+      inputBusca('bCli','Buscar clínica, cidade ou gestora...','UICli.q=this.value;UICli.page=1;viewEmpresas();focarBusca(&quot;bCli&quot;)', UICli.q, COL6),
+      `<select onchange="UICli.status=this.value;UICli.page=1;viewEmpresas()"
+         class="${COL6} px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-accent/40">
+         ${FILTRO_STATUS.map(o => `<option value="${o.v}" ${UICli.status===o.v?'selected':''}>${o.l}${o.v==='inativas'?' ('+nInativas+')':''}</option>`).join('')}</select>`
     ], [
       botao('Nova clínica','fa-plus','editarClinica()'),
       botao('CSV','fa-file-csv','exportarClinicas()','bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')
@@ -4238,17 +4256,20 @@ function abaClinicas(){
               <th class="px-4 py-3">E-mail</th><th class="px-4 py-3">Unidades</th><th class="px-4 py-3 text-right no-print">Ações</th></tr></thead>
         <tbody class="divide-y divide-slate-100">
           ${lista.length ? lista.map(c => `
-            <tr class="hover:bg-slate-50">
-              <td class="px-4 py-3"><p class="font-medium text-slate-700">${esc(c.nome)}</p>
+            <tr class="hover:bg-slate-50 ${c.inativo?'opacity-60':''}">
+              <td class="px-4 py-3"><p class="font-medium text-slate-700">${esc(c.nome)}${seloInativo(c)}</p>
                   <p class="text-[11px] text-slate-500 truncate max-w-xs">${esc(c.endereco||'')}</p></td>
               <td class="px-4 py-3 text-xs text-slate-600">${esc((c.cidade||'')+(c.uf?' / '+c.uf:''))||'—'}</td>
               <td class="px-4 py-3 text-xs">${badge((prestador(c.prestadorId)||{}).nome||'—','bg-blue-100 text-blue-700')}</td>
               <td class="px-4 py-3 text-xs text-slate-500 truncate max-w-[180px]">${esc(c.email||'—')}</td>
               <td class="px-4 py-3 text-xs text-slate-500">${usos(c.id)}</td>
               <td class="px-4 py-3 text-right whitespace-nowrap no-print">
-                <button onclick="editarClinica('${c.id}')" class="text-slate-400 hover:text-accent px-1.5"><i class="fa-solid fa-pen"></i></button>
+                <button onclick="alternarClinica('${c.id}')" class="text-slate-400 hover:text-accent px-1.5"
+                  title="${c.inativo?'Reativar':'Inativar'}"><i class="fa-solid ${c.inativo?'fa-rotate-left':'fa-ban'}"></i></button>
+                <button onclick="editarClinica('${c.id}')" class="text-slate-400 hover:text-accent px-1.5" title="Editar"><i class="fa-solid fa-pen"></i></button>
                 <button onclick="excluirClinica('${c.id}')" class="text-slate-400 hover:text-danger px-1.5"><i class="fa-solid fa-trash"></i></button>
-              </td></tr>`).join('') : vazio('Nenhuma clínica credenciada. Clique em "Nova clínica".')}
+              </td></tr>`).join('') : vazio(UICli.status === 'inativas' ? 'Nenhuma clínica inativa.'
+                : (DB.clinicas||[]).length ? 'Nenhuma clínica neste filtro.' : 'Nenhuma clínica credenciada. Clique em "Nova clínica".')}
         </tbody></table>
     </div>
     ${paginador(todas.length, p, 'paginaClinicas')}
@@ -4261,20 +4282,44 @@ function editarClinica(id){
     fields: [
       { name:'nome', label:'Nome da clínica', req:true, col:'sm:col-span-2' },
       { name:'prestadorId', label:'Gestora (prestador)', type:'select', req:true,
-        options: (DB.prestadores||[]).map(p => ({ v:p.id, l:p.nome })), hint:'quem gerencia e recebe o pagamento' },
+        /* gestora inativa só aparece se já for a desta clínica */
+        options: (DB.prestadores||[]).filter(p => !p.inativo || (c && c.prestadorId === p.id))
+                   .map(p => ({ v:p.id, l:p.nome + (p.inativo ? ' (inativa)' : '') })), hint:'quem gerencia e recebe o pagamento' },
       { name:'email', label:'E-mail de agendamento', type:'email' },
       { name:'endereco', label:'Endereço completo', type:'textarea', rows:2, col:'sm:col-span-2' },
       { name:'cidade', label:'Cidade' },
       { name:'uf', label:'UF' },
-      { name:'cep', label:'CEP' }
+      { name:'cep', label:'CEP' },
+      Object.assign({ hint:'inativa: sai da lista de escolha das unidades, mas o histórico fica' }, CAMPO_STATUS)
     ],
-    values: c || { prestadorId: (DB.prestadores[0]||{}).id },
+    values: Object.assign({ situacao: c && c.inativo ? 'inativo' : 'ativo' },
+                          c || { prestadorId: ((DB.prestadores||[]).find(p => !p.inativo)||{}).id }),
     onSave: v => {
-      if(c) Object.assign(c, v);
-      else DB.clinicas.push(Object.assign({ id: uid('cli') }, v));
-      save(); closeModal(); viewEmpresas(); toast('Clínica salva.');
+      const inativo = v.situacao === 'inativo'; delete v.situacao;
+      const era = !!(c && c.inativo);
+      if(c){ Object.assign(c, v); marcarInativo(c, inativo); }
+      else { const n = Object.assign({ id: uid('cli') }, v); marcarInativo(n, inativo); DB.clinicas.push(n); }
+      save(); closeModal(); viewEmpresas();
+      const usos = c ? DB.unidades.filter(u => u.clinicaId === c.id).length : 0;
+      if(inativo && !era && usos) toast('Clínica inativada. ' + usos + ' unidade(s) ainda apontam para ela — troque a clínica dessas unidades.', 'alerta');
+      else toast('Clínica salva.');
     }
   });
+}
+/* carimba quem e quando: "por que esta clínica sumiu da lista?" tem de ter resposta */
+function marcarInativo(reg, inativo){
+  if(inativo){
+    if(!reg.inativo){ reg.inativo = true; reg.inativoEm = new Date().toISOString(); reg.inativoPor = SESSAO.email || ''; }
+  }else{ delete reg.inativo; delete reg.inativoEm; delete reg.inativoPor; }
+}
+function alternarClinica(id){
+  const c = clinica(id); if(!c) return;
+  const usos = DB.unidades.filter(u => u.clinicaId === id).length;
+  if(!c.inativo && !confirm('Inativar "' + c.nome + '"?\n\nEla sai da lista de escolha das unidades. O histórico continua.' +
+      (usos ? '\n\nAtenção: ' + usos + ' unidade(s) ainda usam esta clínica.' : ''))) return;
+  marcarInativo(c, !c.inativo);
+  save(); viewEmpresas();
+  toast(c.inativo ? 'Clínica inativada.' + (usos ? ' Troque a clínica de ' + usos + ' unidade(s).' : '') : 'Clínica reativada.', c.inativo && usos ? 'alerta' : 'ok');
 }
 function excluirClinica(id){
   const n = DB.unidades.filter(u => u.clinicaId === id).length;
@@ -4284,16 +4329,17 @@ function excluirClinica(id){
   save(); viewEmpresas(); toast('Clínica excluída.');
 }
 function exportarClinicas(){
-  exportCSV('clinicas-credenciadas', ['Clínica','Cidade','UF','Gestora','E-mail','Endereço','Unidades vinculadas'],
-    (DB.clinicas||[]).map(c => [c.nome, c.cidade, c.uf, (prestador(c.prestadorId)||{}).nome, c.email, c.endereco,
+  exportCSV('clinicas-credenciadas', ['Clínica','Situação','Cidade','UF','Gestora','E-mail','Endereço','Unidades vinculadas'],
+    (DB.clinicas||[]).map(c => [c.nome, c.inativo ? 'Inativa' : 'Ativa', c.cidade, c.uf, (prestador(c.prestadorId)||{}).nome, c.email, c.endereco,
       DB.unidades.filter(u => u.clinicaId===c.id).length]));
 }
 
 /* ---- prestadores / gestoras ---- */
 function abaPrestadores(){
   const q = norm(UIPre.q);
-  const todas = (DB.prestadores||[]).filter(pr => !q || norm(pr.nome+pr.cnpj+pr.email).includes(q))
+  const todas = (DB.prestadores||[]).filter(pr => passaStatus(pr, UIPre.status) && (!q || norm(pr.nome+pr.cnpj+pr.email).includes(q)))
     .sort((a,b) => a.nome.localeCompare(b.nome,'pt-BR'));
+  const nInativas = (DB.prestadores||[]).filter(x => x.inativo).length;
   const { itens:lista, p } = paginar(todas, UIPre.page);
   const nClinicas = id => (DB.clinicas||[]).filter(c => c.prestadorId === id).length;
 
@@ -4304,7 +4350,10 @@ function abaPrestadores(){
   </div>
   <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
     ${barraFiltros([
-      inputBusca('bPre','Buscar gestora...','UIPre.q=this.value;UIPre.page=1;viewEmpresas();focarBusca(&quot;bPre&quot;)', UIPre.q, COL6)
+      inputBusca('bPre','Buscar gestora...','UIPre.q=this.value;UIPre.page=1;viewEmpresas();focarBusca(&quot;bPre&quot;)', UIPre.q, COL6),
+      `<select onchange="UIPre.status=this.value;UIPre.page=1;viewEmpresas()"
+         class="${COL6} px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-accent/40">
+         ${FILTRO_STATUS.map(o => `<option value="${o.v}" ${UIPre.status===o.v?'selected':''}>${o.l}${o.v==='inativas'?' ('+nInativas+')':''}</option>`).join('')}</select>`
     ], [
       botao('Nova gestora','fa-plus','editarPrestador()')
     ], { ativo: filtrosAtivosPre(), onClick: 'limparFiltrosPre()' })}
@@ -4315,16 +4364,18 @@ function abaPrestadores(){
               <th class="px-4 py-3">Clínicas</th><th class="px-4 py-3 text-right no-print">Ações</th></tr></thead>
         <tbody class="divide-y divide-slate-100">
           ${lista.length ? lista.map(pr => `
-            <tr class="hover:bg-slate-50">
-              <td class="px-4 py-3"><p class="font-medium text-slate-700">${esc(pr.nome)}</p>
+            <tr class="hover:bg-slate-50 ${pr.inativo?'opacity-60':''}">
+              <td class="px-4 py-3"><p class="font-medium text-slate-700">${esc(pr.nome)}${seloInativo(pr)}</p>
                   ${pr.obs?`<p class="text-[11px] text-slate-500">${esc(pr.obs)}</p>`:''}</td>
               <td class="px-4 py-3 text-xs text-slate-600 whitespace-nowrap">${esc(pr.cnpj||'—')}</td>
               <td class="px-4 py-3 text-xs text-slate-500 truncate max-w-[180px]">${esc(pr.email||'—')}</td>
               <td class="px-4 py-3 text-xs text-slate-500">${nClinicas(pr.id)}</td>
               <td class="px-4 py-3 text-right whitespace-nowrap no-print">
-                <button onclick="editarPrestador('${pr.id}')" class="text-slate-400 hover:text-accent px-1.5"><i class="fa-solid fa-pen"></i></button>
+                <button onclick="alternarPrestador('${pr.id}')" class="text-slate-400 hover:text-accent px-1.5"
+                  title="${pr.inativo?'Reativar':'Inativar'}"><i class="fa-solid ${pr.inativo?'fa-rotate-left':'fa-ban'}"></i></button>
+                <button onclick="editarPrestador('${pr.id}')" class="text-slate-400 hover:text-accent px-1.5" title="Editar"><i class="fa-solid fa-pen"></i></button>
                 <button onclick="excluirPrestador('${pr.id}')" class="text-slate-400 hover:text-danger px-1.5"><i class="fa-solid fa-trash"></i></button>
-              </td></tr>`).join('') : vazio('Nenhuma gestora cadastrada.')}
+              </td></tr>`).join('') : vazio(UIPre.status === 'inativas' ? 'Nenhuma gestora inativa.' : 'Nenhuma gestora neste filtro.')}
         </tbody></table>
     </div>
     ${paginador(todas.length, p, 'paginaPrestadores')}
@@ -4338,15 +4389,26 @@ function editarPrestador(id){
       { name:'nome', label:'Nome', req:true, col:'sm:col-span-2' },
       { name:'cnpj', label:'CNPJ' },
       { name:'email', label:'E-mail', type:'email' },
-      { name:'obs', label:'Observação', col:'sm:col-span-2' }
+      { name:'obs', label:'Observação', col:'sm:col-span-2' },
+      Object.assign({ hint:'inativa: não pode mais ser escolhida em clínica nova' }, CAMPO_STATUS)
     ],
-    values: pr || {},
+    values: Object.assign({ situacao: pr && pr.inativo ? 'inativo' : 'ativo' }, pr || {}),
     onSave: v => {
-      if(pr) Object.assign(pr, v);
-      else DB.prestadores.push(Object.assign({ id: uid('pr') }, v));
+      const inativo = v.situacao === 'inativo'; delete v.situacao;
+      if(pr){ Object.assign(pr, v); marcarInativo(pr, inativo); }
+      else { const n = Object.assign({ id: uid('pr') }, v); marcarInativo(n, inativo); DB.prestadores.push(n); }
       save(); closeModal(); viewEmpresas(); toast('Gestora salva.');
     }
   });
+}
+function alternarPrestador(id){
+  const pr = prestador(id); if(!pr) return;
+  const n = (DB.clinicas||[]).filter(c => c.prestadorId === id && !c.inativo).length;
+  if(!pr.inativo && !confirm('Inativar "' + pr.nome + '"?\n\nEla deixa de aparecer para clínicas novas. O histórico continua.' +
+      (n ? '\n\nAtenção: ' + n + ' clínica(s) ativa(s) ainda são desta gestora.' : ''))) return;
+  marcarInativo(pr, !pr.inativo);
+  save(); viewEmpresas();
+  toast(pr.inativo ? 'Gestora inativada.' : 'Gestora reativada.');
 }
 function excluirPrestador(id){
   const n = (DB.clinicas||[]).filter(c => c.prestadorId === id).length;
@@ -4430,8 +4492,11 @@ function editarUnidade(id, prefill){
   _unidadeEditId = id || null;
   const u = id ? uni(id) : null;
   const opcoesCli = [{ v:'', l:'— selecione a clínica —' }].concat(
-    (DB.clinicas||[]).slice().sort((a,b)=>a.nome.localeCompare(b.nome,'pt-BR'))
-      .map(c => ({ v:c.id, l: c.nome + (c.cidade?' · '+c.cidade:'') + ' (' + ((prestador(c.prestadorId)||{}).nome||'—') + ')' })));
+    /* clínica inativa não é oferecida — só continua na lista se já for a desta unidade */
+    (DB.clinicas||[]).filter(c => !c.inativo || c.id === ((u || prefill || {}).clinicaId))
+      .sort((a,b)=>a.nome.localeCompare(b.nome,'pt-BR'))
+      .map(c => ({ v:c.id, l: c.nome + (c.cidade?' · '+c.cidade:'') + ' (' + ((prestador(c.prestadorId)||{}).nome||'—') + ')' +
+                                (c.inativo ? ' — INATIVA' : '') })));
   const semEmpresa = !DB.empresas.length;
   openForm({
     title: u ? 'Editar unidade' : 'Nova unidade',
