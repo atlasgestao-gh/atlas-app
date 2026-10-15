@@ -57,6 +57,11 @@ tailwind.config = {
     table.data td, table.data th { font-size: 12px; word-break: break-word; }
     table.data td .truncate { white-space: normal; }
   }
+  /* valores em R$ ficam numa linha só: "R$ 1.234,00" tem espaço e quebrava em duas */
+  table.data td.text-right, table.data th.text-right { white-space: nowrap; word-break: normal; }
+  /* grades do faturamento: a unidade cede espaço para os números */
+  table.fat-grade .col-uni { width: 9.5rem; max-width: 9.5rem; }
+  table.fat-grade td.col-uni { font-size: 11px; line-height: 1.3; }
   .fade-in { animation: fade .18s ease-out; }
   @keyframes fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
   @media print {
@@ -108,9 +113,9 @@ tailwind.config = {
   <div id="banner" class="no-print"></div>
   <main id="view" class="flex-1 p-4 sm:p-6"></main>
 
-  <!-- 2026.10.06-53ebcf1 é preenchido no build: data + commit do código publicado -->
+  <!-- 2026.10.15-e179139 é preenchido no build: data + commit do código publicado -->
   <footer class="px-6 py-4 text-[11px] text-slate-500 border-t border-slate-200 bg-white no-print">
-    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.06-53ebcf1
+    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.15-e179139
     <span id="rodapePlanilha" class="hidden"> ·
       <button onclick="sincronizarPlanilha()" class="underline hover:text-accent">sincronizar novidades da planilha</button>
       ·
@@ -875,6 +880,16 @@ function semaforo(iso){
   if(d < 0)      return { key:'vencido', label:'Vencido', dias:d, cls:'bg-red-100 text-red-700' };
   if(d <= 30)    return { key:'avencer', label:'A vencer', dias:d, cls:'bg-amber-100 text-amber-700' };
   return { key:'emdia', label:'Em dia', dias:d, cls:'bg-emerald-100 text-emerald-700' };
+}
+/* ASO de quem está Desligado ou Inativo não é pendência: não "vence", não
+   cobra S-2220/S-2240 e não entra em contagem de vencido ou a vencer — mesmo
+   que os eventos do eSocial nunca tenham sido lançados (Jessica, 15/10/2026).
+   O registro continua inteiro; só deixa de gritar. */
+function asoSemPendencia(c){ return !!c && ['Desligado','Inativo'].indexOf(c.status) >= 0; }
+function situacaoAso(a, c){
+  if(asoSemPendencia(c))
+    return { key:'encerrado', label:'Sem pendência (' + String(c.status).toLowerCase() + ')', dias:null, cls:'bg-slate-100 text-slate-500' };
+  return semaforo(a && a.vencimento);
 }
 function badge(txt, cls){ return `<span class="px-2 py-0.5 rounded-full text-[11px] font-medium whitespace-nowrap ${cls}">${esc(txt)}</span>`; }
 function badgeStatusColab(st){
@@ -3391,7 +3406,7 @@ function dadosDashboard(){
   colabs.forEach(c => { const a = asoVigente(c.id); if(a) vigentes.push({ aso:a, colab:c }); });
 
   const st = { emdia:0, avencer:0, vencido:0, sem:0 };
-  vigentes.forEach(v => st[semaforo(v.aso.vencimento).key]++);
+  vigentes.forEach(v => { const k = situacaoAso(v.aso, v.colab).key; if(k in st) st[k]++; });
 
   const laudosSt = { emdia:0, avencer:0, vencido:0, sem:0, elaboracao:0, dispensa:0 };
   DB.laudos.forEach(l => laudosSt[laudoSituacao(l).key]++);
@@ -3408,7 +3423,7 @@ function alertasCriticos(){
   const d = dadosDashboard();
   const linhas = [];
   d.vigentes.forEach(v => {
-    const s = semaforo(v.aso.vencimento);
+    const s = situacaoAso(v.aso, v.colab);
     if(s.key === 'vencido' || s.key === 'avencer'){
       linhas.push({
         tipo:'ASO', ref:v.aso.id, nome:v.colab.nome, unidadeId:v.colab.unidadeId,
@@ -6659,7 +6674,7 @@ function abaColaboradores(){
         </thead>
         <tbody class="divide-y divide-slate-100">
           ${lista.length ? lista.map(c => {
-            const a = asoVigente(c.id); const s = a ? semaforo(a.vencimento) : null;
+            const a = asoVigente(c.id); const s = a ? situacaoAso(a, c) : null;
             return `<tr class="hover:bg-slate-50">
               <td class="px-4 py-3"><p class="font-medium text-slate-700">${esc(c.nome)}
                   ${c.revisar?`<span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 whitespace-nowrap" title="${esc(c.origemAuto||'cadastro criado automaticamente')} — complete os dados e salve"><i class="fa-solid fa-user-pen mr-0.5"></i>revisar</span>`:''}
@@ -6691,7 +6706,7 @@ function abaColaboradores(){
               <td class="px-4 py-3 text-xs whitespace-nowrap">${a
                   ? fmtDate(a.vencimento) + ' ' + badge(s.label, s.cls) +
                     `<p class="text-[11px] text-slate-500">${esc(tipoLabel(a.tipo))}</p>`
-                  : '<span class="text-slate-400">sem ASO</span>'}</td>
+                  : (asoSemPendencia(c) ? '<span class="text-slate-300">—</span>' : '<span class="text-slate-400">sem ASO</span>')}</td>
               <td class="px-4 py-3">${badgeStatusColab(c.status)}</td>
               <td class="px-4 py-3 text-right whitespace-nowrap no-print">
                 <button onclick="fichaColab('${c.id}')" class="text-slate-400 hover:text-accent px-1.5" title="Ficha"><i class="fa-solid fa-eye"></i></button>
@@ -8032,7 +8047,7 @@ function abrirHistoricoColab(id){ abrirRelatorio(historicoColabHTML(id)); }
 
 function exportarColabs(){
   exportCSV('colaboradores', ['Nome','CPF','RG','Nascimento','Sexo','Celular','Telefone','E-mail','Empresa','Unidade','Função','CBO','Admissão','Status','Tipo do ASO','ASO vencimento','Dias p/ vencer','Carteirinha sanitária'],
-    colabsFiltrados().map(c => { const a = asoVigente(c.id); const s = a ? semaforo(a.vencimento) : null; const u = uni(c.unidadeId);
+    colabsFiltrados().map(c => { const a = asoVigente(c.id); const s = a ? situacaoAso(a, c) : null; const u = uni(c.unidadeId);
       const { matriz } = matrizDaFuncao(c.funcao);
       return [c.nome, c.cpf, c.rg, fmtDate(c.nascimento),
               c.sexo==='F'?'Feminino':(c.sexo==='M'?'Masculino':''), c.celular, c.telefone||'', c.email,
@@ -9352,7 +9367,7 @@ function asosFiltrados(){
     return (!UIAso.uni || x.c.unidadeId === UIAso.uni) &&
            (!UIAso.tipo || x.a.tipo === UIAso.tipo) &&
            (!UIAso.status || x.c.status === UIAso.status) &&
-           (!UIAso.sem || semaforo(x.a.vencimento).key === UIAso.sem) &&
+           (!UIAso.sem || situacaoAso(x.a, x.c).key === UIAso.sem) &&
            (!q || norm(x.c.nome + x.c.cpf + x.c.funcao + (u?u.nome:'')).includes(q));
   /* mais recentes primeiro: pela data do exame */
   }).sort((x,y) => (y.a.dataExame||'').localeCompare(x.a.dataExame||''));
@@ -9379,8 +9394,8 @@ function abaAsos(){
   <div class="space-y-5">
     <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
       ${card({titulo:'ASOs no filtro atual', valor:todos.length, icon:'fa-notes-medical', cor:'bg-slate-100 text-slate-600'})}
-      ${card({titulo:'Vencidos', valor:todos.filter(x=>semaforo(x.a.vencimento).key==='vencido').length, icon:'fa-triangle-exclamation', cor:'bg-red-50 text-danger'})}
-      ${card({titulo:'A vencer (30 dias)', valor:todos.filter(x=>semaforo(x.a.vencimento).key==='avencer').length, icon:'fa-clock', cor:'bg-amber-50 text-warning'})}
+      ${card({titulo:'Vencidos', valor:todos.filter(x=>situacaoAso(x.a, x.c).key==='vencido').length, icon:'fa-triangle-exclamation', cor:'bg-red-50 text-danger'})}
+      ${card({titulo:'A vencer (30 dias)', valor:todos.filter(x=>situacaoAso(x.a, x.c).key==='avencer').length, icon:'fa-clock', cor:'bg-amber-50 text-warning'})}
       ${card({titulo:'Com S-2220 enviado', valor:comS2220, sub:'evento de saúde do trabalhador', icon:'fa-file-circle-check', cor:'bg-emerald-50 text-success'})}
     </div>
 
@@ -9405,7 +9420,7 @@ function abaAsos(){
                 <th class="px-4 py-3">Dias restantes</th><th class="px-4 py-3">Situação</th>
                 <th class="px-4 py-3">S-2220</th><th class="px-4 py-3">S-2240</th><th class="px-4 py-3 text-right no-print">Ações</th></tr></thead>
           <tbody class="divide-y divide-slate-100">
-            ${lista.length ? lista.map(({a,c}) => { const s = semaforo(a.vencimento);
+            ${lista.length ? lista.map(({a,c}) => { const s = situacaoAso(a, c);
               return `<tr class="hover:bg-slate-50">
                 <td class="px-4 py-3"><p class="font-medium text-slate-700">${esc(c.nome)}</p>
                     <p class="text-[11px] text-slate-500">${esc(c.cpf||'')} ${badgeStatusColab(c.status)}
@@ -9419,8 +9434,8 @@ function abaAsos(){
                 <td class="px-4 py-3 text-xs font-semibold ${s.key==='vencido'?'text-danger':s.key==='avencer'?'text-warning':'text-slate-600'}">
                   ${s.dias===null?'—':(s.dias<0?Math.abs(s.dias)+' em atraso':s.dias+' dias')}</td>
                 <td class="px-4 py-3">${badge(s.label, s.cls)}</td>
-                <td class="px-4 py-3 text-[11px] text-slate-500 max-w-[150px] truncate">${a.s2220&&a.s2220.recibo?esc(a.s2220.recibo):'<span class="text-slate-300">—</span>'}</td>
-                <td class="px-4 py-3 text-[11px] text-slate-500 max-w-[150px] truncate">${a.s2240&&a.s2240.recibo?esc(a.s2240.recibo):'<span class="text-slate-300">—</span>'}</td>
+                <td class="px-4 py-3 text-[11px] text-slate-500 max-w-[150px] truncate">${a.s2220&&a.s2220.recibo?esc(a.s2220.recibo):(s.key==='encerrado'?'<span class="text-slate-400">não se aplica</span>':'<span class="text-slate-300">—</span>')}</td>
+                <td class="px-4 py-3 text-[11px] text-slate-500 max-w-[150px] truncate">${a.s2240&&a.s2240.recibo?esc(a.s2240.recibo):(s.key==='encerrado'?'<span class="text-slate-400">não se aplica</span>':'<span class="text-slate-300">—</span>')}</td>
                 <td class="px-4 py-3 text-right whitespace-nowrap no-print">
                   <button onclick="agendarDeAlerta('${c.id}')" class="text-slate-400 hover:text-success px-1.5" title="Agendar exame"><i class="fa-solid fa-calendar-plus"></i></button>
                   <button onclick="editarAso('${a.id}')" class="text-slate-400 hover:text-accent px-1.5" title="Editar / eSocial"><i class="fa-solid fa-pen"></i></button>
@@ -9434,12 +9449,24 @@ function abaAsos(){
   </div>`;
 }
 
+/* o exame que gerou este ASO: o vinculado ou, nos ASOs antigos sem vínculo, o
+   exame realizado da mesma pessoa na mesma data */
+function emissaoDoAso(a, c){
+  const e = a.origemEmissaoId && DB.emissoes.find(x => x.id === a.origemEmissaoId);
+  if(e) return e;
+  if(!c) return null;
+  return DB.emissoes.find(x => x.status === 'REALIZADO' && norm(x.colaborador) === norm(c.nome) &&
+                              (x.dataClinico || x.dataLab) === a.dataExame) || null;
+}
 function editarAso(id){
   const a = DB.asos.find(x => x.id === id);
   if(!a){ toast('ASO não encontrado.', 'erro'); return; }
   const c = colab(a.colaboradorId);
   const s22 = a.s2220 || {}, s24 = a.s2240 || {};
-  const s = semaforo(a.vencimento);
+  const s = situacaoAso(a, c);
+  /* o resultado marcado no exame vem pronto — não se digita duas vezes */
+  const ex = emissaoDoAso(a, c);
+  const resultadoExame = ex && ex.resultado || '';
   openForm({
     title: 'Registro eSocial — ' + (c ? c.nome : ''),
     fields: [
@@ -9447,7 +9474,9 @@ function editarAso(id){
         html:`<div class="sm:col-span-2 bg-slate-50 border border-slate-200 rounded-lg p-3 text-xs text-slate-600">
           <b>${esc(c?c.nome:'')}</b> · ${esc(c?c.funcao||'':'')} · ${esc(uniNome(a.unidadeId))}<br>
           Exame: <b>${esc(tipoLabel(a.tipo))}</b> em ${fmtDate(a.dataExame)} · vence ${fmtDate(a.vencimento)} ${badge(s.label,s.cls)}
-          <br><span class="text-slate-400">O exame vem do módulo Exames. Aqui você registra o eSocial e o resultado.</span></div>` },
+          <br><span class="text-slate-400">O exame vem do módulo Exames. Aqui você registra o eSocial e o resultado.</span>
+          ${resultadoExame && !a.resultado ? `<br><span class="text-emerald-700"><i class="fa-solid fa-circle-check mr-1"></i>Resultado <b>${esc(resultadoExame)}</b> trazido do exame — é só salvar.</span>` : ''}
+          ${asoSemPendencia(c) ? `<br><span class="text-slate-500"><i class="fa-solid fa-circle-info mr-1"></i>Colaborador ${esc(String(c.status).toLowerCase())}: este ASO não gera pendência, mesmo sem os eventos do eSocial.</span>` : ''}</div>` },
       { name:'resultado', label:'Resultado (Apto/Inapto)', type:'select', col:'sm:col-span-2',
         options:[{v:'',l:'—'},{v:'Apto',l:'Apto'},{v:'Inapto',l:'Inapto'},{v:'Apto com restrições',l:'Apto com restrições'}] },
       { type:'sep', label:'eSocial S-2220 — Monitoramento da Saúde do Trabalhador' },
@@ -9462,6 +9491,7 @@ function editarAso(id){
       { name:'s2240_status', label:'Status do evento', type:'select', options:[{v:'',l:'—'},{v:'Concluído',l:'Concluído'},{v:'Pendente',l:'Pendente'},{v:'Rejeitado',l:'Rejeitado'}] }
     ],
     values: Object.assign({}, a, {
+      resultado: a.resultado || resultadoExame,
       s2220_recibo:s22.recibo, s2220_idArquivo:s22.idArquivo, s2220_dataEnvio:s22.dataEnvio, s2220_status:s22.status,
       s2240_recibo:s24.recibo, s2240_idArquivo:s24.idArquivo, s2240_dataEnvio:s24.dataEnvio, s2240_status:s24.status
     }),
@@ -9471,6 +9501,8 @@ function editarAso(id){
         s2220: { recibo:v.s2220_recibo, idArquivo:v.s2220_idArquivo, dataEnvio:v.s2220_dataEnvio, status:v.s2220_status },
         s2240: { recibo:v.s2240_recibo, idArquivo:v.s2240_idArquivo, dataEnvio:v.s2240_dataEnvio, status:v.s2240_status }
       });
+      /* e o caminho de volta: o exame passa a mostrar o mesmo resultado */
+      if(ex && v.resultado && ex.resultado !== v.resultado) ex.resultado = v.resultado;
       save(); closeModal(); viewAsos(); toast('Registro eSocial salvo.');
     }
   });
@@ -9511,7 +9543,7 @@ function historicoAso(id){
 }
 function exportarAsos(){
   exportCSV('asos', ['Colaborador','CPF','Unidade','Função','Tipo','Último exame','Vencimento','Dias restantes','Situação','Status colaborador','Resultado','Recibo S-2220','Recibo S-2240'],
-    asosFiltrados().map(({a,c}) => { const s = semaforo(a.vencimento);
+    asosFiltrados().map(({a,c}) => { const s = situacaoAso(a, c);
       return [c.nome, c.cpf, uniNome(c.unidadeId), c.funcao, tipoLabel(a.tipo), fmtDate(a.dataExame), fmtDate(a.vencimento),
               s.dias===null?'':s.dias, s.label, c.status, a.resultado||'',
               a.s2220&&a.s2220.recibo||'', a.s2240&&a.s2240.recibo||'']; }));
@@ -10001,10 +10033,10 @@ function abaFechamentoMes(){
           </div>
         </div>
         <div class="overflow-x-auto max-h-[460px] overflow-y-auto">
-          <table class="w-full text-sm data">
+          <table class="w-full text-sm data fat-grade">
             <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
               <tr><th class="px-4 py-3 w-8"></th>
-                  <th class="px-4 py-3">Colaborador</th><th class="px-4 py-3">Unidade</th><th class="px-4 py-3">Exame</th>
+                  <th class="px-4 py-3">Colaborador</th><th class="px-4 py-3 col-uni">Unidade</th><th class="px-4 py-3">Exame</th>
                   <th class="px-4 py-3">Data</th><th class="px-4 py-3 text-right">Custo</th>
                   <th class="px-4 py-3 text-right">Cobrança unidade</th><th class="px-4 py-3 text-right">Total da linha</th></tr></thead>
             <tbody class="divide-y divide-slate-100" id="corpoFat">
@@ -10022,7 +10054,7 @@ function abaFechamentoMes(){
                       data-custo="${naoCompareceu(e)?0:(custoEmissao(e,d.mes)+cCart)}" data-receita="${vExame + vCart}"></td>
                   <td class="px-4 py-3 font-medium text-slate-700">${esc(e.colaborador)}
                     ${naoCompareceu(e)?`<br>${badge('Não compareceu','bg-red-100 text-red-700')}`:''}</td>
-                  <td class="px-4 py-3 text-xs text-slate-600">${esc(uniNome(e.unidadeId))}</td>
+                  <td class="px-4 py-3 text-slate-600 col-uni">${esc(uniNome(e.unidadeId))}</td>
                   <td class="px-4 py-3 text-xs">${esc(tipoLabel(e.tipoExame))}${e.exameLab?'<p class="text-[11px] text-slate-400 truncate max-w-[200px]">+ laboratorial</p>':''}
                     ${temCart?'<p class="text-[11px] text-teal-600"><i class="fa-solid fa-id-card mr-0.5"></i>+ carteirinha sanitária</p>':''}</td>
                   <td class="px-4 py-3 text-xs whitespace-nowrap">${naoCompareceu(e)
@@ -10061,17 +10093,17 @@ function abaFechamentoMes(){
         <span class="ml-auto text-xs text-slate-500">${d.lds.length} laudo(s) · ${fmtMoney(d.recLd)}</span>
         <button onclick="go('laudos')" class="ml-2 px-2.5 py-1.5 rounded-lg text-xs bg-white border border-slate-300 hover:bg-slate-50 no-print"><i class="fa-solid fa-arrow-up-right-from-square mr-1"></i>Gerenciar laudos</button>
       </div>
-      <div class="overflow-x-auto"><table class="w-full text-sm data">
+      <div class="overflow-x-auto"><table class="w-full text-sm data fat-grade">
         <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
-          <tr><th class="px-4 py-3">Unidade</th><th class="px-4 py-3">Documentos</th>
+          <tr><th class="px-4 py-3 col-uni">Unidade</th><th class="px-4 py-3">Documentos</th>
               <th class="px-4 py-3">Entrega</th><th class="px-4 py-3">Data do faturamento</th>
               <th class="px-4 py-3">Status</th><th class="px-4 py-3 text-right">Valor</th></tr></thead>
         <tbody class="divide-y divide-slate-100">
           ${d.lds.length ? d.lds.map(l => `<tr class="hover:bg-slate-50">
-            <td class="px-4 py-3 text-slate-700">${esc(uniNome(l.unidadeId))}</td>
+            <td class="px-4 py-3 text-slate-700 col-uni">${esc(uniNome(l.unidadeId))}</td>
             <td class="px-4 py-3 text-xs">${esc(docsLabel(l.documentos))}</td>
-            <td class="px-4 py-3 text-xs">${fmtDate(l.emissao)}</td>
-            <td class="px-4 py-3 text-xs">${fmtDate(l.dataFaturamento)}</td>
+            <td class="px-4 py-3 text-xs whitespace-nowrap">${fmtDate(l.emissao)}</td>
+            <td class="px-4 py-3 text-xs whitespace-nowrap">${fmtDate(l.dataFaturamento)}</td>
             <td class="px-4 py-3">${badge(l.pagamento||'Solicitado', l.pagamento==='Entregue'?'bg-emerald-100 text-emerald-700':'bg-amber-100 text-amber-700')}</td>
             <td class="px-4 py-3 text-right text-slate-700">${fmtMoney(l.valor||0)}</td></tr>`).join('')
             : `<tr><td colspan="6" class="px-4 py-6 text-center text-sm text-slate-400">Nenhum laudo faturado neste mês.</td></tr>`}
@@ -10085,12 +10117,12 @@ function abaFechamentoMes(){
         <h3 class="font-semibold text-sm text-slate-700">Mensalidades — ${mesLabel(d.mes)}</h3>
         <span class="ml-auto text-xs text-slate-500">${d.mensais.length} unidade(s) · ${fmtMoney(d.recMensal)}</span>
       </div>
-      <div class="overflow-x-auto"><table class="w-full text-sm data">
+      <div class="overflow-x-auto"><table class="w-full text-sm data fat-grade">
         <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
-          <tr><th class="px-4 py-3">Unidade</th><th class="px-4 py-3 text-right">Valor mensal</th></tr></thead>
+          <tr><th class="px-4 py-3 col-uni">Unidade</th><th class="px-4 py-3 text-right">Valor mensal</th></tr></thead>
         <tbody class="divide-y divide-slate-100">
           ${d.mensais.map(m => `<tr class="hover:bg-slate-50">
-            <td class="px-4 py-3 text-slate-700">${esc(uniNome(m.unidadeId))}</td>
+            <td class="px-4 py-3 text-slate-700 col-uni">${esc(uniNome(m.unidadeId))}</td>
             <td class="px-4 py-3 text-right">${fmtMoney(m.valor)}</td></tr>`).join('')}
         </tbody></table></div></div>` : ''}
 
@@ -10100,13 +10132,13 @@ function abaFechamentoMes(){
         <span class="ml-auto text-xs text-slate-500">${d.vis.length} visita(s) · ${fmtMoney(d.recVi)}</span>
         <button onclick="go('visitas')" class="ml-2 px-2.5 py-1.5 rounded-lg text-xs bg-white border border-slate-300 hover:bg-slate-50 no-print"><i class="fa-solid fa-arrow-up-right-from-square mr-1"></i>Gerenciar visitas</button>
       </div>
-      <div class="overflow-x-auto"><table class="w-full text-sm data">
+      <div class="overflow-x-auto"><table class="w-full text-sm data fat-grade">
         <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
-          <tr><th class="px-4 py-3">Unidade</th><th class="px-4 py-3">Data</th><th class="px-4 py-3">Observação</th>
+          <tr><th class="px-4 py-3 col-uni">Unidade</th><th class="px-4 py-3">Data</th><th class="px-4 py-3">Observação</th>
               <th class="px-4 py-3 text-right">Valor</th></tr></thead>
         <tbody class="divide-y divide-slate-100">
           ${d.vis.length ? d.vis.map(v => `<tr class="hover:bg-slate-50">
-            <td class="px-4 py-3 text-slate-700">${esc(uniNome(v.unidadeId))}</td>
+            <td class="px-4 py-3 text-slate-700 col-uni">${esc(uniNome(v.unidadeId))}</td>
             <td class="px-4 py-3 text-xs whitespace-nowrap">${fmtDate(v.data)}</td>
             <td class="px-4 py-3 text-xs text-slate-600">${esc(v.obs||'—')}</td>
             <td class="px-4 py-3 text-right">${fmtMoney(v.valor||0)}</td></tr>`).join('')
@@ -10326,7 +10358,7 @@ function textoEmailNota(mes, unidadeId){
   if(d.carts.length)     itens.push(`${d.carts.length} carteirinha(s) sanitária(s)`);
   if(d.lds.length)       itens.push(`${d.lds.length} laudo(s) técnico(s)`);
   if(d.vis.length)       itens.push(`${d.vis.length} visita(s) técnica(s)`);
-  if(d.recMensal)        itens.push('mensalidade do contrato');
+  if(d.recMensal)        itens.push('mensalidade do contrato (' + fmtMoney(d.recMensal) + ')');
   const lista = itens.length > 1 ? itens.slice(0,-1).join(', ') + ' e ' + itens[itens.length-1] : (itens[0] || '');
 
   const assunto = `Nota fiscal e boleto — ${u.nome} — competência ${mesLabel(mes)}`;
@@ -11152,9 +11184,11 @@ function montarEmail(unidadeIds, mes){
   const mesBarra = (nomesMes[Number(mm)-1]||'') + '/' + my;
   const assunto = `Fechamento Mensal: Exames Clínicos e Laboratoriais de ${mesBarra} - ${siglas}`;
 
-  /* este e-mail é o RELATO do que foi realizado — nenhum valor entra aqui.
-     A cobrança segue à parte, pela nota; ver "Exportar consolidado" no faturamento. */
+  /* este e-mail é o RELATO do que foi realizado. A exceção é a mensalidade do
+     contrato: pedido da Jessica (15/10/2026), ela vai com o valor, igual à
+     grade "Mensalidades" do faturamento — é a mesma regra (precoMensal). */
   const carts = ems.filter(e => e.carteirinha && tipoAceitaCarteirinha(e.tipoExame));
+  const mensais = unidades.map(u => ({ u, valor: precoMensal(u.id, mes) })).filter(m => m.valor > 0);
 
   const th = 'style="background:#1e293b;color:#fff;padding:6px 8px;text-align:left;font-size:12px;border:1px solid #cbd5e1"';
   const td = 'style="padding:6px 8px;border:1px solid #cbd5e1;font-size:12px"';
@@ -11204,6 +11238,17 @@ function montarEmail(unidadeIds, mes){
       </tbody>
     </table>` : '';
 
+  const tabMensal = mensais.length ? `
+    <p style="font-size:13px;margin:14px 0 4px"><b>Mensalidade do contrato</b></p>
+    <table style="border-collapse:collapse;width:100%;margin:4px 0">
+      <thead><tr><th ${th}>Unidade</th><th ${th} style="text-align:right">Valor mensal</th></tr></thead>
+      <tbody>${mensais.map(m => `<tr><td ${td}>${esc(m.u.nome)}</td>
+        <td style="padding:6px 8px;border:1px solid #cbd5e1;font-size:12px;text-align:right;white-space:nowrap">${fmtMoney(m.valor)}</td></tr>`).join('')}
+      ${mensais.length > 1 ? `<tr><td style="padding:6px 8px;border:1px solid #cbd5e1;font-size:12px;font-weight:bold">Total</td>
+        <td style="padding:6px 8px;border:1px solid #cbd5e1;font-size:12px;text-align:right;white-space:nowrap;font-weight:bold">${
+          fmtMoney(mensais.reduce((s,m) => s + m.valor, 0))}</td></tr>` : ''}</tbody>
+    </table>` : '';
+
   /* unidades selecionadas que não tiveram nenhum movimento no mês */
   const temMovimento = id =>
     ems.some(e => e.unidadeId===id) || lds.some(l => l.unidadeId===id) || vis.some(v => v.unidadeId===id);
@@ -11250,12 +11295,14 @@ function montarEmail(unidadeIds, mes){
   const corpoProcedimentos = nadaNoMes ? '' : `
     <p>No período foram realizados ${resumoTexto}. Seguem os ASOs e o detalhamento:</p>
     ${tabExames}${tabCarts}${tabLaudos}${tabVisitas}`;
+  /* mensalidade é devida com ou sem movimento: entra nos dois casos */
+  const corpoMensal = tabMensal ? (nadaNoMes ? `<p>Segue a mensalidade do contrato referente ao período:</p>` : '') + tabMensal : '';
 
   const html = `<div style="font-family:Arial,Helvetica,sans-serif;color:#1e293b;font-size:13px;line-height:1.5">
     <p>Prezados,</p>
     <p>Gostaria de compartilhar o fechamento referente aos exames clínicos e laboratoriais realizados pelos colaboradores
     ${unidades.length>1?'das unidades':'da unidade'} de <b>${esc(cidades)}</b> durante o mês de <b>${mesLabel(mes)}</b>.</p>
-    ${notaSemMovimento}${corpoProcedimentos}
+    ${notaSemMovimento}${corpoProcedimentos}${corpoMensal}
     <p>Permanecemos à disposição para qualquer esclarecimento.</p>
     <p>Atenciosamente,<br>Gestão Atlas — Medicina Ocupacional e SST</p>
   </div>`;
