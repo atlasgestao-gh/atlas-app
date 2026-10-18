@@ -113,9 +113,9 @@ tailwind.config = {
   <div id="banner" class="no-print"></div>
   <main id="view" class="flex-1 p-4 sm:p-6"></main>
 
-  <!-- 2026.10.18-446dcda é preenchido no build: data + commit do código publicado -->
+  <!-- 2026.10.18-e0b00a8 é preenchido no build: data + commit do código publicado -->
   <footer class="px-6 py-4 text-[11px] text-slate-500 border-t border-slate-200 bg-white no-print">
-    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.18-446dcda
+    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.18-e0b00a8
     <span id="rodapePlanilha" class="hidden"> ·
       <button onclick="sincronizarPlanilha()" class="underline hover:text-accent">sincronizar novidades da planilha</button>
       ·
@@ -2100,12 +2100,14 @@ function acessoDaLinha(r){
            podeIncluir:!!r.pode_incluir, podeEditar:!!r.pode_editar, podeExcluir:!!r.pode_excluir };
 }
 function linhaDoAcesso(a){
-  /* gerente e equipe de admissão são perfis fechados: uma tela, nenhum verbo */
+  /* gerente e equipe de admissão nunca gravam no cadastro: verbos falsos.
+     A gerente tem uma tela fixa; a equipe de admissão (Gestão RH) tem as telas
+     que o master marcar (pedido da Jessica, 18/10/2026). */
   const ger = a.perfil === 'gerente' || a.perfil === 'admissao';
   return { email:String(a.email||'').trim().toLowerCase(), nome:a.nome || '',
            master: ger ? false : !!a.master,
            perfil: ger ? a.perfil : 'atlas',
-           abas: ger ? [] : (a.abas || []), unidade_ids:a.unidades || [],
+           abas: a.perfil === 'gerente' ? [] : (a.abas || []), unidade_ids:a.unidades || [],
            /* gerente não grava dado real em hipótese nenhuma: os verbos vão
               falsos para o banco, não só para a tela */
            pode_incluir: ger ? false : !!a.podeIncluir,
@@ -2142,7 +2144,7 @@ function carregarAcesso(){
   const admissao = !!(r && r.perfil === 'admissao');
   ACESSO = { master:false, irrestrito:false, email, semCadastro: !r, gerente, admissao,
              empresas: (r && r.empresas) || [], unidades: (r && r.unidades) || [],
-             abas: (gerente || admissao) ? [] : ((r && r.abas) || []),
+             abas: gerente ? [] : ((r && r.abas) || []),
              /* gerente é perfil de PEDIDO: ela nunca escreve no dado real, e
                 por isso os verbos são zerados aqui também — não só na gravação
                 da linha. Marcação errada na tela de acessos não vira escrita. */
@@ -2159,7 +2161,7 @@ function podeAba(id){
   if(ACESSO.gerente) return !!m.gerente;
   if(m.gerente) return false;
   /* mesma lógica para a equipe de admissão: uma tela, e só ela */
-  if(ACESSO.admissao) return !!m.admissao;
+  if(ACESSO.admissao) return !m.master && !m.gerente && ACESSO.abas.indexOf(id) >= 0;
   if(m.admissao) return ACESSO.irrestrito;
   if(m.master && !ACESSO.master) return false;
   return ACESSO.irrestrito || ACESSO.abas.indexOf(id) >= 0;
@@ -2225,7 +2227,9 @@ function viewAcessos(){
   const ehAdmissao = a => a.perfil === 'admissao';
   const resumoVerbos = a => {
     if(ehGerente(a)) return '<span class="text-slate-500">pede exame · não grava</span>';
-    if(ehAdmissao(a)) return '<span class="text-slate-500">ficha, contrato e férias · não vê dado de saúde</span>';
+    if(ehAdmissao(a)) return (a.abas||[]).some(x => x !== 'admissoes')
+      ? '<span class="text-slate-500">admissões · demais telas só visualiza</span>'
+      : '<span class="text-slate-500">ficha, contrato e férias · não vê dado de saúde</span>';
     const v = [];
     if(a.podeIncluir) v.push('incluir');
     if(a.podeEditar)  v.push('editar');
@@ -2234,7 +2238,6 @@ function viewAcessos(){
   };
   const resumoAbas = a => {
     if(ehGerente(a)) return '<span class="text-slate-500">Minha unidade</span>';
-    if(ehAdmissao(a)) return '<span class="text-slate-500">Admissões</span>';
     const n = (a.abas||[]).length;
     if(!n) return '<span class="text-red-600">nenhuma tela</span>';
     return esc(MENU.filter(m => (a.abas||[]).indexOf(m.id) >= 0).map(m => m.label).join(', '));
@@ -2305,11 +2308,11 @@ function editarAcesso(email){
         options:[{ v:'atlas',   l:'Atlas — opera o sistema' },
                  { v:'gerente', l:'Gerente do cliente — só pede exames e acompanha' },
                  { v:'admissao', l:'Equipe de admissão do cliente — ficha, contrato e férias' }],
-        hint:'gerente vê apenas a tela "Minha unidade"; a equipe de admissão vê apenas "Admissões" e nenhum dado de saúde. ' +
+        hint:'gerente vê apenas a tela "Minha unidade"; a equipe de admissão (Gestão RH) vê as telas marcadas abaixo. ' +
              'Nenhuma das duas grava no cadastro, e as telas e os verbos abaixo não se aplicam a elas' },
       { type:'sep', name:'sepTelas', label:'Telas que pode abrir' },
       { name:'abas', label:'Menu lateral', type:'multi', col:'sm:col-span-2',
-        options: MENU.filter(m => !m.master && !m.gerente && !m.admissao).map(m => ({ v:m.id, l:m.label })),
+        options: MENU.filter(m => !m.master && !m.gerente).map(m => ({ v:m.id, l:m.label })),
         hint:'sem nenhuma marcada, a pessoa entra e não vê tela nenhuma' },
       { type:'sep', label:'O que pode enxergar' },
       { name:'empresas', label:'Atalho: marcar todas as unidades de', type:'multi', col:'sm:col-span-2',
@@ -2331,13 +2334,28 @@ function editarAcesso(email){
        tem efeito é o tipo de confusão que volta como bug daqui a três semanas */
     afterRender: form => {
       const sel = form.elements['perfil'];
-      const some = ['sepTelas','abas','sepFazer','podeIncluir','podeEditar','podeExcluir'];
+      const telas = ['sepTelas','abas'], verbos = ['sepFazer','podeIncluir','podeEditar','podeExcluir'];
+      const caixaAdm = form.querySelector('input[name="abas"][value="admissoes"]');
+      let aviso = form.querySelector('#avisoRH');
+      if(!aviso){
+        const box = form.querySelector('[data-campo="abas"]');
+        if(box) box.insertAdjacentHTML('beforeend', `<p id="avisoRH" class="hidden mt-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] text-amber-900">
+          <i class="fa-solid fa-triangle-exclamation mr-1"></i>Para a Gestão RH, marcar qualquer tela além de <b>Admissões</b> libera a
+          leitura dos dados dessas unidades — inclusive exames, ASOs e atestados — em <b>somente leitura</b>.</p>`);
+        aviso = form.querySelector('#avisoRH');
+      }
       const pintar = () => {
-        const ger = sel.value === 'gerente' || sel.value === 'admissao';
-        some.forEach(n => {
-          const el = form.querySelector('[data-campo="' + n + '"]');
-          if(el) el.classList.toggle('hidden', ger);
-        });
+        const p = sel.value;
+        telas.forEach(n => { const el = form.querySelector('[data-campo="' + n + '"]'); if(el) el.classList.toggle('hidden', p === 'gerente'); });
+        verbos.forEach(n => { const el = form.querySelector('[data-campo="' + n + '"]'); if(el) el.classList.toggle('hidden', p !== 'atlas'); });
+        /* a tela Admissões só funciona para a Gestão RH (e o master) */
+        if(caixaAdm){
+          const lbl = caixaAdm.closest('label');
+          if(lbl) lbl.classList.toggle('hidden', p !== 'admissao');
+          if(p !== 'admissao') caixaAdm.checked = false;
+          else if(!form.querySelectorAll('input[name="abas"]:checked').length) caixaAdm.checked = true;
+        }
+        if(aviso) aviso.classList.toggle('hidden', p !== 'admissao');
       };
       sel.addEventListener('change', pintar);
       pintar();
@@ -2361,16 +2379,18 @@ function editarAcesso(email){
       /* gerente é perfil fechado: a tela dela não vem de "abas marcadas", e ela
          não grava. Zerado aqui para o que vai ao banco bater com a regra. */
       const ger = v.perfil === 'gerente' || v.perfil === 'admissao';
-      if(ger){ v.abas = []; v.podeIncluir = false; v.podeEditar = false; v.podeExcluir = false; }
+      if(ger){ v.podeIncluir = false; v.podeEditar = false; v.podeExcluir = false; }
+      if(v.perfil === 'gerente') v.abas = [];
+      if(v.perfil === 'atlas') v.abas = (v.abas || []).filter(x => x !== 'admissoes');
       if(a) Object.assign(a, v);
       else acessos().push(Object.assign({ criadoEm:new Date().toISOString(), criadoPor:SESSAO.email||'' }, v));
       gravarAcessos();
       closeModal(); go('acessos');
       const avisos = [];
       if(pelaEmpresa) avisos.push(pelaEmpresa + ' unidade(s) marcadas pelo atalho de empresa');
-      if(!ger && !(v.abas||[]).length) avisos.push('nenhuma tela marcada — a pessoa não vai ver nada');
+      if(v.perfil !== 'gerente' && !(v.abas||[]).length) avisos.push('nenhuma tela marcada — a pessoa não vai ver nada');
       if(!(v.unidades||[]).length) avisos.push('nenhuma unidade marcada — sem isso ela não enxerga ninguém');
-      const ok = (ger || (v.abas||[]).length) && (v.unidades||[]).length;
+      const ok = (v.perfil === 'gerente' || (v.abas||[]).length) && (v.unidades||[]).length;
       toast('Permissões de ' + v.email + ' salvas.' + (avisos.length ? ' ' + avisos.join('; ') + '.' : ''),
             ok ? 'ok' : 'alerta');
     }
@@ -3654,7 +3674,49 @@ function proximoTipoExame(aso){
 function agendarDeAlerta(colaboradorId){
   const c = colab(colaboradorId);
   novaEmissao({ colaborador:c.nome, unidadeId:c.unidadeId,
-                tipoExame: proximoTipoExame(asoVigente(colaboradorId)) });
+                tipoExame: proximoTipoExame(asoVigente(colaboradorId)) },
+              { statusColab: colaboradorId });
+}
+/* Quem aparece em "A fazer" às vezes já saiu ou está afastado: a modal de
+   agendamento deixa trocar o status ali mesmo (Jessica, 18/10/2026). Desligado
+   e Inativo deixam de gerar pendência (ver asoSemPendencia). */
+const STATUS_COLAB = ['Ativo','Inativo','Afastado','Desligado'];
+function blocoStatusColab(c){
+  const cls = 'w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-accent/40';
+  return `<div id="blocoStatusColab" class="sm:col-span-2 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+    <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-2"><i class="fa-solid fa-user-tag mr-1"></i>Status do colaborador</p>
+    <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
+      <div><select id="emStatusColab" class="${cls}" onchange="document.getElementById('emAfastWrap').classList.toggle('hidden', this.value !== 'Afastado')">
+        ${STATUS_COLAB.map(s => `<option value="${s}" ${c.status === s ? 'selected' : ''}>${s}</option>`).join('')}</select></div>
+      <div id="emAfastWrap" class="${c.status === 'Afastado' ? '' : 'hidden'}">
+        <input id="emAfastObs" value="${esc(c.afastamento || '')}" placeholder="Observação do afastamento" class="${cls}"></div>
+      <div><button type="button" onclick="salvarSoStatusColab('${c.id}')"
+        class="w-full px-3 py-2 rounded-lg text-sm border border-slate-300 bg-white text-slate-700 hover:bg-slate-100 whitespace-nowrap">
+        <i class="fa-solid fa-floppy-disk mr-1"></i>Salvar só o status</button></div>
+    </div>
+    <p class="text-[11px] text-slate-500 mt-2">Mudou para <b>Desligado</b> ou <b>Inativo</b>? Use "Salvar só o status" — a pessoa sai do
+      "A fazer" sem exame agendado. Ao salvar a emissão, o status escolhido aqui também é gravado.</p>
+  </div>`;
+}
+/* grava o que está no bloco; devolve um texto para o aviso ('' se nada mudou) */
+function aplicarStatusDoBloco(c){
+  const sel = document.getElementById('emStatusColab');
+  if(!sel || !c) return '';
+  const novo = sel.value, obs = ((document.getElementById('emAfastObs') || {}).value || '').trim();
+  const mudouObs = novo === 'Afastado' && obs !== (c.afastamento || '');
+  if(novo === c.status && !mudouObs) return '';
+  const antes = c.status;
+  c.status = novo;
+  if(novo === 'Afastado') c.afastamento = obs;
+  return antes !== novo ? c.nome + ': ' + antes + ' → ' + novo : 'observação do afastamento atualizada';
+}
+function salvarSoStatusColab(id){
+  if(!podeEditar()){ toast('Seu acesso não permite alterar o cadastro.', 'erro'); return; }
+  const c = colab(id); if(!c) return;
+  const txt = aplicarStatusDoBloco(c);
+  if(!txt){ toast('O status não mudou.', 'info'); return; }
+  save(); closeModal(); go(rota);
+  toast('Status atualizado — ' + txt + '.');
 }
 
 /* ═══════════════════════ 1b. ACOMPANHAMENTOS ═══════════════════════
@@ -8981,6 +9043,10 @@ function novaEmissao(pre, opts){
         el.addEventListener('input', atualizarPainelArys);
       });
       atualizarPainelArys();
+      /* vindo do "A fazer": o status do colaborador pode ser trocado aqui */
+      const cs = opts.statusColab && colab(opts.statusColab);
+      if(cs && podeEditar() && !document.getElementById('blocoStatusColab'))
+        form.insertAdjacentHTML('afterbegin', blocoStatusColab(cs));
     },
     onSave: v => {
       if(v.colaborador) v.colaborador = maiusc(v.colaborador);
@@ -8992,7 +9058,8 @@ function novaEmissao(pre, opts){
       if(!nova.carteirinha && emissaoExigeCarteirinha(nova)) nova.carteirinha = true;
       if(!tipoAceitaCarteirinha(nova.tipoExame)) nova.carteirinha = false;
       DB.emissoes.push(nova);
-      const efeitos = aplicarEfeitosNoCadastro(nova);
+      const stTxt = opts.statusColab ? aplicarStatusDoBloco(colab(opts.statusColab)) : '';
+      const efeitos = [aplicarEfeitosNoCadastro(nova), stTxt].filter(Boolean).join(' · ');
       const r = aplicarSyncAso(nova);
       save(); closeModal();
       if(opts.aposSalvar) opts.aposSalvar(nova);
