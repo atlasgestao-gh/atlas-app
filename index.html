@@ -113,9 +113,9 @@ tailwind.config = {
   <div id="banner" class="no-print"></div>
   <main id="view" class="flex-1 p-4 sm:p-6"></main>
 
-  <!-- 2026.10.15-e179139 é preenchido no build: data + commit do código publicado -->
+  <!-- 2026.10.18-446dcda é preenchido no build: data + commit do código publicado -->
   <footer class="px-6 py-4 text-[11px] text-slate-500 border-t border-slate-200 bg-white no-print">
-    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.15-e179139
+    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.18-446dcda
     <span id="rodapePlanilha" class="hidden"> ·
       <button onclick="sincronizarPlanilha()" class="underline hover:text-accent">sincronizar novidades da planilha</button>
       ·
@@ -959,6 +959,13 @@ function idbSet(k, v){
   })).catch(e => { console.warn('IndexedDB', e); return false; });
 }
 
+/* O campo "Telefone fixo / recado" saiu do cadastro (Jessica, 18/10/2026): o
+   número que estava gravado é descartado, não só escondido. Roda uma vez. */
+function migrarSemTelefone(d){
+  if(Number(d.semTelefoneVersao) >= 1) return;
+  (d.colaboradores || []).forEach(c => { delete c.telefone; });
+  d.semTelefoneVersao = 1;
+}
 function seedFresh(){
   const d = JSON.parse(JSON.stringify(SEED));
   d.colaboradores = Array.isArray(d.colaboradores) ? d.colaboradores : [];
@@ -1103,6 +1110,7 @@ async function bootStorage(){
   migrarMudancaRisco(DB);
   migrarTabelaFechamento(DB);
   migrarSelecaoFat(DB);
+  migrarSemTelefone(DB);
 
   /* nuvem ligada mas a cópia mais recente veio de outra camada → sobe p/ nuvem */
   if(CLOUD_ON && candidatos[0].fonte !== 'nuvem') nuvemGravar(true);
@@ -6694,7 +6702,6 @@ function abaColaboradores(){
                     : `<span class="text-slate-600">${esc(c.funcao)}</span>`}</td>
               <td class="px-4 py-3 text-xs text-slate-500">
                 <p>${esc(c.celular||'—')}</p>
-                ${c.telefone?`<p>${esc(c.telefone)}</p>`:''}
                 <p class="truncate max-w-[180px]">${esc(c.email||'')}</p></td>
               <td class="px-4 py-3 text-xs whitespace-nowrap">${a
                   ? `<input type="date" value="${ultimoExameDe(c)||''}" onchange="setUltimoExame('${c.id}', this.value)"
@@ -6993,7 +7000,7 @@ async function aplicarImpColabs(){
     }else{
       const id = uid('cl');
       DB.colaboradores.push({ id, nome:x.nome, cpf:x.cpf, rg:x.rg, nascimento:x.nascimento,
-        sexo:x.sexo, celular:x.celular, telefone:'', email:x.email, funcao:x.funcao,
+        sexo:x.sexo, celular:x.celular, email:x.email, funcao:x.funcao,
         unidadeId: ImpColab.unidadeId, local:'', admissao:x.admissao,
         afastamento:x.afastamento, status:x.status });
       novos++;
@@ -7048,7 +7055,7 @@ function colabPorCpf(cpf, ignorarId){
 /* leva os dados digitados na ficha para o cadastro que já existia, sem apagar
    o que ele já tinha e sem tocar no status (quem decide isso é a reativação) */
 function aproveitarDadosDigitados(c, v){
-  ['nome','rg','nascimento','sexo','celular','telefone','email','funcao','unidadeId','admissao','afastamento']
+  ['nome','rg','nascimento','sexo','celular','email','funcao','unidadeId','admissao','afastamento']
     .forEach(k => { if((v[k]||'') !== '') c[k] = v[k]; });
 }
 /* o que a pessoa digitou fica aqui entre o aviso e a decisão — serializar isso
@@ -7115,7 +7122,7 @@ function barradoPorCpfDuplicado(v, ignorarId){
   return true;
 }
 
-/* Define e-mail/telefone de uma vez para TODA a lista filtrada na tela.
+/* Define e-mail/celular de uma vez para TODA a lista filtrada na tela.
    Nasceu do caso da SDU - E: a importação reaproveita cadastros antigos e traz
    junto o contato deles, e corrigir um a um é inviável. Só mexe em quem está
    na lista atual, mostra a conta antes e guarda ponto de retorno. */
@@ -7128,7 +7135,7 @@ function definirContatoEmLote(){
     UIColab.status ? 'status ' + UIColab.status : 'todos os status',
     UIColab.q ? 'busca "' + UIColab.q + '"' : ''
   ].filter(Boolean).join(' · ');
-  const comContato = lista.filter(c => (c.email||'').trim() || (c.celular||'').trim() || (c.telefone||'').trim()).length;
+  const comContato = lista.filter(c => (c.email||'').trim() || (c.celular||'').trim()).length;
 
   openForm({
     title: 'Definir contato em lote',
@@ -7141,13 +7148,12 @@ function definirContatoEmLote(){
         </div>` },
       { name:'email', label:'E-mail', type:'email', col:'sm:col-span-2' },
       { name:'celular', label:'Celular' },
-      { name:'telefone', label:'Telefone fixo / recado' },
       { name:'sobrescrever', label:'Substituir também quem já tem contato preenchido', type:'checkbox',
         hint:'marque para corrigir contato herdado de um cadastro antigo', col:'sm:col-span-2' }
     ],
-    values: { email:'', celular:'', telefone:'', sobrescrever:false },
+    values: { email:'', celular:'', sobrescrever:false },
     onSave: async v => {
-      const campos = ['email','celular','telefone'].filter(k => (v[k]||'').trim());
+      const campos = ['email','celular'].filter(k => (v[k]||'').trim());
       if(!campos.length){ toast('Preencha ao menos um contato.', 'erro'); return; }
       const alvos = colabsFiltrados();
       await guardarSnapshotLocal('antes de definir contato em lote (' + alvos.length + ' colaboradores)');
@@ -7254,7 +7260,6 @@ function editarColab(id, pre){
         options:[{v:'',l:'— selecione —'},{v:'F',l:'Feminino'},{v:'M',l:'Masculino'}],
         hint:'define exames restritos, como o teste de gravidez' },
       { name:'celular', label:'Celular' },
-      { name:'telefone', label:'Telefone fixo / recado' },
       { name:'email', label:'E-mail', type:'email', col:'sm:col-span-2' },
       { type:'sep', label:'Vínculo' },
       /* a opção vazia na frente é obrigatória: sem ela, ficha sem unidade abre
@@ -7715,7 +7720,7 @@ function fichaColab(id){
       <div class="grid sm:grid-cols-2 gap-x-6">
         <div>${linha('CPF', esc(c.cpf))}${linha('RG', esc(c.rg))}${linha('Nascimento', fmtDate(c.nascimento))}
              ${linha('Sexo', esc(SEXO_PESSOA[c.sexo||'']))}
-             ${linha('Celular', esc(c.celular))}${linha('Telefone', esc(c.telefone))}</div>
+             ${linha('Celular', esc(c.celular))}</div>
         <div>${linha('E-mail', esc(c.email))}${linha('Unidade', esc(u?u.nome:''))}${linha('Função', esc(c.funcao))}
              ${linha('Admissão', fmtDate(c.admissao))}${linha('Status', badgeStatusColab(c.status))}
              ${cartColab.exige ? linha('Carteirinha sanitária',
@@ -7982,7 +7987,6 @@ function historicoColabHTML(id){
     ${campo('Data de nascimento', fmtDate(c.nascimento))}
     ${campo('Sexo', esc(SEXO_PESSOA[c.sexo||'']))}
     ${campo('Celular', esc(c.celular))}
-    ${campo('Telefone', esc(c.telefone))}
     ${campo('E-mail', esc(c.email))}
   </table>
 
@@ -8046,11 +8050,11 @@ function baixarHistoricoColab(id){
 function abrirHistoricoColab(id){ abrirRelatorio(historicoColabHTML(id)); }
 
 function exportarColabs(){
-  exportCSV('colaboradores', ['Nome','CPF','RG','Nascimento','Sexo','Celular','Telefone','E-mail','Empresa','Unidade','Função','CBO','Admissão','Status','Tipo do ASO','ASO vencimento','Dias p/ vencer','Carteirinha sanitária'],
+  exportCSV('colaboradores', ['Nome','CPF','RG','Nascimento','Sexo','Celular','E-mail','Empresa','Unidade','Função','CBO','Admissão','Status','Tipo do ASO','ASO vencimento','Dias p/ vencer','Carteirinha sanitária'],
     colabsFiltrados().map(c => { const a = asoVigente(c.id); const s = a ? situacaoAso(a, c) : null; const u = uni(c.unidadeId);
       const { matriz } = matrizDaFuncao(c.funcao);
       return [c.nome, c.cpf, c.rg, fmtDate(c.nascimento),
-              c.sexo==='F'?'Feminino':(c.sexo==='M'?'Masculino':''), c.celular, c.telefone||'', c.email,
+              c.sexo==='F'?'Feminino':(c.sexo==='M'?'Masculino':''), c.celular, c.email,
               u ? (emp(u.empresaId)||{}).nome : '', u ? u.nome : '', c.funcao, matriz ? matriz.cbo : '',
               fmtDate(c.admissao), c.status,
               a ? tipoLabel(a.tipo) : 'Sem ASO',
@@ -8991,6 +8995,7 @@ function novaEmissao(pre, opts){
       const efeitos = aplicarEfeitosNoCadastro(nova);
       const r = aplicarSyncAso(nova);
       save(); closeModal();
+      if(opts.aposSalvar) opts.aposSalvar(nova);
       go(opts.voltarPara || rota);   /* volta para a tela de onde veio (Acompanhamentos, Painel...) */
       toast('Emissão registrada.' + (r ? ' ' + r : '') + (efeitos ? ' ' + efeitos + '.' : ''));
     }
@@ -9078,7 +9083,7 @@ async function confirmarCriarCadastrosFaltantes(){
     const e = DB.emissoes.find(y => y.id === x.ids[0]) || {};
     DB.colaboradores.push({
       id: uid('cl'), nome: maiusc(x.nome), cpf:'', rg:'', nascimento:'', sexo:'',
-      celular:'', telefone:'', email:'', local:'',
+      celular:'', email:'', local:'',
       unidadeId: uni(x.unidadeId) ? x.unidadeId : '',
       funcao: e.funcao || '', admissao:'', status:'Ativo', afastamento:'',
       revisar: true, origemAuto: 'criado a partir de exame sem cadastro'
@@ -13617,7 +13622,7 @@ function admParaColab(a){
   const canon = funcaoCanonica(a.funcao || '');
   const noCatalogo = funcoesCanonicasCadastradas().some(f => norm(f) === norm(canon));
   return { nome:maiusc(a.nome), cpf:admCpfFmt(a.cpf), rg:s.rg || '', nascimento:s.nascimento || '',
-           sexo:s.sexo || '', celular:s.celular || '', telefone:s.telefone || '', email:s.email || '',
+           sexo:s.sexo || '', celular:s.celular || '', email:s.email || '',
            unidadeId:a.unidadeId, funcao: noCatalogo ? canon : '', admissao:a.admissao || '', status:'Ativo' };
 }
 /* completa uma ficha que nasceu magra de um pedido, sem pisar no que já existe */
@@ -13625,7 +13630,7 @@ function admEnriquecerColab(c){
   const a = ADMISSOES.find(x => cpfDigitos(x.cpf) === cpfDigitos(c.cpf));
   if(!a) return;
   const v = admParaColab(a);
-  ['rg','nascimento','sexo','celular','telefone','email','admissao'].forEach(k => { if(!c[k] && v[k]) c[k] = v[k]; });
+  ['rg','nascimento','sexo','celular','email','admissao'].forEach(k => { if(!c[k] && v[k]) c[k] = v[k]; });
   if(!a.colaboradorId){ a.colaboradorId = c.id; admSalvar(a); }
 }
 /* Os "inserir na base" pedidos pela equipe de admissão viram colaborador aqui,
@@ -13633,7 +13638,11 @@ function admEnriquecerColab(c){
    cadastro que não foi digitado pela Atlas. */
 async function admAplicarPendentes(){
   if(!ACESSO.irrestrito) return 0;
-  const pend = ADMISSOES.filter(a => a.cadastroPedidoEm && !a.colaboradorId);
+  /* pedidos antigos (antes de 18/10 a equipe só pedia) e, nos últimos 7 dias,
+     quem a equipe inseriu mas uma sessão da Atlas aberta antes regravou por cima */
+  const recente = a => (Date.now() - Date.parse(a.cadastroPedidoEm || 0)) < 7 * 86400000;
+  const pend = ADMISSOES.filter(a => a.cadastroPedidoEm && !a.expurgadoEm &&
+    (!a.colaboradorId || (recente(a) && !colabPorCpf(a.cpf, null))));
   if(!pend.length) return 0;
   let novos = 0;
   pend.forEach(a => {
@@ -13642,8 +13651,8 @@ async function admAplicarPendentes(){
     if(!c){
       if(!cpfValido(a.cpf)) return;
       const v = admParaColab(a);
-      c = Object.assign({ id:uid('col'), local:'' }, v, {
-        funcao: v.funcao || a.funcao || '', revisar:true,
+      c = Object.assign({ id:a.colaboradorId || uid('col'), local:'' }, v, {
+        funcao: v.funcao || a.funcao || '', revisar:!v.funcao,
         origemAuto:'ficha de admissão' + (a.cadastroPedidoPor ? ' · ' + a.cadastroPedidoPor : '') +
                    ' · ' + fmtDate(String(a.cadastroPedidoEm).slice(0,10)) });
       DB.colaboradores.push(c);
@@ -13653,8 +13662,7 @@ async function admAplicarPendentes(){
   });
   save();
   for(const a of pend){ if(a.colaboradorId) await admSalvar(a); }
-  if(novos) setTimeout(() => toast(novos + ' colaborador(es) vindos das admissões entraram no cadastro — ' +
-                                   'estão marcados para revisão em Colaboradores.', 'info'), 2200);
+  if(novos) setTimeout(() => toast(novos + ' colaborador(es) vindos das admissões entraram no cadastro.', 'info'), 2200);
   return novos;
 }
 
@@ -13734,7 +13742,6 @@ function admFichas(){
         ${morta ? '' : bt('fa-pen', 'Abrir a ficha', `admEditar('${a.id}')`)}
         ${morta ? '' : bt('fa-file-lines', 'Visualizar / imprimir a ficha', `admImprimirFicha('${a.id}')`)}
         ${morta && !admContratoDe(a) ? '' : bt('fa-file-signature', 'Contrato', `admAbrirContrato('${a.id}')`)}
-        ${admNoCadastro(a) || a.cadastroPedidoEm ? '' : bt('fa-user-plus', 'Inserir na base de colaboradores', `admCadastrar('${a.id}')`)}
         ${a.asoPedidoEm ? '' : bt('fa-notes-medical', 'Solicitar ASO admissional', `admPedirAso('${a.id}')`, 'hover:text-emerald-600')}
         ${bt('fa-trash', 'Excluir esta admissão', `admExcluir('${a.id}')`, 'hover:text-danger')}
       </td></tr>`;
@@ -13923,7 +13930,6 @@ function admRenderForm(manterRolagem){
         ${botao('Salvar', 'fa-floppy-disk', 'admSalvarForm()')}
         ${botao('Salvar e ver a ficha', 'fa-file-lines', "admSalvarForm('ficha')", 'bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
         ${botao('Salvar e gerar contrato', 'fa-file-signature', "admSalvarForm('contrato')", 'bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
-        ${botao('Salvar e inserir na base', 'fa-user-plus', "admSalvarForm('cadastro')", 'bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
         ${botao('Salvar e solicitar ASO admissional', 'fa-notes-medical', "admSalvarForm('aso')", 'bg-emerald-600 text-white hover:bg-emerald-700')}
       </div>
     </div>`;
@@ -13974,7 +13980,7 @@ async function admSalvarForm(depois){
     unidadeId:v.unidadeId, cpf:cpfDigitos(v.campos.f_cpf), nome:v.campos.f_nome,
     funcao:v.campos.f_funcao, admissao:v.campos.f_admissao,
     sst:{ sexo:v.sexo, nascimento:v.campos.f_nasc, rg:v.campos.f_rg, celular:v.campos.f_cel,
-          telefone:v.campos.f_recado, email:v.campos.f_email, exp1:v.checks.cb1, exp2:v.checks.cb2 },
+          email:v.campos.f_email, exp1:v.checks.cb1, exp2:v.checks.cb2 },
     ficha:{ campos:v.campos, checks:v.checks, radios:v.radios, deps:v.deps, depRaw:v.depRaw }
   });
   if(nova) ADMISSOES.unshift(a);
@@ -13987,7 +13993,6 @@ async function admSalvarForm(depois){
   admRenderForm(true);      /* o cabeçalho e a situação mudam ao salvar; os campos voltam iguais */
   if(depois === 'ficha'){ admImprimirFicha(a.id); return; }
   if(depois === 'contrato'){ admAbrirContrato(a.id); return; }
-  if(depois === 'cadastro'){ admCadastrar(a.id); return; }
   if(depois === 'aso'){ admPedirAso(a.id); return; }
   toast('Admissão de ' + a.nome + ' salva.');
 }
@@ -14617,8 +14622,12 @@ async function admConcluirContrato(enviar){
   _admEnvio = null;
   closeModal();
   abrirRelatorio(admContratoDoc(dados, admUniRotulo(a.unidadeId)));
+  /* gerar o contrato já põe a pessoa na base de colaboradores */
+  const jaNaBase = !!admNoCadastro(a);
+  const c = await admInserirNaBase(a);
   if(UIAdm.edit) admRenderForm(true); else viewAdmissoes();
-  toast(enviar ? 'Contrato gerado e enviado para a gerente.' : 'Contrato gerado. Não foi enviado para a gerente.', enviar ? 'ok' : 'alerta');
+  toast((enviar ? 'Contrato gerado e enviado para a gerente.' : 'Contrato gerado. Não foi enviado para a gerente.') +
+        (c && !jaNaBase ? ' ' + a.nome + ' entrou na base de colaboradores.' : ''), enviar ? 'ok' : 'alerta');
 }
 /* busca o PDF só agora e entrega ao navegador */
 async function admAbrirAnexo(contratoId){
@@ -14668,34 +14677,52 @@ async function admImportarPdfContrato(input){
   input.value = '';
 }
 
-/* ═════════ inserir na base e pedir o ASO ═════════ */
-function admCadastrar(id){
-  const a = admissao(id); if(!a) return;
+/* ═════════ inserir na base e pedir o ASO ═════════
+   Regra da Jessica (18/10/2026): a inclusão de colaborador feita pelas
+   Admissões NÃO passa por aprovação da Atlas. A pessoa entra na base quando a
+   ficha gera o contrato ou pede o ASO admissional — não há mais botão só para
+   "inserir na base".
+   Vai para o cadastro só o que a medicina do trabalho usa (admParaColab).
+   - Atlas (master) e o arquivo de teste: gravam direto, na hora.
+   - Gestão RH na nuvem: ela não escreve na linha da unidade (nem lê dado de
+     saúde), então o banco insere por ela (atlas_admissao_cadastrar, sql/08).
+     Se uma sessão da Atlas aberta antes regravar a unidade por cima, o
+     admAplicarPendentes devolve a pessoa ao cadastro no próximo arranque. */
+async function admInserirNaBase(a){
   const ja = admNoCadastro(a);
-  if(ja){ toast(a.nome + ' já está no cadastro de colaboradores.', 'info'); return; }
-  if(a.cadastroPedidoEm){ toast('O cadastro de ' + a.nome + ' já foi enviado e aguarda a Atlas.', 'info'); return; }
-  admConfirmar('Inserir na base de colaboradores',
-    `<p>Quer inserir <b>${esc(a.nome)}</b> na base de colaboradores do Atlas?</p>
-     <p class="text-xs text-slate-500">Vai para o cadastro só o que a medicina do trabalho usa: nome, CPF, RG, nascimento,
-       sexo, contatos, unidade, função e data de admissão. Banco, PIX, dependentes, filiação e os outros dados da ficha
-       <b>não</b> vão.</p>
-     ${ACESSO.irrestrito ? '' : `<p class="text-xs text-slate-500">O colaborador entra na base quando a Atlas abrir o sistema.</p>`}`,
-    'Sim, inserir', async () => {
-      if(ACESSO.irrestrito){
-        const pre = admParaColab(a);
-        if(!pre.funcao && a.funcao) setTimeout(() => toast('A função "' + a.funcao + '" não está no catálogo do Atlas — escolha a equivalente.', 'alerta'), 400);
-        pre._aposSalvar = (c, em) => admCadastrado(a.id, c, em);
-        editarColab(null, pre);
-        return;
-      }
-      a.cadastroPedidoEm = new Date().toISOString();
-      a.cadastroPedidoPor = String(SESSAO.email||'').toLowerCase();
-      if(admAvisarFalha(await admSalvar(a), 'o pedido de cadastro')){ a.cadastroPedidoEm = ''; a.cadastroPedidoPor = ''; return; }
-      if(UIAdm.edit) admRenderForm(true); else viewAdmissoes();
-      toast('Cadastro de ' + a.nome + ' enviado para a Atlas.');
-    });
+  if(ja) return ja;
+  if(!cpfValido(a.cpf)){ toast('CPF inválido na ficha — corrija para inserir na base.', 'erro'); return null; }
+  const agora = new Date().toISOString(), eu = String(SESSAO.email||'').toLowerCase();
+  let c = null;
+  if(ACESSO.irrestrito || !nuvemLigada()){
+    if(!uni(a.unidadeId)){ toast('A unidade desta ficha não existe no cadastro.', 'erro'); return null; }
+    c = colabPorCpf(a.cpf, null);
+    if(!c){
+      const v = admParaColab(a);
+      c = Object.assign({ id:uid('col'), local:'' }, v, {
+        funcao: v.funcao || a.funcao || '',
+        origemAuto:'ficha de admissão' + (eu ? ' · ' + eu : '') + ' · ' + fmtDate(agora.slice(0,10)) });
+      /* função fora do catálogo é a única coisa que pede um olhar da Atlas */
+      if(!v.funcao) c.revisar = true;
+      DB.colaboradores.push(c);
+      if(ACESSO.irrestrito) save();
+    }
+  }else{
+    const { data, error } = await sb.rpc('atlas_admissao_cadastrar', { p_admissao:a.id });
+    if(error){ toast('Não consegui inserir ' + a.nome + ' na base: ' + error.message, 'erro'); return null; }
+    c = { id:data, nome:maiusc(a.nome), cpf:cpfDigitos(a.cpf), unidadeId:a.unidadeId, funcao:a.funcao || '',
+          admissao:a.admissao || '', status:'Ativo' };
+  }
+  /* a equipe de admissão enxerga o quadro por esta lista: a pessoa aparece já */
+  if(ACESSO.admissao && ADM_QUADRO && !ADM_QUADRO.some(x => x.id === c.id))
+    ADM_QUADRO.push({ unidadeId:a.unidadeId, id:c.id, nome:c.nome, cpf:cpfDigitos(c.cpf),
+                      funcao:c.funcao || '', admissao:c.admissao || '', status:'Ativo' });
+  a.colaboradorId = c.id;
+  if(!a.cadastroPedidoEm){ a.cadastroPedidoEm = agora; a.cadastroPedidoPor = eu; }
+  admAvisarFalha(await admSalvar(a), 'o vínculo com o cadastro');
+  return c;
 }
-/* volta do formulário de colaborador (só o master passa por aqui) */
+/* volta do formulário de colaborador (fluxo antigo, mantido para quem o chama) */
 async function admCadastrado(aid, c, em){
   const a = admissao(aid); if(!a) return;
   a.colaboradorId = c.id;
@@ -14704,43 +14731,33 @@ async function admCadastrado(aid, c, em){
   if(!em){ UIAdm.edit = null; go('admissoes'); }
 }
 
-function admPedirAso(id){
+/* "Salvar e solicitar ASO admissional":
+   - Atlas: a pessoa entra na base e abre a modal Nova emissão de exame já
+     preenchida (colaborador, unidade, função, admissional) — é ela quem agenda.
+   - Gestão RH: a pessoa entra na base e o pedido segue para a fila da Atlas,
+     como os pedidos das gerentes: a equipe do cliente não agenda clínica. */
+async function admPedirAso(id){
   const a = admissao(id); if(!a) return;
   if(a.asoPedidoEm){ toast('O ASO admissional de ' + a.nome + ' já foi solicitado.', 'info'); return; }
+  const c = await admInserirNaBase(a);
+  if(!c) return;
   if(ACESSO.irrestrito){
-    const c = colabPorCpf(a.cpf, null);
-    /* sem cadastro não há a quem ligar o exame: o formulário de colaborador já
-       tem o "Salvar e solicitar ASO admissional" */
-    if(!c){
-      admConfirmar('Solicitar ASO admissional',
-        `<p><b>${esc(a.nome)}</b> ainda não está no cadastro de colaboradores.</p>
-         <p class="text-xs text-slate-500">Vou abrir o cadastro já preenchido com os dados de SST da ficha. Lá, use
-           <b>Salvar e solicitar ASO admissional</b>.</p>`,
-        'Abrir o cadastro', () => {
-          const pre = admParaColab(a);
-          pre._aposSalvar = (col, em) => admCadastrado(a.id, col, em);
-          editarColab(null, pre);
-        });
-      return;
-    }
-    admConfirmar('Solicitar ASO admissional',
-      `<p>Criar o exame <b>admissional</b> de <b>${esc(c.nome)}</b> em Agendamento de exames, como Solicitado?</p>
-       <p class="text-xs text-slate-500">Os exames da matriz da função (${esc(c.funcao || 'sem função')}) já vão sugeridos.</p>`,
-      'Sim, solicitar', async () => {
-        solicitarAsoDoCadastro(c, true, 'ADMISSIONAL');
-        a.asoPedidoEm = new Date().toISOString();
-        if(!a.colaboradorId) a.colaboradorId = c.id;
-        admAvisarFalha(await admSalvar(a), 'o pedido de ASO');
-        if(UIAdm.edit) admRenderForm(true); else viewAdmissoes();
-        toast('Exame admissional de ' + c.nome + ' criado como Solicitado.');
-      });
+    const col = colab(c.id) || c;
+    novaEmissao({ colaborador:col.nome, unidadeId:col.unidadeId, funcao:col.funcao || '',
+                  tipoExame:'ADMISSIONAL', status:'SOLICITADO' },
+                { titulo:'Nova emissão de exame — ' + col.nome, voltarPara:'admissoes',
+                  aposSalvar: async () => {
+                    a.asoPedidoEm = new Date().toISOString();
+                    admAvisarFalha(await admSalvar(a), 'a data do pedido de ASO');
+                  } });
     return;
   }
   admConfirmar('Solicitar ASO admissional',
-    `<p>Pedir à Atlas o exame <b>admissional</b> de <b>${esc(a.nome)}</b>?</p>
+    `<p><b>${esc(a.nome)}</b> já está na base de colaboradores.</p>
+     <p>Pedir à Atlas o exame <b>admissional</b>?</p>
      <p class="text-xs text-slate-500">O pedido entra na fila da Atlas, que agenda o exame na clínica da unidade.</p>`,
     'Sim, pedir', async () => {
-      const r = await nuvemAbrirSolicitacao({ unidadeId:a.unidadeId, colaboradorId:'', nome:a.nome, cpf:a.cpf,
+      const r = await nuvemAbrirSolicitacao({ unidadeId:a.unidadeId, colaboradorId:c.id, nome:a.nome, cpf:a.cpf,
         funcao:a.funcao || '', tipoExame:'ADMISSIONAL', observacao:'Pedido pela ficha de admissão' });
       if(!r.ok){ toast('Não consegui enviar o pedido: ' + (r.motivo || 'motivo desconhecido'), 'erro'); return; }
       a.asoPedidoEm = new Date().toISOString();
