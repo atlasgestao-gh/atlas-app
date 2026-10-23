@@ -113,9 +113,9 @@ tailwind.config = {
   <div id="banner" class="no-print"></div>
   <main id="view" class="flex-1 p-4 sm:p-6"></main>
 
-  <!-- 2026.10.18-e0b00a8 é preenchido no build: data + commit do código publicado -->
+  <!-- 2026.10.23-98328c0 é preenchido no build: data + commit do código publicado -->
   <footer class="px-6 py-4 text-[11px] text-slate-500 border-t border-slate-200 bg-white no-print">
-    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.18-e0b00a8
+    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.23-98328c0
     <span id="rodapePlanilha" class="hidden"> ·
       <button onclick="sincronizarPlanilha()" class="underline hover:text-accent">sincronizar novidades da planilha</button>
       ·
@@ -966,6 +966,49 @@ function migrarSemTelefone(d){
   (d.colaboradores || []).forEach(c => { delete c.telefone; });
   d.semTelefoneVersao = 1;
 }
+/* Reparo do histórico de ASOs gravado com a data errada (bug corrigido acima).
+   Para cada versão do histórico com a MESMA data do ASO vigente, procura o
+   exame realizado daquela versão (mesma pessoa, mesmo tipo, data anterior) e
+   devolve a data, o vencimento e o vínculo certos. Onde não existe exame
+   registrado, a data original foi recuperada das cópias diárias do Drive, ou
+   fica como "data não registrada" — nunca uma data inventada. Roda uma vez. */
+const REPARO_HIST_ASO_BACKUP = { 'clfz6ccng|PERIODICO':'2025-11-01' };   /* cópia de 07/10/2026 */
+function migrarHistoricoAsos(d){
+  if(Number(d.histAsoReparoVersao) >= 1) return;
+  const nomeDe = {};
+  (d.colaboradores || []).forEach(c => { nomeDe[c.id] = c; });
+  const dataDe = e => e.dataClinico || e.dataLab || e.dataAso || '';
+  const realizados = (d.emissoes || []).filter(e => e.status === 'REALIZADO');
+  (d.asos || []).forEach(a => {
+    const c = nomeDe[a.colaboradorId];
+    (a.historico || []).forEach(h => {
+      if(!h.dataExame || h.dataExame !== a.dataExame) return;
+      const cands = c ? realizados.filter(e => norm(e.colaborador) === norm(c.nome) && e.tipoExame === h.tipo &&
+                                               e.id !== a.origemEmissaoId && dataDe(e) && dataDe(e) < a.dataExame) : [];
+      cands.sort((x, y) => dataDe(y).localeCompare(dataDe(x)));
+      const em = cands[0];
+      const doBackup = REPARO_HIST_ASO_BACKUP[a.colaboradorId + '|' + h.tipo];
+      if(em){
+        h.dataExame = dataDe(em); h.vencimento = addDays(h.dataExame, 365); h.origemEmissaoId = em.id;
+        if(!h.resultado && em.resultado) h.resultado = em.resultado;
+        if(!h.medico && em.medico) h.medico = em.medico;
+      }else if(doBackup){
+        h.dataExame = doBackup; h.vencimento = addDays(doBackup, 365);
+      }else{
+        h.dataExame = ''; h.vencimento = ''; h.dataIncerta = true;
+      }
+    });
+    /* DEPOIS do histórico (que se compara com a data antiga): ASO ligado a exame
+       sem data clínica, que tinha ganhado a data do dia em que foi lançado */
+    const orig = a.origemEmissaoId && realizados.find(e => e.id === a.origemEmissaoId);
+    if(orig && !orig.dataClinico && !orig.dataLab && orig.dataAso && a.dataExame !== orig.dataAso){
+      a.dataExame = orig.dataAso; a.vencimento = addDays(orig.dataAso, 365);
+    }
+  });
+  d.histAsoReparoVersao = 1;
+}
+/* como mostrar a data de uma versão do ASO */
+function dataExameTxt(x){ return x && x.dataIncerta ? 'data não registrada' : fmtDate(x && x.dataExame); }
 function seedFresh(){
   const d = JSON.parse(JSON.stringify(SEED));
   d.colaboradores = Array.isArray(d.colaboradores) ? d.colaboradores : [];
@@ -1111,6 +1154,7 @@ async function bootStorage(){
   migrarTabelaFechamento(DB);
   migrarSelecaoFat(DB);
   migrarSemTelefone(DB);
+  migrarHistoricoAsos(DB);
 
   /* nuvem ligada mas a cópia mais recente veio de outra camada → sobe p/ nuvem */
   if(CLOUD_ON && candidatos[0].fonte !== 'nuvem') nuvemGravar(true);
@@ -1983,7 +2027,7 @@ function sincronizarAsoDeEmissao(e, opts){
   const c = colabDaEmissao(e);
   if(!c) return { erro:'sem-colaborador' };
 
-  const dataExame = e.dataClinico || e.dataLab || isoToday();
+  const dataExame = e.dataClinico || e.dataLab || e.dataAso || isoToday();
   const vencimento = addDays(dataExame, 365);
   const aso = asoVigente(c.id);
 
@@ -7805,8 +7849,10 @@ function fichaColab(id){
                 <th class="px-3 py-2 text-left">Vencimento</th><th class="px-3 py-2 text-left">Situação</th>
                 <th class="px-3 py-2 text-left">S-2220</th></tr></thead>
             <tbody class="divide-y divide-slate-100">
-              ${asos.length ? asos.map(a => { const s = semaforo(a.vencimento);
-                return `<tr><td class="px-3 py-2">${esc(tipoLabel(a.tipo))}</td><td class="px-3 py-2">${fmtDate(a.dataExame)}</td>
+              ${asos.length ? asos.map(a => {
+                /* só o vigente tem situação; versão anterior foi substituída por um exame novo */
+                const s = a === asoAtual ? situacaoAso(a, c) : { label:'Substituído', cls:'bg-slate-100 text-slate-500' };
+                return `<tr><td class="px-3 py-2">${esc(tipoLabel(a.tipo))}</td><td class="px-3 py-2">${esc(dataExameTxt(a))}</td>
                   <td class="px-3 py-2">${fmtDate(a.vencimento)}</td><td class="px-3 py-2">${badge(s.label,s.cls)}</td>
                   <td class="px-3 py-2 text-slate-500">${a.s2220 && a.s2220.recibo ? esc(a.s2220.recibo) : '—'}</td></tr>`;
               }).join('') : '<tr><td colspan="5" class="px-3 py-4 text-center text-slate-400">Sem ASOs registrados</td></tr>'}
@@ -8071,7 +8117,7 @@ function historicoColabHTML(id){
   ${asos.length ? `<table class="grid">
     <thead><tr><th ${th}>Tipo</th><th ${th}>Data do exame</th><th ${th}>Vencimento</th><th ${th}>Resultado</th><th ${th}>Recibo S-2220</th></tr></thead>
     <tbody>${asos.map(a => `<tr>
-      <td ${td}>${esc(tipoLabel(a.tipo))}</td><td ${td}>${fmtDate(a.dataExame)}</td>
+      <td ${td}>${esc(tipoLabel(a.tipo))}</td><td ${td}>${esc(dataExameTxt(a))}</td>
       <td ${td}>${fmtDate(a.vencimento)}</td><td ${td}>${esc(a.resultado||'—')}</td>
       <td ${td}>${a.s2220 && a.s2220.recibo ? esc(a.s2220.recibo) : '—'}</td></tr>`).join('')}</tbody></table>`
     : '<p>Sem ASOs registrados.</p>'}
@@ -9389,16 +9435,11 @@ function aplicarEfeitosNoCadastro(e){
     const eco = propagarColaborador(c, antes);
     if(eco) avisos.push(eco.trim().replace(/\.$/,''));
   }
-  /* 2. data de emissão do ASO alimenta o exame vigente.
-     Um novo exame SEMPRE renova a validade para 1 ano a partir dele — mesmo
-     em renovação antecipada (quando o vencimento antigo ainda estava no futuro). */
-  if(e.dataAso){
-    const aso = asoVigente(c.id);
-    if(aso){
-      aso.dataExame = e.dataAso;
-      aso.vencimento = addDays(e.dataAso, 365);
-    }
-  }
+  /* 2. (removido em 23/10/2026) Aqui a data do exame NOVO era gravada no ASO
+     vigente ANTES de ele ir para o histórico — o ASO anterior ficava com a
+     data do exame seguinte (caso CAROLINE MICHELS: periódico de 27/01 virou
+     21/10, a data do demissional). Quem cuida do ASO é sincronizarAsoDeEmissao,
+     que já renova a validade a partir do exame novo. */
   /* 3. demissional desliga o colaborador — sai da lista de ASOs em atraso */
   if(e.tipoExame === 'DEMISSIONAL' && c.status !== 'Desligado'){
     c.status = 'Desligado';
@@ -9592,7 +9633,7 @@ function historicoAso(id){
     <tr class="${vigente?'bg-emerald-50':''}">
       <td class="px-3 py-2">${vigente?badge('Vigente','bg-emerald-100 text-emerald-700'):'<span class="text-slate-400 text-xs">anterior</span>'}</td>
       <td class="px-3 py-2 text-xs">${esc(tipoLabel(x.tipo))}${x.origemEmissaoId?' <span class="text-[10px] px-1 rounded bg-blue-100 text-blue-700">exame</span>':''}</td>
-      <td class="px-3 py-2 text-xs whitespace-nowrap">${fmtDate(x.dataExame)}</td>
+      <td class="px-3 py-2 text-xs whitespace-nowrap">${esc(dataExameTxt(x))}</td>
       <td class="px-3 py-2 text-xs whitespace-nowrap">${fmtDate(x.vencimento)}</td>
       <td class="px-3 py-2 text-xs">${esc(x.medico||'—')}</td>
       <td class="px-3 py-2 text-xs">${esc(x.resultado||'—')}</td>
