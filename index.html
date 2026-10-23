@@ -113,9 +113,9 @@ tailwind.config = {
   <div id="banner" class="no-print"></div>
   <main id="view" class="flex-1 p-4 sm:p-6"></main>
 
-  <!-- 2026.10.23-98328c0 é preenchido no build: data + commit do código publicado -->
+  <!-- 2026.10.23-beff516 é preenchido no build: data + commit do código publicado -->
   <footer class="px-6 py-4 text-[11px] text-slate-500 border-t border-slate-200 bg-white no-print">
-    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.23-98328c0
+    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.23-beff516
     <span id="rodapePlanilha" class="hidden"> ·
       <button onclick="sincronizarPlanilha()" class="underline hover:text-accent">sincronizar novidades da planilha</button>
       ·
@@ -961,8 +961,13 @@ function idbSet(k, v){
 
 /* O campo "Telefone fixo / recado" saiu do cadastro (Jessica, 18/10/2026): o
    número que estava gravado é descartado, não só escondido. Roda uma vez. */
+/* reparos de dados que rodam no arranque e PRECISAM ir para a nuvem já: sem
+   isto eles só eram gravados no próximo salvamento qualquer (iniciar() chama
+   save() quando esta marca está ligada e quem abriu pode gravar) */
+let REPARO_PENDENTE_GRAVAR = false;
 function migrarSemTelefone(d){
   if(Number(d.semTelefoneVersao) >= 1) return;
+  REPARO_PENDENTE_GRAVAR = true;
   (d.colaboradores || []).forEach(c => { delete c.telefone; });
   d.semTelefoneVersao = 1;
 }
@@ -974,17 +979,28 @@ function migrarSemTelefone(d){
    fica como "data não registrada" — nunca uma data inventada. Roda uma vez. */
 const REPARO_HIST_ASO_BACKUP = { 'clfz6ccng|PERIODICO':'2025-11-01' };   /* cópia de 07/10/2026 */
 function migrarHistoricoAsos(d){
-  if(Number(d.histAsoReparoVersao) >= 1) return;
+  if(Number(d.histAsoReparoVersao) >= 2) return;
+  REPARO_PENDENTE_GRAVAR = true;
+  const versao = Number(d.histAsoReparoVersao) || 0;
   const nomeDe = {};
   (d.colaboradores || []).forEach(c => { nomeDe[c.id] = c; });
   const dataDe = e => e.dataClinico || e.dataLab || e.dataAso || '';
   const realizados = (d.emissoes || []).filter(e => e.status === 'REALIZADO');
   (d.asos || []).forEach(a => {
     const c = nomeDe[a.colaboradorId];
+    /* a passada 2 pega o outro rastro do mesmo erro: exame só com "data do ASO"
+       — o vigente ganhou a data de lançamento e o anterior, a data do ASO do
+       exame novo (por isso as duas não batiam). Casos Daiane e Viviana. */
+    const origem = a.origemEmissaoId && realizados.find(e => e.id === a.origemEmissaoId);
+    const dataTrocada = origem && !origem.dataClinico && !origem.dataLab && origem.dataAso ? origem.dataAso : '';
     (a.historico || []).forEach(h => {
-      if(!h.dataExame || h.dataExame !== a.dataExame) return;
+      if(!h.dataExame) return;
+      const repetida = versao < 1 && h.dataExame === a.dataExame;
+      const trocada = !!dataTrocada && h.dataExame === dataTrocada && !h.origemEmissaoId;
+      if(!repetida && !trocada) return;
+      const limite = trocada ? dataTrocada : a.dataExame;
       const cands = c ? realizados.filter(e => norm(e.colaborador) === norm(c.nome) && e.tipoExame === h.tipo &&
-                                               e.id !== a.origemEmissaoId && dataDe(e) && dataDe(e) < a.dataExame) : [];
+                                               e.id !== a.origemEmissaoId && dataDe(e) && dataDe(e) < limite) : [];
       cands.sort((x, y) => dataDe(y).localeCompare(dataDe(x)));
       const em = cands[0];
       const doBackup = REPARO_HIST_ASO_BACKUP[a.colaboradorId + '|' + h.tipo];
@@ -1005,7 +1021,7 @@ function migrarHistoricoAsos(d){
       a.dataExame = orig.dataAso; a.vencimento = addDays(orig.dataAso, 365);
     }
   });
-  d.histAsoReparoVersao = 1;
+  d.histAsoReparoVersao = 2;
 }
 /* como mostrar a data de uma versão do ASO */
 function dataExameTxt(x){ return x && x.dataIncerta ? 'data não registrada' : fmtDate(x && x.dataExame); }
@@ -16161,6 +16177,12 @@ $('#hojeLabel').textContent = HOJE.toLocaleDateString('pt-BR', { weekday:'long',
 
   /* admissões: tabelas à parte, lidas depois do acesso pelo mesmo motivo */
   try{ await admIniciar(); }catch(e){ console.warn('admIniciar', e); }
+
+  /* reparo feito no arranque vai para a nuvem agora, não no próximo clique */
+  if(REPARO_PENDENTE_GRAVAR && ACESSO.irrestrito && (!CLOUD_ON || NUVEM_PARTIDA)){
+    REPARO_PENDENTE_GRAVAR = false;
+    save();
+  }
 
   go('dashboard');
 
