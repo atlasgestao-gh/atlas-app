@@ -113,9 +113,9 @@ tailwind.config = {
   <div id="banner" class="no-print"></div>
   <main id="view" class="flex-1 p-4 sm:p-6"></main>
 
-  <!-- 2026.10.29-6dcb6c1 é preenchido no build: data + commit do código publicado -->
+  <!-- 2026.10.29-82ccc37 é preenchido no build: data + commit do código publicado -->
   <footer class="px-6 py-4 text-[11px] text-slate-500 border-t border-slate-200 bg-white no-print">
-    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.29-6dcb6c1
+    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.29-82ccc37
     <span id="rodapePlanilha" class="hidden"> ·
       <button onclick="sincronizarPlanilha()" class="underline hover:text-accent">sincronizar novidades da planilha</button>
       ·
@@ -1023,6 +1023,22 @@ function migrarHistoricoAsos(d){
   });
   d.histAsoReparoVersao = 2;
 }
+/* Custo do laudo nas competências fechadas (Jessica, 29/10/2026): até
+   agosto/2026 R$ 2.200 e a partir de setembro/2026 R$ 2.300 — os valores que
+   já estavam no sistema. Só preenche onde o custo ainda não existe; o preço
+   cobrado das unidades não muda. Roda uma vez. */
+function migrarCustoLaudoFechados(d){
+  if(Number(d.custoLaudoVersao) >= 1) return;
+  REPARO_PENDENTE_GRAVAR = true;
+  (Array.isArray(d.mesesFechados) ? d.mesesFechados : []).forEach(r => {
+    if(!r || !r.tabela || !r.mes) return;
+    r.tabela.precos = r.tabela.precos || {};
+    if(r.tabela.precos.laudoCusto == null) r.tabela.precos.laudoCusto = r.mes <= '2026-08' ? 2200 : 2300;
+  });
+  d.precos = d.precos || {};
+  if(!Number(d.precos.laudoCusto)) d.precos.laudoCusto = 2300;
+  d.custoLaudoVersao = 1;
+}
 /* como mostrar a data de uma versão do ASO */
 function dataExameTxt(x){ return x && x.dataIncerta ? 'data não registrada' : fmtDate(x && x.dataExame); }
 function seedFresh(){
@@ -1171,6 +1187,7 @@ async function bootStorage(){
   migrarSelecaoFat(DB);
   migrarSemTelefone(DB);
   migrarHistoricoAsos(DB);
+  migrarCustoLaudoFechados(DB);
 
   /* nuvem ligada mas a cópia mais recente veio de outra camada → sobe p/ nuvem */
   if(CLOUD_ON && candidatos[0].fonte !== 'nuvem') nuvemGravar(true);
