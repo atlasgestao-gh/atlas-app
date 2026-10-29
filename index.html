@@ -113,9 +113,9 @@ tailwind.config = {
   <div id="banner" class="no-print"></div>
   <main id="view" class="flex-1 p-4 sm:p-6"></main>
 
-  <!-- 2026.10.23-beff516 é preenchido no build: data + commit do código publicado -->
+  <!-- 2026.10.29-6dcb6c1 é preenchido no build: data + commit do código publicado -->
   <footer class="px-6 py-4 text-[11px] text-slate-500 border-t border-slate-200 bg-white no-print">
-    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.23-beff516
+    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.29-6dcb6c1
     <span id="rodapePlanilha" class="hidden"> ·
       <button onclick="sincronizarPlanilha()" class="underline hover:text-accent">sincronizar novidades da planilha</button>
       ·
@@ -5866,6 +5866,24 @@ function precoNoMes(mes, unidadeId, campo){
 
 function precoCarteirinha(unidadeId, mes){ return precoNoMes(mes, unidadeId, 'carteirinha'); }
 function custoCarteirinha(mes){ return Number((tabelaDoMes(mes).precos || {}).carteirinhaCusto) || 0; }
+/* Custo dos serviços que não são exame (pedido da Jessica, 29/10/2026): o que a
+   Atlas paga para entregar laudo, declaração de dispensa, visita técnica e a
+   mensalidade. Antes disso só existia o preço de VENDA desses itens e o custo
+   do mês somava apenas exames e carteirinhas.
+   Competência fechada ANTES desses campos existirem não tem a chave na tabela
+   congelada: aí vale o valor de hoje — e salvar a tabela de preços grava o
+   valor nas fechadas, para ele ficar congelado de vez (ver editarPrecos). */
+const CAMPOS_CUSTO_SERV = [
+  ['laudoCusto','Laudos PGR + PCMSO + LTCAT'], ['dispensaCusto','Declaração de dispensa'],
+  ['visitaCusto','Visita técnica'], ['mensalCusto','Mensalidade (por unidade que paga)']
+];
+function custoServNoMes(mes, campo){
+  const p = tabelaDoMes(mes).precos || {};
+  return Number(p[campo] != null ? p[campo] : (DB.precos || {})[campo]) || 0;
+}
+function custoEntregaLaudo(v, mes){ return custoServNoMes(mes, ehDispensa(v) ? 'dispensaCusto' : 'laudoCusto'); }
+function custoVisita(mes){ return custoServNoMes(mes, 'visitaCusto'); }
+function custoMensal(mes){ return custoServNoMes(mes, 'mensalCusto'); }
 function custoExame(nome, mes){
   const t = tabelaDoMes(mes);
   /* competência congelada guarda o custo que o exame tinha à época */
@@ -9910,7 +9928,8 @@ function fechamentoDados(mesArg, unidadeArg){
   /* o valor do laudo vem da matriz de preço por unidade, não de um campo aberto */
   const lds = entregasLaudos(mes, uFiltro).map(x => Object.assign({}, x.v, {
     unidadeId: x.laudo.unidadeId, laudoId: x.laudo.id,
-    valor: precoEntregaLaudo(x.v, x.laudo.unidadeId, mes)
+    valor: precoEntregaLaudo(x.v, x.laudo.unidadeId, mes),
+    custo: custoEntregaLaudo(x.v, mes)
   }));
   /* só visitas REALIZADAS entram no faturamento */
   const vis = (DB.visitas||[]).filter(v =>
@@ -9936,9 +9955,13 @@ function fechamentoDados(mesArg, unidadeArg){
   const recVi = vis.reduce((s,v) => s + (Number(v.valor)||0), 0);
   const receita = recEx + recLd + recVi + recMensal + recCart;
 
-  /* CUSTO — o que a Atlas paga à Arys pelos exames e carteirinhas */
+  /* CUSTO — o que a Atlas paga: exames e carteirinhas (Arys) e os serviços
+     (laudos, declarações, visitas técnicas e a mensalidade de cada unidade) */
   const custoEx = exValidos.reduce((s,e) => s + custoEmissao(e, mes), 0);
-  const custo = custoEx + custoCart;
+  const custoLd = lds.reduce((s,l) => s + (Number(l.custo)||0), 0);
+  const custoVi = vis.length * custoVisita(mes);
+  const custoMen = mensais.length * custoMensal(mes);
+  const custo = custoEx + custoCart + custoLd + custoVi + custoMen;
 
   /* informado o total cobrado, ele passa a ser o valor efetivo e manda na margem */
   const cobrado = totalCobrado(mes, uFiltro);
@@ -9948,7 +9971,7 @@ function fechamentoDados(mesArg, unidadeArg){
   return {
     mes, unidadeId: uFiltro, ems, lds, vis, mensais, exValidos, pendentesFech, carts,
     recEx, recLd, recVi, recMensal, recCart, receita, cobrado, efetivo,
-    custoEx, custoCart, custo, margem,
+    custoEx, custoCart, custoLd, custoVi, custoMen, custo, margem,
     /* aliases mantidos por compatibilidade */
     totalEx: recEx, totalLd: recLd, total: receita
   };
@@ -10011,6 +10034,17 @@ function quadroResumoFat(d){
         <p class="col-span-3 text-[11px] text-slate-400 text-center">
           ${d.efetivo ? Math.round(d.margem/d.efetivo*100)+'% de margem sobre o total '+(d.cobrado?'cobrado':'a cobrar') : '—'}
           ${d.cobrado ? ' · apurado ' + fmtMoney(d.receita) : ''}</p>
+        <div class="col-span-3 rounded-lg border border-slate-100 px-3 py-2">
+          <p class="text-[10px] uppercase tracking-wide text-slate-400 mb-1">Composição do custo</p>
+          ${[['Exames', d.custoEx], ['Carteirinhas', d.custoCart], ['Laudos e declarações', d.custoLd],
+             ['Visitas técnicas', d.custoVi], ['Mensalidades', d.custoMen]].filter(x => x[1])
+             .map(([k,v]) => `<div class="flex justify-between text-xs py-0.5"><span class="text-slate-500">${k}</span>
+               <span class="text-slate-700 whitespace-nowrap">${fmtMoney(v)}</span></div>`).join('') ||
+             '<p class="text-xs text-slate-400">Sem custo no período.</p>'}
+          ${(d.lds.length || d.vis.length || d.mensais.length) && !(custoServNoMes(d.mes,'laudoCusto') || custoServNoMes(d.mes,'visitaCusto') || custoServNoMes(d.mes,'mensalCusto') || custoServNoMes(d.mes,'dispensaCusto'))
+            ? `<p class="text-[11px] text-amber-700 mt-1"><i class="fa-solid fa-triangle-exclamation mr-1"></i>O custo de laudos, visitas e
+               mensalidades está zerado — cadastre em <button onclick="editarPrecos()" class="underline">Preços padrão</button>.</p>` : ''}
+        </div>
       </div>
     </div>
   </div>`;
@@ -10114,7 +10148,8 @@ function abaFechamentoMes(){
               sub: d.cobrado ? 'valor cobrado informado'
                    : `${d.exValidos.length} exames · ${d.lds.length} laudos · ${d.vis.length} visitas${d.carts.length?' · '+d.carts.length+' carteirinhas':''}`,
               icon:'fa-arrow-down', cor:'bg-emerald-50 text-success'})}
-      ${(() => { const t = 'exames' + (d.custoCart ? ' + '+d.carts.length+' carteirinha(s)' : ' laboratoriais + clínico');
+      ${(() => { const t = ['exames', d.custoCart ? 'carteirinhas' : '', d.custoLd ? 'laudos' : '', d.custoVi ? 'visitas' : '',
+                             d.custoMen ? 'mensalidades' : ''].filter(Boolean).join(' + ');
          return card({titulo:'Custo', valor:fmtMoney(d.custo),
            sub:`<span id="cardCustoSel" class="block" data-original="${esc(t)}">${esc(t)}</span>`,
            icon:'fa-arrow-up', cor:'bg-red-50 text-danger'}); })()}
@@ -10226,7 +10261,7 @@ function abaFechamentoMes(){
         <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
           <tr><th class="px-4 py-3 col-uni">Unidade</th><th class="px-4 py-3">Documentos</th>
               <th class="px-4 py-3">Entrega</th><th class="px-4 py-3">Data do faturamento</th>
-              <th class="px-4 py-3">Status</th><th class="px-4 py-3 text-right">Valor</th></tr></thead>
+              <th class="px-4 py-3">Status</th><th class="px-4 py-3 text-right">Custo</th><th class="px-4 py-3 text-right">Valor</th></tr></thead>
         <tbody class="divide-y divide-slate-100">
           ${d.lds.length ? d.lds.map(l => `<tr class="hover:bg-slate-50">
             <td class="px-4 py-3 text-slate-700 col-uni">${esc(uniNome(l.unidadeId))}</td>
@@ -10234,8 +10269,9 @@ function abaFechamentoMes(){
             <td class="px-4 py-3 text-xs whitespace-nowrap">${fmtDate(l.emissao)}</td>
             <td class="px-4 py-3 text-xs whitespace-nowrap">${fmtDate(l.dataFaturamento)}</td>
             <td class="px-4 py-3">${badge(l.pagamento||'Solicitado', l.pagamento==='Entregue'?'bg-emerald-100 text-emerald-700':'bg-amber-100 text-amber-700')}</td>
+            <td class="px-4 py-3 text-right text-xs text-red-600">${fmtMoney(l.custo||0)}</td>
             <td class="px-4 py-3 text-right text-slate-700">${fmtMoney(l.valor||0)}</td></tr>`).join('')
-            : `<tr><td colspan="6" class="px-4 py-6 text-center text-sm text-slate-400">Nenhum laudo faturado neste mês.</td></tr>`}
+            : `<tr><td colspan="7" class="px-4 py-6 text-center text-sm text-slate-400">Nenhum laudo faturado neste mês.</td></tr>`}
         </tbody></table></div>
       <p class="px-5 py-3 text-[11px] text-slate-400 border-t border-slate-100">O valor vem da matriz de <b>Preços por unidade</b> (ou do preço padrão de laudo). Ajuste-o por lá.</p>
     </div>
@@ -10248,10 +10284,11 @@ function abaFechamentoMes(){
       </div>
       <div class="overflow-x-auto"><table class="w-full text-sm data fat-grade">
         <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
-          <tr><th class="px-4 py-3 col-uni">Unidade</th><th class="px-4 py-3 text-right">Valor mensal</th></tr></thead>
+          <tr><th class="px-4 py-3 col-uni">Unidade</th><th class="px-4 py-3 text-right">Custo</th><th class="px-4 py-3 text-right">Valor mensal</th></tr></thead>
         <tbody class="divide-y divide-slate-100">
           ${d.mensais.map(m => `<tr class="hover:bg-slate-50">
             <td class="px-4 py-3 text-slate-700 col-uni">${esc(uniNome(m.unidadeId))}</td>
+            <td class="px-4 py-3 text-right text-xs text-red-600">${fmtMoney(custoMensal(d.mes))}</td>
             <td class="px-4 py-3 text-right">${fmtMoney(m.valor)}</td></tr>`).join('')}
         </tbody></table></div></div>` : ''}
 
@@ -10264,14 +10301,15 @@ function abaFechamentoMes(){
       <div class="overflow-x-auto"><table class="w-full text-sm data fat-grade">
         <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
           <tr><th class="px-4 py-3 col-uni">Unidade</th><th class="px-4 py-3">Data</th><th class="px-4 py-3">Observação</th>
-              <th class="px-4 py-3 text-right">Valor</th></tr></thead>
+              <th class="px-4 py-3 text-right">Custo</th><th class="px-4 py-3 text-right">Valor</th></tr></thead>
         <tbody class="divide-y divide-slate-100">
           ${d.vis.length ? d.vis.map(v => `<tr class="hover:bg-slate-50">
             <td class="px-4 py-3 text-slate-700 col-uni">${esc(uniNome(v.unidadeId))}</td>
             <td class="px-4 py-3 text-xs whitespace-nowrap">${fmtDate(v.data)}</td>
             <td class="px-4 py-3 text-xs text-slate-600">${esc(v.obs||'—')}</td>
+            <td class="px-4 py-3 text-right text-xs text-red-600">${fmtMoney(custoVisita(d.mes))}</td>
             <td class="px-4 py-3 text-right">${fmtMoney(v.valor||0)}</td></tr>`).join('')
-            : `<tr><td colspan="4" class="px-4 py-6 text-center text-sm text-slate-400">Nenhuma visita realizada neste mês. Lance em <button onclick="go('visitas')" class="text-accent underline">Visitas técnicas</button>.</td></tr>`}
+            : `<tr><td colspan="5" class="px-4 py-6 text-center text-sm text-slate-400">Nenhuma visita realizada neste mês. Lance em <button onclick="go('visitas')" class="text-accent underline">Visitas técnicas</button>.</td></tr>`}
         </tbody></table></div></div>
   </div>`;
 
@@ -10643,6 +10681,13 @@ function editarPrecos(){
       { type:'sep', label:'Carteirinha sanitária' },
       { name:'carteirinha', label:'Cobrado da unidade (R$)', type:'number', step:'0.01', hint:'por carteirinha emitida' },
       { name:'carteirinhaCusto', label:'Custo pago à Arys (R$)', type:'number', step:'0.01', hint:'entra no custo do mês' },
+      { type:'sep', label:'Custo dos serviços — o que a Atlas paga para entregar' },
+      { name:'laudoCusto', label:'Custo do laudo PGR + PCMSO + LTCAT (R$)', type:'number', step:'0.01', hint:'por entrega de laudo' },
+      { name:'dispensaCusto', label:'Custo da declaração de dispensa (R$)', type:'number', step:'0.01', hint:'por declaração entregue' },
+      { name:'visitaCusto', label:'Custo da visita técnica (R$)', type:'number', step:'0.01', hint:'por visita realizada' },
+      { name:'mensalCusto', label:'Custo mensal por unidade (R$)', type:'number', step:'0.01', hint:'por unidade que paga mensalidade, a cada mês' },
+      { name:'custoNasFechadas', label:'Aplicar também nas competências já fechadas', type:'checkbox',
+        hint:'grava estes custos dos serviços nos meses fechados; preços de venda e custos de exames congelados não mudam' },
       { type:'html', name:'nota', html:`
         <div class="sm:col-span-2 space-y-2">
           <p class="text-[11px] text-slate-500">Estes são os valores <b>padrão</b>. Para cobrar diferente de uma unidade específica,
@@ -10653,13 +10698,26 @@ function editarPrecos(){
           ${avisoCompetenciasCongeladas()}
         </div>` }
     ],
-    values: Object.assign({}, DB.precos),
+    /* a primeira vez, "aplicar nas fechadas" já vem marcado: era o pedido (29/10/2026) */
+    values: Object.assign({ custoNasFechadas: mesesFechados().some(r => r.tabela && (r.tabela.precos||{}).laudoCusto == null) }, DB.precos),
     onSave: v => {
+      const nasFechadas = !!v.custoNasFechadas;
       DB.precos = { asoLab:Number(v.asoLab)||0, asoClinico:Number(v.asoClinico)||0,
                     laudo:Number(v.laudo)||0, dispensa:Number(v.dispensa)||0,
                     visita:Number(v.visita)||0, mensal:Number(v.mensal)||0,
                     carteirinha:Number(v.carteirinha)||0, carteirinhaCusto:Number(v.carteirinhaCusto)||0 };
-      save(); closeModal(); viewFaturamento(); toast('Tabela de preços atualizada.');
+      CAMPOS_CUSTO_SERV.forEach(([k]) => { DB.precos[k] = Number(v[k]) || 0; });
+      let fechadas = 0;
+      if(nasFechadas){
+        mesesFechados().forEach(r => {
+          if(!r.tabela) return;
+          r.tabela.precos = r.tabela.precos || {};
+          CAMPOS_CUSTO_SERV.forEach(([k]) => { r.tabela.precos[k] = DB.precos[k]; });
+          fechadas++;
+        });
+      }
+      save(); closeModal(); viewFaturamento();
+      toast('Tabela de preços atualizada.' + (fechadas ? ' Custos dos serviços gravados em ' + fechadas + ' competência(s) fechada(s).' : ''));
       avisarValoresForaDaTabela();
     }
   });
@@ -10733,7 +10791,7 @@ const CAMPOS_VENDA = [
   ['dispensa','Declaração de dispensa'], ['visita','Visita técnica'], ['mensal','Valor mensal'],
   ['carteirinha','Carteirinha (cobrada da unidade)']
 ];
-const UIReaj = { desde:'', pctVenda:'', pctCusto:'', unidades:false, venda:{}, cart:'', exames:{} };
+const UIReaj = { desde:'', pctVenda:'', pctCusto:'', unidades:false, venda:{}, cart:'', exames:{}, serv:{} };
 
 function reajustes(){
   if(!Array.isArray(DB.reajustes)) DB.reajustes = [];
@@ -10842,6 +10900,10 @@ function montarTabelaReajuste(){
     if(n !== '' && n != null && !isNaN(Number(n))) precos[k] = r2(n);
   });
   if(UIReaj.cart !== '' && UIReaj.cart != null && !isNaN(Number(UIReaj.cart))) precos.carteirinhaCusto = r2(UIReaj.cart);
+  CAMPOS_CUSTO_SERV.forEach(([k]) => {
+    const n = (UIReaj.serv || {})[k];
+    if(n !== '' && n != null && !isNaN(Number(n))) precos[k] = r2(n);
+  });
   const precosUnidade = clonar(base.precosUnidade);
   const pv = Number(UIReaj.pctVenda);
   if(UIReaj.unidades && pv){
@@ -10864,6 +10926,7 @@ function mudancasTabela(a, b){
   const add = (rotulo, de, para, uni) => { if(val(de) !== val(para)) out.push({ rotulo, de:val(de), para:val(para), uni: uni || '' }); };
   CAMPOS_VENDA.forEach(([k, l]) => add('Venda · ' + l, (a.precos||{})[k], (b.precos||{})[k]));
   add('Custo · Carteirinha (pago à Arys)', (a.precos||{}).carteirinhaCusto, (b.precos||{}).carteirinhaCusto);
+  CAMPOS_CUSTO_SERV.forEach(([k, l]) => add('Custo · ' + l, (a.precos||{})[k], (b.precos||{})[k]));
   const us = new Set(Object.keys(a.precosUnidade||{}).concat(Object.keys(b.precosUnidade||{})));
   us.forEach(u => {
     const oa = (a.precosUnidade||{})[u] || {}, ob = (b.precosUnidade||{})[u] || {};
@@ -11104,12 +11167,13 @@ function preencherPctReaj(qual){
   if(qual === 'venda') CAMPOS_VENDA.forEach(([k]) => { UIReaj.venda[k] = r2((Number(DB.precos[k]) || 0) * f); });
   else{
     UIReaj.cart = r2((Number(DB.precos.carteirinhaCusto) || 0) * f);
+    UIReaj.serv = {}; CAMPOS_CUSTO_SERV.forEach(([k]) => { UIReaj.serv[k] = r2((Number(DB.precos[k]) || 0) * f); });
     (DB.exames || []).forEach(e => { UIReaj.exames[e.id] = r2((Number(e.custo) || 0) * f); });
   }
   viewFaturamento();
 }
 function limparReaj(){
-  Object.assign(UIReaj, { pctVenda:'', pctCusto:'', unidades:false, venda:{}, cart:'', exames:{} });
+  Object.assign(UIReaj, { pctVenda:'', pctCusto:'', unidades:false, venda:{}, cart:'', exames:{}, serv:{} });
   viewFaturamento();
 }
 function abaReajustes(){
@@ -11185,6 +11249,7 @@ function abaReajustes(){
             </div>
             <div class="overflow-x-auto border border-slate-200 rounded-lg max-h-[380px] overflow-y-auto"><table class="w-full">${cab}<tbody class="divide-y divide-slate-100">
               ${linha('Carteirinha sanitária', DB.precos.carteirinhaCusto, UIReaj.cart, 'UIReaj.cart=this.value')}
+              ${CAMPOS_CUSTO_SERV.map(([k, l]) => linha(l, DB.precos[k] || 0, (UIReaj.serv || {})[k], `UIReaj.serv['${k}']=this.value`)).join('')}
               ${exames.map(e => linha(e.nome, e.custo, UIReaj.exames[e.id], `UIReaj.exames['${e.id}']=this.value`)).join('')}
             </tbody></table></div>
           </div>
@@ -11491,14 +11556,14 @@ function exportarFaturamento(){
       FLUXO_LABEL[e.status]||e.status,
       naoCompareceu(e) ? 0 : custoEmissao(e, d.mes), naoCompareceu(e) ? 0 : (Number(e.valor)||0)])
     .concat(d.lds.map(l => ['Laudo', docsLabel(l.documentos), uniNome(l.unidadeId), '', '',
-      fmtDate(l.dataFaturamento), l.pagamento||'Solicitado', 0, Number(l.valor)||0]))
+      fmtDate(l.dataFaturamento), l.pagamento||'Solicitado', Number(l.custo)||0, Number(l.valor)||0]))
     .concat(d.vis.map(v => ['Visita técnica', v.obs||'', uniNome(v.unidadeId), '', '',
-      fmtDate(v.data), '', 0, Number(v.valor)||0]))
+      fmtDate(v.data), '', custoVisita(d.mes), Number(v.valor)||0]))
     .concat(d.carts.map(e => ['Carteirinha sanitária', e.colaborador, uniNome(e.unidadeId), '', '',
       fmtDate(e.dataClinico||e.dataLab) || mesLabel(e.fechamento), 'Emitida',
       custoCarteirinha(d.mes), precoCarteirinha(e.unidadeId, d.mes)]))
     .concat(d.mensais.map(m => ['Mensalidade', '', uniNome(m.unidadeId), '', '',
-      mesLabel(d.mes), '', 0, Number(m.valor)||0]));
+      mesLabel(d.mes), '', custoMensal(d.mes), Number(m.valor)||0]));
   linhas.push(['TOTAIS','','','','','','', d.custo, d.receita]);
   linhas.push(['MARGEM','','','','','','','', d.margem]);
   exportCSV('faturamento-' + d.mes,
