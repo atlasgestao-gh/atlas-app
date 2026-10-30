@@ -113,9 +113,9 @@ tailwind.config = {
   <div id="banner" class="no-print"></div>
   <main id="view" class="flex-1 p-4 sm:p-6"></main>
 
-  <!-- 2026.10.30-c4ba7b4 é preenchido no build: data + commit do código publicado -->
+  <!-- 2026.10.30-330f0f1 é preenchido no build: data + commit do código publicado -->
   <footer class="px-6 py-4 text-[11px] text-slate-500 border-t border-slate-200 bg-white no-print">
-    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.30-c4ba7b4
+    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.30-330f0f1
     <span id="rodapePlanilha" class="hidden"> ·
       <button onclick="sincronizarPlanilha()" class="underline hover:text-accent">sincronizar novidades da planilha</button>
       ·
@@ -13907,7 +13907,8 @@ function admDaLinha(r){
            fichaEm:r.ficha_em || '', contratoEm:r.contrato_em || '',
            cadastroPedidoEm:r.cadastro_pedido_em || '', cadastroPedidoPor:r.cadastro_pedido_por || '',
            colaboradorId:r.colaborador_id || '', asoPedidoEm:r.aso_pedido_em || '',
-           expurgadoEm:r.expurgado_em || '', criadoPor:r.criado_por || '', criadoEm:r.criado_em || '' };
+           expurgadoEm:r.expurgado_em || '', criadoPor:r.criado_por || '', criadoEm:r.criado_em || '',
+           dePara:r.de_para || null, deParaEm:r.de_para_em || '', deParaAplicadoEm:r.de_para_aplicado_em || '' };
 }
 function linhaDaAdm(a){
   return { id:a.id, unidade_id:a.unidadeId, cpf:cpfDigitos(a.cpf), nome:a.nome, funcao:a.funcao || null,
@@ -13915,6 +13916,7 @@ function linhaDaAdm(a){
            ficha_em:a.fichaEm || null, contrato_em:a.contratoEm || null,
            cadastro_pedido_em:a.cadastroPedidoEm || null, cadastro_pedido_por:a.cadastroPedidoPor || null,
            colaborador_id:a.colaboradorId || null, aso_pedido_em:a.asoPedidoEm || null,
+           de_para:a.dePara || null, de_para_em:a.deParaEm || null, de_para_aplicado_em:a.deParaAplicadoEm || null,
            criado_por:a.criadoPor || String(SESSAO.email||'').toLowerCase(),
            atualizado_por:String(SESSAO.email||'').toLowerCase(), atualizado_em:new Date().toISOString() };
 }
@@ -13938,6 +13940,7 @@ async function admSalvar(a, completa){
     else r = await sb.from('atlas_admissao').update({
       ficha_em:l.ficha_em, contrato_em:l.contrato_em, cadastro_pedido_em:l.cadastro_pedido_em,
       cadastro_pedido_por:l.cadastro_pedido_por, colaborador_id:l.colaborador_id, aso_pedido_em:l.aso_pedido_em,
+      de_para:l.de_para, de_para_em:l.de_para_em, de_para_aplicado_em:l.de_para_aplicado_em,
       atualizado_por:l.atualizado_por, atualizado_em:l.atualizado_em }).eq('id', a.id);
     if(r.error) return { ok:false, motivo:r.error.message };
     return { ok:true };
@@ -14066,6 +14069,7 @@ function admEnriquecerColab(c){
    cadastro que não foi digitado pela Atlas. */
 async function admAplicarPendentes(){
   if(!ACESSO.irrestrito) return 0;
+  await admAplicarDeParaPendentes();
   /* pedidos antigos (antes de 18/10 a equipe só pedia) e, nos últimos 7 dias,
      quem a equipe inseriu mas uma sessão da Atlas aberta antes regravou por cima */
   const recente = a => (Date.now() - Date.parse(a.cadastroPedidoEm || 0)) < 7 * 86400000;
@@ -14420,9 +14424,203 @@ async function admSalvarForm(depois){
   UIAdm.edit = { id:a.id };
   admRenderForm(true);      /* o cabeçalho e a situação mudam ao salvar; os campos voltam iguais */
   if(depois === 'ficha'){ admImprimirFicha(a.id); return; }
-  if(depois === 'contrato'){ admAbrirContrato(a.id); return; }
-  if(depois === 'aso'){ admPedirAso(a.id); return; }
+  if(depois === 'contrato' || depois === 'aso'){
+    if(!(await admResolverExistente(a))) return;
+    if(depois === 'contrato') admAbrirContrato(a.id); else admPedirAso(a.id);
+    return;
+  }
   toast('Admissão de ' + a.nome + ' salva.');
+}
+
+/* ───────────── CPF que já está no cadastro: tela De/Para ─────────────
+   Pedido da Jessica (30/10/2026). Antes, a ficha só se ligava ao cadastro
+   antigo e nada mudava — recontratado seguia Desligado, transferido seguia na
+   unidade velha. Agora quem admite decide, campo a campo, o que fica; a troca
+   de unidade e o status são perguntas obrigatórias quando há o que decidir.
+   A Atlas grava no cadastro na hora. A equipe de RH não grava no cadastro: a
+   decisão fica na admissão (sql/11) e a sessão da Atlas aplica ao abrir. */
+const ADM_DP_CAMPOS = [
+  ['nome','Nome'], ['rg','RG'], ['nascimento','Nascimento', 'data'], ['sexo','Sexo'],
+  ['celular','Celular'], ['email','E-mail'], ['funcao','Função'], ['admissao','Data de admissão', 'data']
+];
+/* a equipe de RH só enxerga, do cadastro antigo, o que o quadro dela mostra */
+const ADM_DP_CAMPOS_RH = ['nome','funcao','admissao'];
+let _admDp = null;
+
+async function admExistentePorCpf(a){
+  if(ACESSO.irrestrito || !nuvemLigada()) return colabPorCpf(a.cpf, null);
+  try{
+    const { data, error } = await sb.rpc('atlas_admissao_cpf', { p_cpf:cpfDigitos(a.cpf) });
+    if(error){ console.warn('atlas_admissao_cpf', error.message); return admNoCadastro(a); }
+    const x = (data || [])[0];
+    return x ? { id:x.colaborador_id, unidadeId:x.unidade_id, unidadeNome:x.unidade_nome, nome:x.nome || '',
+                 funcao:x.funcao || '', admissao:x.admissao || '', status:x.status || '' } : null;
+  }catch(e){ return admNoCadastro(a); }
+}
+function admValoresDaFicha(a){
+  const v = admParaColab(a);
+  v.funcao = v.funcao || a.funcao || '';
+  return v;
+}
+/* devolve true para seguir (contrato / ASO) e false se a pessoa desistiu */
+async function admResolverExistente(a){
+  if(a.deParaEm) return true;                      /* já decidido nesta admissão */
+  const c = await admExistentePorCpf(a);
+  if(!c) return true;                              /* pessoa nova: segue como sempre */
+  const rh = ACESSO.admissao && nuvemLigada();
+  const fic = admValoresDaFicha(a);
+  const campos = ADM_DP_CAMPOS.filter(([k]) => !rh || ADM_DP_CAMPOS_RH.includes(k));
+  const igual = (k, x, y) => k === 'nome' ? norm(x||'') === norm(y||'')
+                           : k === 'funcao' ? norm(funcaoCanonica(x||'')) === norm(funcaoCanonica(y||''))
+                           : String(x||'').trim() === String(y||'').trim();
+  const difs = campos.filter(([k]) => (fic[k]||'') !== '' && !igual(k, c[k], fic[k]));
+  const outraUni = c.unidadeId !== a.unidadeId;
+  const status = c.status || 'Ativo';
+  if(!difs.length && !outraUni && status === 'Ativo'){
+    a.colaboradorId = c.id; a.deParaEm = new Date().toISOString();
+    a.dePara = { semMudanca:true }; a.deParaAplicadoEm = a.deParaEm;
+    admAvisarFalha(await admSalvar(a), 'o vínculo com o cadastro');
+    return true;
+  }
+  return new Promise(resolve => {
+    _admDp = { a, c, fic, difs, outraUni, status, rh, resolve };
+    admRenderDePara();
+  });
+}
+function admDpFmt(k, v, campo){
+  if(v == null || v === '') return '<span class="text-slate-400">—</span>';
+  return esc(campo && campo[2] === 'data' ? fmtDate(v) : v);
+}
+function admRenderDePara(){
+  const { a, c, fic, difs, outraUni, status, rh } = _admDp;
+  const uniDe = c.unidadeNome || admUniNome(c.unidadeId);
+  const inativo = status !== 'Ativo';
+  const opc = (nome, valor, rotulo, marcado) => `
+    <label class="flex items-center gap-2 cursor-pointer">
+      <input type="radio" name="${nome}" value="${esc(valor)}" ${marcado ? 'checked' : ''} class="accent-[#3f3f43]">
+      <span>${rotulo}</span></label>`;
+  const linhas = difs.map(campo => {
+    const [k, rot] = campo;
+    return `
+      <tr class="align-top">
+        <td class="px-3 py-2 text-xs font-semibold text-slate-600 whitespace-nowrap">${esc(rot)}</td>
+        <td class="px-3 py-2">${admDpFmt(k, c[k], campo)}</td>
+        <td class="px-3 py-2 font-medium text-slate-800">${admDpFmt(k, fic[k], campo)}</td>
+        <td class="px-3 py-2 text-xs space-y-1">
+          ${opc('dp_' + k, 'ficha', 'Usar a da ficha', true)}
+          ${opc('dp_' + k, 'manter', 'Manter a de hoje', false)}
+        </td>
+      </tr>`;
+  }).join('');
+  openInfo('Esta pessoa já está no cadastro', `
+    <div class="space-y-4 text-sm text-slate-700">
+      <p><b>${esc(c.nome || a.nome)}</b> (CPF ${esc(admCpfFmt(a.cpf))}) já existe no cadastro de colaboradores.
+         Escolha o que fica antes de seguir. Nada muda até você confirmar.</p>
+
+      ${outraUni ? `
+      <div class="rounded-lg border-2 border-amber-300 bg-amber-50 p-3 space-y-2">
+        <p class="font-semibold text-amber-900"><i class="fa-solid fa-building mr-1"></i>Unidade diferente</p>
+        <p class="text-xs text-amber-900">Hoje está em <b>${esc(uniDe)}</b>; a ficha é para <b>${esc(admUniNome(a.unidadeId))}</b>.</p>
+        <div class="text-xs space-y-1">
+          ${opc('dp_unidade', 'ficha', 'Transferir para <b>' + esc(admUniNome(a.unidadeId)) + '</b>', false)}
+          ${opc('dp_unidade', 'manter', 'Manter em <b>' + esc(uniDe) + '</b>', false)}
+        </div>
+      </div>` : ''}
+
+      <div class="rounded-lg border-2 ${inativo ? 'border-amber-300 bg-amber-50' : 'border-slate-200'} p-3 space-y-2">
+        <p class="font-semibold ${inativo ? 'text-amber-900' : 'text-slate-700'}"><i class="fa-solid fa-user-check mr-1"></i>Status</p>
+        <p class="text-xs ${inativo ? 'text-amber-900' : 'text-slate-500'}">Hoje: <b>${esc(status)}</b>.
+          ${inativo ? 'Se ficar assim, a pessoa continua fora das listas de ativos e dos alertas de vencimento.' : ''}</p>
+        <div class="flex flex-wrap gap-x-5 gap-y-1 text-xs">
+          ${STATUS_COLAB.map(s => opc('dp_status', s, s, !inativo && s === status)).join('')}
+        </div>
+      </div>
+
+      ${difs.length ? `
+      <div class="border border-slate-200 rounded-lg overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
+            <tr><th class="px-3 py-2">Campo</th><th class="px-3 py-2">De (hoje no cadastro)</th>
+                <th class="px-3 py-2">Para (na ficha)</th><th class="px-3 py-2">Fica</th></tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">${linhas}</tbody>
+        </table>
+      </div>` : `<p class="text-xs text-slate-500">Os demais dados da ficha são iguais aos do cadastro.</p>`}
+
+      ${rh ? `<p class="text-xs text-slate-500">A Atlas grava essas escolhas no cadastro quando abrir o sistema.
+               Os campos que a ficha preencher e o cadastro tiver em branco (RG, contato…) são completados.</p>`
+           : `<p class="text-xs text-slate-500">Campos que o cadastro tem em branco e a ficha preencheu são completados sem perguntar.</p>`}
+      <p id="dpErro" class="text-xs text-danger font-semibold hidden"></p>
+    </div>`, 'max-w-3xl');
+  $('#modalFoot').innerHTML = `
+    <button onclick="admDeParaCancelar()" class="px-4 py-2 rounded-lg text-sm text-slate-600 hover:bg-slate-100">Cancelar</button>
+    <button onclick="admDeParaConfirmar()" class="px-4 py-2 rounded-lg text-sm bg-accent text-white hover:bg-blue-700">Confirmar e continuar</button>`;
+}
+function admDeParaCancelar(){
+  const d = _admDp; _admDp = null; closeModal();
+  if(d){ toast('Nada mudou no cadastro. A ficha ficou salva.', 'info'); d.resolve(false); }
+}
+async function admDeParaConfirmar(){
+  const d = _admDp; if(!d) return;
+  const val = n => { const el = document.querySelector('input[name="' + n + '"]:checked'); return el ? el.value : ''; };
+  const erro = m => { const e = $('#dpErro'); e.textContent = m; e.classList.remove('hidden'); };
+  const uniEsc = d.outraUni ? val('dp_unidade') : 'manter';
+  if(!uniEsc) return erro('Escolha se a pessoa muda de unidade ou fica onde está.');
+  const status = val('dp_status');
+  if(!status) return erro('Escolha o status da pessoa.');
+  /* o que vale de cada campo: só os que diferem entram na decisão */
+  const decisao = { status, unidadeId: uniEsc === 'ficha' ? d.a.unidadeId : d.c.unidadeId, campos:{} };
+  d.difs.forEach(([k]) => { if(val('dp_' + k) !== 'manter') decisao.campos[k] = d.fic[k]; });
+  const a = d.a, agora = new Date().toISOString();
+  a.colaboradorId = d.c.id; a.deParaEm = agora;
+  a.dePara = { status:decisao.status, unidadeId:decisao.unidadeId, campos:
+    Object.fromEntries(Object.entries(decisao.campos).filter(([k]) => ADM_DP_CAMPOS_RH.includes(k))) };
+  let eco = '';
+  if(!d.rh){
+    eco = admAplicarDecisao(a, decisao);
+    a.deParaAplicadoEm = agora;
+  }else if(ADM_QUADRO){
+    const q = ADM_QUADRO.find(x => x.id === d.c.id);
+    if(q) Object.assign(q, { status:decisao.status, unidadeId:decisao.unidadeId }, a.dePara.campos);
+  }
+  _admDp = null; closeModal();
+  admAvisarFalha(await admSalvar(a), 'a decisão sobre o cadastro');
+  registrarAtividade('admissao_de_para', { admissao_id:a.id, colaborador_id:d.c.id, status:decisao.status,
+                                          unidade:decisao.unidadeId, campos:Object.keys(decisao.campos) });
+  toast(d.rh ? 'Escolhas guardadas. A Atlas atualiza o cadastro de ' + a.nome + ' ao abrir o sistema.'
+             : 'Cadastro de ' + a.nome + ' atualizado.' + eco, 'ok');
+  d.resolve(true);
+}
+/* grava a decisão no cadastro (só na sessão da Atlas). Campos em branco no
+   cadastro e preenchidos na ficha entram sem perguntar. */
+function admAplicarDecisao(a, decisao){
+  const c = colab(a.colaboradorId) || colabPorCpf(a.cpf, null);
+  if(!c) return '';
+  const antes = Object.assign({}, c);
+  const fic = admValoresDaFicha(a);
+  ['rg','nascimento','sexo','celular','email','admissao','funcao'].forEach(k => { if(!c[k] && fic[k]) c[k] = fic[k]; });
+  Object.entries(decisao.campos || {}).forEach(([k, v]) => { c[k] = k === 'nome' ? maiusc(v) : v; });
+  if(decisao.unidadeId && uni(decisao.unidadeId)) c.unidadeId = decisao.unidadeId;
+  if(decisao.status && decisao.status !== c.status){
+    c.notaStatus = 'de ' + (antes.status || '—') + ' para ' + decisao.status + ' na admissão de ' +
+                   fmtDate(isoToday()) + (SESSAO.email ? ' · ' + String(SESSAO.email).toLowerCase() : '');
+    c.status = decisao.status;
+  }
+  let eco = propagarColaborador(c, antes);
+  if(ajustarValidadeAso(c)) eco += ' Vencimento do ASO recalculado.';
+  save();
+  return eco;
+}
+/* decisões da equipe de RH que ainda não chegaram ao cadastro */
+async function admAplicarDeParaPendentes(){
+  const pend = ADMISSOES.filter(a => a.deParaEm && !a.deParaAplicadoEm && a.dePara && !a.dePara.semMudanca);
+  for(const a of pend){
+    if(!colab(a.colaboradorId) && !colabPorCpf(a.cpf, null)) continue;
+    admAplicarDecisao(a, a.dePara);
+    a.deParaAplicadoEm = new Date().toISOString();
+    await admSalvar(a);
+  }
+  if(pend.length) setTimeout(() => toast(pend.length + ' atualização(ões) de cadastro vindas das admissões foram aplicadas.', 'info'), 2600);
 }
 
 function admExcluir(id){
