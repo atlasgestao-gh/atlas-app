@@ -113,9 +113,9 @@ tailwind.config = {
   <div id="banner" class="no-print"></div>
   <main id="view" class="flex-1 p-4 sm:p-6"></main>
 
-  <!-- 2026.10.30-b00cdf9 é preenchido no build: data + commit do código publicado -->
+  <!-- 2026.10.30-f4fe428 é preenchido no build: data + commit do código publicado -->
   <footer class="px-6 py-4 text-[11px] text-slate-500 border-t border-slate-200 bg-white no-print">
-    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.30-b00cdf9
+    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.30-f4fe428
     <span id="rodapePlanilha" class="hidden"> ·
       <button onclick="sincronizarPlanilha()" class="underline hover:text-accent">sincronizar novidades da planilha</button>
       ·
@@ -1191,6 +1191,7 @@ async function bootStorage(){
   migrarSemTelefone(DB);
   migrarHistoricoAsos(DB);
   migrarCustoLaudoFechados(DB);
+  migrarValidadeAso(DB);
 
   /* nuvem ligada mas a cópia mais recente veio de outra camada → sobe p/ nuvem */
   if(CLOUD_ON && candidatos[0].fonte !== 'nuvem') nuvemGravar(true);
@@ -4359,8 +4360,8 @@ function abaUnidades(){
                   <p class="font-medium text-slate-700">${esc(u.nome)}
                     ${(u.carteirinhaFuncoes||[]).length ? `<span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-teal-100 text-teal-700"
                       title="Carteirinha sanitária exigida em: ${esc((u.carteirinhaFuncoes||[]).join(', '))}"><i class="fa-solid fa-id-card mr-0.5"></i>carteirinha (${u.carteirinhaFuncoes.length})</span>` : ''}
-                    ${(u.asoSemestralFuncoes||[]).length ? `<span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700"
-                      title="ASO a cada 6 meses em: ${esc((u.asoSemestralFuncoes||[]).join(', '))}"><i class="fa-solid fa-rotate mr-0.5"></i>ASO 6 meses (${u.asoSemestralFuncoes.length})</span>` : ''}</p>
+                    ${(u.asoValidades||[]).length ? `<span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700"
+                      title="Validade do ASO diferente de 12 meses: ${esc((u.asoValidades||[]).map(r => r.funcao + ' (' + r.meses + ' m)').join(', '))}"><i class="fa-solid fa-rotate mr-0.5"></i>validade própria (${u.asoValidades.length})</span>` : ''}</p>
                   <p class="text-[11px] text-slate-500">${esc(u.sigla)} · ${esc(u.cidade||'—')}${u.uf?' / '+esc(u.uf):''}</p>
                 </td>
                 <td class="px-4 py-3 text-xs text-slate-600">${esc((emp(u.empresaId)||{}).nome||'—')}</td>
@@ -4657,6 +4658,38 @@ async function excluirUnidade(id){
 }
 
 let _unidadeEditId = null;
+/* bloco "validade do ASO" do formulário da unidade: uma linha por função */
+function linhaValidadeAso(r){
+  r = r || {};
+  const cls = 'border border-slate-300 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-accent/40';
+  return `<div class="flex items-center gap-2 linha-validade">
+    <select class="val-funcao ${cls} flex-1 min-w-0"><option value="">— função —</option>
+      ${funcoesCanonicasCadastradas().map(f => `<option value="${esc(f)}" ${norm(f) === norm(funcaoCanonica(r.funcao || '')) ? 'selected' : ''}>${esc(f)}</option>`).join('')}</select>
+    <input type="number" min="1" max="60" step="1" class="val-meses ${cls} w-20 text-right" value="${esc(r.meses || '')}" placeholder="meses">
+    <span class="text-xs text-slate-500 w-12">meses</span>
+    <button type="button" onclick="this.closest('.linha-validade').remove()" class="text-slate-400 hover:text-danger px-1" title="Tirar"><i class="fa-solid fa-xmark"></i></button>
+  </div>`;
+}
+function blocoValidadesAso(u){
+  const regras = (u && u.asoValidades) || [];
+  return `<div class="sm:col-span-2">
+    <label class="block text-xs font-medium text-slate-600 mb-1">Validade do ASO por função nesta unidade</label>
+    <div id="listaValidades" class="space-y-2">${regras.map(linhaValidadeAso).join('')}</div>
+    <button type="button" onclick="document.getElementById('listaValidades').insertAdjacentHTML('beforeend', linhaValidadeAso())"
+      class="mt-2 px-3 py-1.5 rounded-lg text-xs border border-slate-300 hover:bg-slate-50"><i class="fa-solid fa-plus mr-1"></i>Adicionar função</button>
+    <p class="text-[11px] text-slate-400 mt-1">O padrão é <b>12 meses</b>. Adicione só as funções que, NESTA unidade, renovam em outro prazo
+      (1 = mensal, 6, 7, 8...).</p>
+  </div>`;
+}
+function lerValidadesAso(){
+  const vistas = new Set(), out = [];
+  document.querySelectorAll('#listaValidades .linha-validade').forEach(l => {
+    const funcao = l.querySelector('.val-funcao').value, meses = Math.round(Number(l.querySelector('.val-meses').value));
+    if(!funcao || !(meses > 0) || meses === VALIDADE_PADRAO_ASO || vistas.has(norm(funcao))) return;
+    vistas.add(norm(funcao)); out.push({ funcao, meses: Math.min(meses, 60) });
+  });
+  return out;
+}
 function editarUnidade(id, prefill){
   _unidadeEditId = id || null;
   const u = id ? uni(id) : null;
@@ -4686,9 +4719,7 @@ function editarUnidade(id, prefill){
       { name:'carteirinhaFuncoes', label:'Funções que exigem carteirinha sanitária nesta unidade', type:'multi',
         col:'sm:col-span-2', options: funcoesCanonicasCadastradas(),
         hint:'marque só as funções exigidas — deixe vazio se a unidade não precisa' },
-      { name:'asoSemestralFuncoes', label:'Funções com ASO a cada 6 meses nesta unidade', type:'multi',
-        col:'sm:col-span-2', options: funcoesCanonicasCadastradas(),
-        hint:'o padrão é 1 ano — marque só as funções que, NESTA unidade, renovam a cada 6 meses' },
+      { type:'html', name:'validadesAso', html: blocoValidadesAso(u) },
       { type:'sep', label:'Clínica credenciada (onde o colaborador faz o exame)' },
       { name:'clinicaId', label:'Clínica', type:'select', options: opcoesCli, col:'sm:col-span-2',
         hint:'cadastre novas em Empresas › Clínicas credenciadas' },
@@ -4714,7 +4745,7 @@ function editarUnidade(id, prefill){
         nome:v.nome, sigla:v.sigla, empresaId:v.empresaId, cnpj:v.cnpj, cidade:v.cidade, uf:v.uf,
         aliases: v.aliases ? v.aliases.split(',').map(s => s.trim()).filter(Boolean) : [],
         carteirinhaFuncoes: v.carteirinhaFuncoes || [],
-        asoSemestralFuncoes: v.asoSemestralFuncoes || [],
+        asoValidades: lerValidadesAso(),
         clinicaId: v.clinicaId
       };
       let alvo = u;
@@ -5827,19 +5858,24 @@ function funcoesForaCatalogo(){
   });
   return [...mapa.values()].sort((a,b) => b.n - a.n || a.nome.localeCompare(b.nome,'pt-BR'));
 }
-/* ═════ ASO SEMESTRAL (Jessica, 30/10/2026) ═════
-   O padrão é o ASO valer 1 ano. A UNIDADE marca as funções que, nela, renovam
-   a cada 6 meses — a mesma função pode ser semestral numa unidade e anual em
-   outra. Mesma lógica (e mesmo lugar na tela) da carteirinha sanitária.
-   O ASO guarda `validadeMeses` (6 ou 12) para a regra ser reaplicada quando a
-   unidade mudar a lista ou a pessoa trocar de função/unidade. */
-function asoSemestral(unidadeId, funcao){
+/* ═════ VALIDADE DO ASO POR FUNÇÃO E UNIDADE (Jessica, 30/10/2026) ═════
+   O padrão é o ASO valer 12 meses. A UNIDADE pode dizer, função por função,
+   outra validade — 1, 6, 7, 8 meses... — e a mesma função pode ter validades
+   diferentes em unidades diferentes. Fica em u.asoValidades = [{funcao, meses}].
+   O ASO guarda `validadeMeses` para a regra ser reaplicada quando a unidade
+   mudar a lista ou a pessoa trocar de função/unidade. */
+const VALIDADE_PADRAO_ASO = 12;
+function regraValidadeAso(unidadeId, funcao){
   const u = uni(unidadeId);
-  if(!u || !funcao) return false;
+  if(!u || !funcao) return null;
   const alvo = norm(funcaoCanonica(funcao));
-  return (u.asoSemestralFuncoes||[]).some(f => norm(funcaoCanonica(f)) === alvo);
+  return (u.asoValidades || []).find(r => norm(funcaoCanonica(r.funcao)) === alvo && Number(r.meses) > 0) || null;
 }
-function mesesValidadeAso(unidadeId, funcao){ return asoSemestral(unidadeId, funcao) ? 6 : 12; }
+function mesesValidadeAso(unidadeId, funcao){
+  const r = regraValidadeAso(unidadeId, funcao);
+  return r ? Number(r.meses) : VALIDADE_PADRAO_ASO;
+}
+function rotuloValidade(meses){ return Number(meses) === 1 ? 'mensal' : 'a cada ' + meses + ' meses'; }
 function addMeses(iso, n){
   const d = parseISO(iso); if(!d) return '';
   const dia = d.getDate();
@@ -5847,20 +5883,31 @@ function addMeses(iso, n){
   d.setDate(Math.min(dia, new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()));
   return toISO(d);
 }
-/* 1 ano continua sendo +365 dias, como sempre foi; 6 meses é pelo calendário */
+/* 12 meses continua sendo +365 dias, como sempre foi; o resto é pelo calendário */
 function vencimentoAso(dataExame, unidadeId, funcao){
   if(!dataExame) return '';
-  return asoSemestral(unidadeId, funcao) ? addMeses(dataExame, 6) : addDays(dataExame, 365);
+  const m = mesesValidadeAso(unidadeId, funcao);
+  return m === VALIDADE_PADRAO_ASO ? addDays(dataExame, 365) : addMeses(dataExame, m);
 }
 /* reaplica a regra no ASO vigente; devolve true se mudou */
 function ajustarValidadeAso(c){
   const a = c && asoVigente(c.id);
   if(!a || !a.dataExame || a.tipo === 'DEMISSIONAL') return false;
   const meses = mesesValidadeAso(c.unidadeId, c.funcao);
-  if(meses === (a.validadeMeses === 6 ? 6 : 12)) return false;
+  if(meses === (Number(a.validadeMeses) || VALIDADE_PADRAO_ASO)) return false;
   a.validadeMeses = meses;
   a.vencimento = vencimentoAso(a.dataExame, c.unidadeId, c.funcao);
   return true;
+}
+/* a versão de ontem guardava só "6 meses" numa lista de funções */
+function migrarValidadeAso(d){
+  (d.unidades || []).forEach(u => {
+    if(!Array.isArray(u.asoSemestralFuncoes)) return;
+    u.asoValidades = (u.asoValidades || []).concat(u.asoSemestralFuncoes
+      .filter(f => !(u.asoValidades || []).some(r => norm(r.funcao) === norm(f)))
+      .map(f => ({ funcao:f, meses:6 })));
+    delete u.asoSemestralFuncoes;
+  });
 }
 function unidadeExigeCarteirinha(unidadeId, funcao){
   const u = uni(unidadeId);
@@ -7492,7 +7539,7 @@ function editarColab(id, pre){
         options:[{ v:'', l:'— sem ASO registrado —' }].concat(
           Object.keys(TIPOS).map(t => ({ v:t, l:TIPOS[t] }))) },
       { name:'asoData', label:'Data do exame', type:'date',
-        hint:'o vencimento é calculado 1 ano depois — ou 6 meses, se a unidade marcar a função como semestral' },
+        hint:'o vencimento é calculado 1 ano depois — ou no prazo que a unidade definir para a função' },
       { type:'painel', name:'painelAso', col:'sm:col-span-2' },
 
       { type:'painel', name:'painelExames' }
@@ -7536,8 +7583,8 @@ function editarColab(id, pre){
           const venc = vencimentoAso(dAso.value, un, fu);
           const s = semaforo(venc);
           boxAso.innerHTML = `<div class="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600">
-            Vencimento: <b>${esc(fmtDate(venc))}</b> ${badge(s.label, s.cls)}${asoSemestral(un, fu)
-              ? ' <span class="text-indigo-700">· ASO a cada 6 meses nesta unidade</span>' : ''}</div>`;
+            Vencimento: <b>${esc(fmtDate(venc))}</b> ${badge(s.label, s.cls)}${regraValidadeAso(un, fu)
+              ? ' <span class="text-indigo-700">· ASO ' + rotuloValidade(mesesValidadeAso(un, fu)) + ' nesta unidade</span>' : ''}</div>`;
         }else if(tAso.value || dAso.value){
           boxAso.innerHTML = `<div class="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
             <i class="fa-solid fa-triangle-exclamation mr-1"></i>Preencha o tipo <b>e</b> a data —
@@ -9650,7 +9697,7 @@ function abaAsos(){
                 <td class="px-4 py-3 text-xs text-slate-600">${esc(c.funcao||'—')}</td>
                 <td class="px-4 py-3 text-xs">${esc(tipoLabel(a.tipo))}
                     ${a.origemEmissaoId?'<span class="ml-1 text-[10px] px-1 rounded bg-blue-100 text-blue-700" title="Gerado pelo módulo de exames">exame</span>':''}
-                    ${a.validadeMeses === 6 ? '<span class="ml-1 text-[10px] px-1 rounded bg-indigo-100 text-indigo-700" title="Esta função renova o ASO a cada 6 meses nesta unidade">6 meses</span>' : ''}</td>
+                    ${a.validadeMeses && Number(a.validadeMeses) !== VALIDADE_PADRAO_ASO ? '<span class="ml-1 text-[10px] px-1 rounded bg-indigo-100 text-indigo-700" title="Validade definida pela unidade para esta função">' + esc(rotuloValidade(a.validadeMeses)) + '</span>' : ''}</td>
                 <td class="px-4 py-3 text-xs whitespace-nowrap">${fmtDate(a.dataExame)}</td>
                 <td class="px-4 py-3 text-xs whitespace-nowrap font-medium">${fmtDate(a.vencimento)}</td>
                 <td class="px-4 py-3 text-xs font-semibold ${s.key==='vencido'?'text-danger':s.key==='avencer'?'text-warning':'text-slate-600'}">
