@@ -113,9 +113,9 @@ tailwind.config = {
   <div id="banner" class="no-print"></div>
   <main id="view" class="flex-1 p-4 sm:p-6"></main>
 
-  <!-- 2026.10.30-fe11ce7 é preenchido no build: data + commit do código publicado -->
+  <!-- 2026.10.30-c4ba7b4 é preenchido no build: data + commit do código publicado -->
   <footer class="px-6 py-4 text-[11px] text-slate-500 border-t border-slate-200 bg-white no-print">
-    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.30-fe11ce7
+    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.30-c4ba7b4
     <span id="rodapePlanilha" class="hidden"> ·
       <button onclick="sincronizarPlanilha()" class="underline hover:text-accent">sincronizar novidades da planilha</button>
       ·
@@ -3638,6 +3638,7 @@ function gridAlertas(tipo, titulo, bruta, chaveBusca){
 
 function viewDashboard(){
   const d = dadosDashboard();
+  const dem = desligadosPorDemissional();
   const unidadesAtivas = new Set(DB.colaboradores.filter(c => c.status==='Ativo').map(c => c.unidadeId)).size;
 
   $('#view').innerHTML = `
@@ -3688,6 +3689,8 @@ function viewDashboard(){
       </div>
     </div>
 
+    ${blocoDesligados(dem)}
+
   </div>`;
 
   const c1 = document.getElementById('chartAso').getContext('2d');
@@ -3721,6 +3724,91 @@ function viewDashboard(){
       plugins:{ legend:{ display:false } },
       scales:{ y:{ beginAtZero:true, ticks:{ precision:0, font:{size:11}, color:'#6b6b6e' }, grid:{ color:'#ebebe9' } },
                x:{ grid:{ display:false }, ticks:{ font:{size:10}, color:'#6b6b6e' } } } }
+  });
+  graficoDesligados(dem);
+}
+
+/* ── Desligados com e sem exame demissional ──
+   Conta quem está com status Desligado hoje. "Com exame" = ASO demissional
+   registrado (vigente ou no histórico) ou demissional Realizado em Exames;
+   pedido em aberto e falta ficam separados, porque ainda não são exame feito.
+   O cadastro não guarda a data do desligamento, por isso o corte é por
+   unidade e não por mês. */
+const DEM_GRUPOS = [
+  ['com',    'Com exame demissional', PALETA.emdia],
+  ['aberto', 'Demissional pedido, ainda não feito', PALETA.avencer],
+  ['falta',  'Não compareceu ao demissional', PALETA.neutro],
+  ['sem',    'Sem exame demissional', PALETA.vencido]
+];
+function situacaoDemissional(c){
+  const a = asoVigente(c.id);
+  if(a && (a.tipo === 'DEMISSIONAL' || (a.historico || []).some(h => h && h.tipo === 'DEMISSIONAL'))) return 'com';
+  const ems = DB.emissoes.filter(e => e.tipoExame === 'DEMISSIONAL' && norm(e.colaborador || '') === norm(c.nome || ''));
+  if(ems.some(e => e.status === 'REALIZADO')) return 'com';
+  if(ems.some(e => e.status === 'SOLICITADO' || e.status === 'AGENDADO')) return 'aberto';
+  if(ems.some(naoCompareceu)) return 'falta';
+  return 'sem';
+}
+function desligadosPorDemissional(){
+  const tot = { com:0, aberto:0, falta:0, sem:0 }, porUni = {}, semExame = [];
+  DB.colaboradores.filter(c => c.status === 'Desligado').forEach(c => {
+    const k = situacaoDemissional(c), u = c.unidadeId || 'outros';
+    tot[k]++;
+    porUni[u] = porUni[u] || { com:0, aberto:0, falta:0, sem:0 };
+    porUni[u][k]++;
+    if(k === 'sem') semExame.push(c);
+  });
+  const total = tot.com + tot.aberto + tot.falta + tot.sem;
+  semExame.sort((a,b) => (uniNome(a.unidadeId)||'').localeCompare(uniNome(b.unidadeId)||'') || (a.nome||'').localeCompare(b.nome||''));
+  return { tot, porUni, semExame, total };
+}
+function blocoDesligados(dem){
+  const pct = n => dem.total ? Math.round(n * 100 / dem.total) + '%' : '0%';
+  const chip = ([k, rot, cor]) => dem.tot[k] ? `
+    <div class="flex items-center gap-2 text-xs text-slate-600">
+      <span class="inline-block w-3 h-3 rounded-sm" style="background:${cor}"></span>
+      <span><b class="text-slate-800">${dem.tot[k]}</b> ${esc(rot.toLowerCase())} <span class="text-slate-400">(${pct(dem.tot[k])})</span></span>
+    </div>` : '';
+  return `
+    <div class="bg-white rounded-xl border border-slate-200 p-5 print-block">
+      <h3 class="font-semibold text-sm text-slate-700 mb-1">Desligados com e sem exame demissional</h3>
+      <p class="text-xs text-slate-500 mb-3">${dem.total} colaborador(es) com status Desligado, por unidade</p>
+      <div class="flex flex-wrap gap-x-5 gap-y-1 mb-4">${DEM_GRUPOS.map(chip).join('')}</div>
+      <div class="h-72"><canvas id="chartDesligados"></canvas></div>
+      ${dem.semExame.length ? `
+      <details class="mt-4 no-print">
+        <summary class="text-xs text-accent cursor-pointer">Ver quem foi desligado sem exame demissional (${dem.semExame.length})</summary>
+        <div class="mt-2 max-h-72 overflow-y-auto border border-slate-200 rounded-lg">
+          <table class="w-full text-sm data">
+            <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
+              <tr><th class="px-4 py-2">Colaborador</th><th class="px-4 py-2">Unidade</th><th class="px-4 py-2">Função</th></tr>
+            </thead>
+            <tbody class="divide-y divide-slate-100">
+              ${dem.semExame.map(c => `<tr><td class="px-4 py-2">${esc(c.nome)}</td>
+                <td class="px-4 py-2 text-xs text-slate-600">${esc(uniNome(c.unidadeId))}</td>
+                <td class="px-4 py-2 text-xs text-slate-600">${esc(c.funcao || '')}</td></tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </details>` : ''}
+    </div>`;
+}
+function graficoDesligados(dem){
+  const cv = document.getElementById('chartDesligados');
+  if(!cv) return;
+  const tot = u => DEM_GRUPOS.reduce((s, [k]) => s + dem.porUni[u][k], 0);
+  const chaves = Object.keys(dem.porUni).sort((a,b) => tot(b) - tot(a));
+  const grupos = DEM_GRUPOS.filter(([k]) => dem.tot[k]);
+  charts.desligados = new Chart(cv.getContext('2d'), {
+    type:'bar',
+    data:{ labels: chaves.length ? chaves.map(k => (uni(k)||{sigla:'Outros'}).sigla) : ['sem dados'],
+      datasets: grupos.map(([k, rot, cor]) => ({ label:rot, data: chaves.map(u => dem.porUni[u][k]),
+        backgroundColor:cor, borderColor:'#fff', borderWidth:1, maxBarThickness:44 })) },
+    options:{ responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{ display:false },
+        tooltip:{ callbacks:{ title: it => uniNome(chaves[it[0].dataIndex]) || it[0].label } } },
+      scales:{ y:{ stacked:true, beginAtZero:true, ticks:{ precision:0, font:{size:11}, color:'#6b6b6e' }, grid:{ color:'#ebebe9' } },
+               x:{ stacked:true, grid:{ display:false }, ticks:{ font:{size:10}, color:'#6b6b6e' } } } }
   });
 }
 function mesPadrao(){
