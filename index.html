@@ -113,9 +113,9 @@ tailwind.config = {
   <div id="banner" class="no-print"></div>
   <main id="view" class="flex-1 p-4 sm:p-6"></main>
 
-  <!-- 2026.10.30-f4fe428 é preenchido no build: data + commit do código publicado -->
+  <!-- 2026.10.30-fe11ce7 é preenchido no build: data + commit do código publicado -->
   <footer class="px-6 py-4 text-[11px] text-slate-500 border-t border-slate-200 bg-white no-print">
-    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.30-f4fe428
+    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.30-fe11ce7
     <span id="rodapePlanilha" class="hidden"> ·
       <button onclick="sincronizarPlanilha()" class="underline hover:text-accent">sincronizar novidades da planilha</button>
       ·
@@ -4658,37 +4658,66 @@ async function excluirUnidade(id){
 }
 
 let _unidadeEditId = null;
-/* bloco "validade do ASO" do formulário da unidade: uma linha por função */
-function linhaValidadeAso(r){
-  r = r || {};
-  const cls = 'border border-slate-300 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-accent/40';
-  return `<div class="flex items-center gap-2 linha-validade">
-    <select class="val-funcao ${cls} flex-1 min-w-0"><option value="">— função —</option>
-      ${funcoesCanonicasCadastradas().map(f => `<option value="${esc(f)}" ${norm(f) === norm(funcaoCanonica(r.funcao || '')) ? 'selected' : ''}>${esc(f)}</option>`).join('')}</select>
-    <input type="number" min="1" max="60" step="1" class="val-meses ${cls} w-20 text-right" value="${esc(r.meses || '')}" placeholder="meses">
-    <span class="text-xs text-slate-500 w-12">meses</span>
-    <button type="button" onclick="this.closest('.linha-validade').remove()" class="text-slate-400 hover:text-danger px-1" title="Tirar"><i class="fa-solid fa-xmark"></i></button>
-  </div>`;
-}
+/* bloco "validade do ASO" do formulário da unidade — no jeito da tela de sexo:
+   todas as funções listadas, cada uma com botões de prazo. As funções que têm
+   gente nesta unidade vêm primeiro. Nada é gravado até salvar a unidade. */
+const PRAZOS_ASO = [[12,'12 meses'], [1,'Mensal'], [3,'3'], [6,'6']];
+let _valAso = null;   /* { funcao, meses, pessoas } por função, enquanto o formulário está aberto */
 function blocoValidadesAso(u){
   const regras = (u && u.asoValidades) || [];
+  const pessoas = {};
+  if(u) DB.colaboradores.filter(c => c.unidadeId === u.id && !colabInativo(c) && c.funcao)
+    .forEach(c => { const k = norm(funcaoCanonica(c.funcao)); pessoas[k] = (pessoas[k] || 0) + 1; });
+  _valAso = {};
+  funcoesCanonicasCadastradas().forEach(f => {
+    const r = regras.find(x => norm(funcaoCanonica(x.funcao)) === norm(f));
+    _valAso[norm(f)] = { funcao:f, meses: r ? Number(r.meses) : VALIDADE_PADRAO_ASO, pessoas: pessoas[norm(f)] || 0 };
+  });
+  setTimeout(renderValidadesAso, 0);
   return `<div class="sm:col-span-2">
     <label class="block text-xs font-medium text-slate-600 mb-1">Validade do ASO por função nesta unidade</label>
-    <div id="listaValidades" class="space-y-2">${regras.map(linhaValidadeAso).join('')}</div>
-    <button type="button" onclick="document.getElementById('listaValidades').insertAdjacentHTML('beforeend', linhaValidadeAso())"
-      class="mt-2 px-3 py-1.5 rounded-lg text-xs border border-slate-300 hover:bg-slate-50"><i class="fa-solid fa-plus mr-1"></i>Adicionar função</button>
-    <p class="text-[11px] text-slate-400 mt-1">O padrão é <b>12 meses</b>. Adicione só as funções que, NESTA unidade, renovam em outro prazo
-      (1 = mensal, 6, 7, 8...).</p>
+    <p class="text-[11px] text-slate-400 mb-2">O padrão é <b>12 meses</b>. Clique no prazo de cada função que, NESTA unidade, renova
+      em outro tempo — ou digite os meses em "outro". Nada é gravado até salvar a unidade.</p>
+    <div id="blocoValidades"></div>
   </div>`;
 }
+function renderValidadesAso(){
+  const alvo = document.getElementById('blocoValidades'); if(!alvo || !_valAso) return;
+  const itens = Object.values(_valAso).sort((a,b) => (b.pessoas > 0) - (a.pessoas > 0) || a.funcao.localeCompare(b.funcao,'pt-BR'));
+  const comGente = itens.filter(x => x.pessoas), semGente = itens.filter(x => !x.pessoas);
+  const bt = (x, m, txt) => `<button type="button" onclick="setValidadeAso('${esc(norm(x.funcao))}', ${m})"
+    class="px-2 py-1 rounded text-[11px] border ${x.meses === m
+      ? (m === VALIDADE_PADRAO_ASO ? 'bg-slate-200 border-slate-300 text-slate-700' : 'bg-indigo-100 border-indigo-300 text-indigo-700')
+      : 'bg-white border-slate-200 text-slate-400 hover:border-slate-300'}">${txt}</button>`;
+  const outro = x => !PRAZOS_ASO.some(([m]) => m === x.meses);
+  const linha = x => `<div class="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-slate-50">
+    <span class="text-xs font-medium text-slate-700 flex-1 min-w-0 truncate" title="${esc(x.funcao)}">${esc(x.funcao)}</span>
+    <span class="text-[10px] text-slate-400 w-16 text-right hidden sm:inline">${x.pessoas ? x.pessoas + ' pessoa(s)' : ''}</span>
+    <span class="flex items-center gap-1">${PRAZOS_ASO.map(([m, l]) => bt(x, m, l)).join('')}
+      <input type="number" min="1" max="60" placeholder="outro" value="${outro(x) ? x.meses : ''}"
+        onchange="setValidadeAso('${esc(norm(x.funcao))}', Math.round(Number(this.value)) || ${VALIDADE_PADRAO_ASO})"
+        class="w-16 px-1.5 py-1 rounded text-[11px] text-right border ${outro(x) ? 'bg-indigo-100 border-indigo-300 text-indigo-700' : 'border-slate-200'}"></span>
+  </div>`;
+  const mudadas = itens.filter(x => x.meses !== VALIDADE_PADRAO_ASO).length;
+  alvo.innerHTML = `
+    ${mudadas ? `<p class="text-[11px] text-indigo-700 mb-1"><i class="fa-solid fa-rotate mr-1"></i>${mudadas} função(ões) com prazo diferente de 12 meses</p>` : ''}
+    ${comGente.length ? `<p class="text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1">Funções com gente nesta unidade (${comGente.length})</p>
+      <div class="border border-slate-200 rounded-lg p-1 max-h-56 overflow-y-auto mb-2">${comGente.map(linha).join('')}</div>` : ''}
+    <details ${comGente.length ? '' : 'open'}>
+      <summary class="text-[10px] font-semibold uppercase tracking-wide text-slate-400 cursor-pointer mb-1">Outras funções do catálogo (${semGente.length})</summary>
+      <div class="border border-slate-200 rounded-lg p-1 max-h-56 overflow-y-auto">${semGente.map(linha).join('')}</div>
+    </details>`;
+}
+function setValidadeAso(chave, meses){
+  if(!_valAso || !_valAso[chave]) return;
+  _valAso[chave].meses = Math.min(Math.max(1, meses), 60);
+  const det = document.querySelector('#blocoValidades details'), aberto = det && det.open;
+  renderValidadesAso();
+  const det2 = document.querySelector('#blocoValidades details'); if(det2 && aberto) det2.open = true;
+}
 function lerValidadesAso(){
-  const vistas = new Set(), out = [];
-  document.querySelectorAll('#listaValidades .linha-validade').forEach(l => {
-    const funcao = l.querySelector('.val-funcao').value, meses = Math.round(Number(l.querySelector('.val-meses').value));
-    if(!funcao || !(meses > 0) || meses === VALIDADE_PADRAO_ASO || vistas.has(norm(funcao))) return;
-    vistas.add(norm(funcao)); out.push({ funcao, meses: Math.min(meses, 60) });
-  });
-  return out;
+  return Object.values(_valAso || {}).filter(x => x.meses !== VALIDADE_PADRAO_ASO)
+    .map(x => ({ funcao:x.funcao, meses:x.meses }));
 }
 function editarUnidade(id, prefill){
   _unidadeEditId = id || null;
