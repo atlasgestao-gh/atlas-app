@@ -110,9 +110,9 @@ tailwind.config = {
   <div id="banner" class="no-print"></div>
   <main id="view" class="flex-1 p-4 sm:p-6"></main>
 
-  <!-- 2026.10.30-d2e9958 é preenchido no build: data + commit do código publicado -->
+  <!-- 2026.10.30-12a6928 é preenchido no build: data + commit do código publicado -->
   <footer class="px-6 py-4 text-[11px] text-slate-500 border-t border-slate-200 bg-white no-print">
-    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.30-d2e9958
+    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.30-12a6928
     <span id="rodapePlanilha" class="hidden"> ·
       <button onclick="sincronizarPlanilha()" class="underline hover:text-accent">sincronizar novidades da planilha</button>
       ·
@@ -1814,10 +1814,12 @@ const LOG_ACOES = {
   abriu_ficha:'Abriu ficha de colaborador', restaurou_backup:'Restaurou backup de arquivo', trocou_senha:'Trocou a própria senha',
   incluiu:'Incluiu', alterou:'Alterou', excluiu:'Excluiu',
   abriu_ficha_admissao:'Abriu ficha de admissão', imprimiu_ficha_admissao:'Gerou ficha de admissão',
-  emitiu_contrato:'Emitiu contrato', abriu_contrato:'Abriu contrato', abriu_anexo_contrato:'Baixou anexo do contrato', expurgou:'Apagou dados pelo prazo de guarda'
+  emitiu_contrato:'Emitiu contrato', abriu_contrato:'Abriu contrato', abriu_anexo_contrato:'Baixou anexo do contrato',
+  emitiu_documento:'Emitiu documento da admissão', abriu_documento:'Abriu documento da admissão', expurgou:'Apagou dados pelo prazo de guarda'
 };
 const LOG_TABELAS = { atlas_unidade:'Dados da unidade', atlas_comum:'Dados gerais', atlas_acesso:'Acessos', atlas_solicitacao:'Pedido de gerente',
-  atlas_admissao:'Admissão', atlas_contrato:'Contrato', atlas_contrato_anexo:'Anexo do contrato', atlas_ferias:'Férias' };
+  atlas_admissao:'Admissão', atlas_contrato:'Contrato', atlas_contrato_anexo:'Anexo do contrato', atlas_ferias:'Férias',
+  atlas_documento:'Documento da admissão' };
 const LOG_COLECOES = { colaboradores:'Colaboradores', emissoes:'Exames', asos:'ASOs', laudos:'Laudos', visitas:'Visitas',
   atestados:'Atestados', documentos:'Documentos', docsOficiais:'Docs oficiais', relatorios:'Relatórios',
   esocial2220:'eSocial S-2220', esocial2240:'eSocial S-2240', precos:'Tabela de preços', precosUnidade:'Preços por unidade',
@@ -2584,6 +2586,7 @@ function viewMinhaUnidade(){
       n: pedidosRecusados().length,
       tom: pedidosRecusados().some(recusaNova) ? 'alerta' : '' },
     { id:'contratos',    label:'Contratos',      icon:'fa-file-signature', n: contratosDaGerente().length },
+    { id:'documentos',   label:'Documentos',     icon:'fa-file-pen', n: docsAdmDaGerente().length },
     { id:'estatisticas', label:'Estatísticas',   icon:'fa-chart-pie' }
   ];
   if(!abas.some(a => a.id === UIGer.aba)) UIGer.aba = 'pedidos';
@@ -2604,7 +2607,7 @@ function viewMinhaUnidade(){
       <div id="abaGer"></div>
     </div>`;
   ({ pedidos:gerPedidos, acompanhar:gerAcompanhar, recusados:gerRecusados,
-     contratos:gerContratos, estatisticas:gerEstatisticas })[UIGer.aba]();
+     contratos:gerContratos, documentos:gerDocumentos, estatisticas:gerEstatisticas })[UIGer.aba]();
 }
 
 function emissoesDaGerente(){
@@ -12050,6 +12053,8 @@ function viewDocumentos(){
 
   $('#view').innerHTML = `
   <div class="space-y-5">
+    <div id="docAdmMaster"></div>
+    <p class="text-xs font-semibold uppercase tracking-wide text-slate-400 pt-2">Ofícios, orçamentos e comunicados da Atlas</p>
     <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
       ${Object.keys(DOC_TIPO).map(t => `
         <div onclick="editarDoc(null,'${t}')" role="button"
@@ -12094,6 +12099,7 @@ function viewDocumentos(){
       ${paginador(todos.length, p, 'paginaDocs')}
     </div>
   </div>`;
+  docAdmTela('#docAdmMaster');
 }
 
 function editarDoc(id, tipoNovo){
@@ -14047,6 +14053,8 @@ async function admCarregar(){
   /* a gerente só recebe contrato — e a política do banco já corta pelo prazo */
   const cs = await ler('atlas_contrato', admContratoDaLinha, 'emitido_em');
   if(cs) CONTRATOS = cs;
+  const ds = await ler('atlas_documento', docAdmDaLinha, 'emitido_em');
+  if(ds) DOCS_ADM = ds;
   /* dos anexos vem só o nome e o tamanho: o PDF fica no banco até alguém abrir */
   try{
     const an = await sb.from('atlas_contrato_anexo').select('contrato_id, nome, tamanho');
@@ -14199,7 +14207,8 @@ function viewAdmissoes(){
   const abas = [
     { id:'fichas', label:'Admissões', icon:'fa-id-card', n: ADMISSOES.length },
     { id:'acompanhar', label:'Experiência e férias', icon:'fa-calendar-check',
-      n: admAlertas(), tom:'alerta' }
+      n: admAlertas(), tom:'alerta' },
+    { id:'documentos', label:'Documentos', icon:'fa-file-pen', n: DOCS_ADM.length }
   ];
   if(!abas.some(a => a.id === UIAdm.aba)) UIAdm.aba = 'fichas';
   $('#view').innerHTML = `
@@ -14210,7 +14219,7 @@ function viewAdmissoes(){
       ${barraAbas(abas, UIAdm.aba, id => `abaAdm('${id}')`)}
       <div id="abaAdm"></div>
     </div>`;
-  (UIAdm.aba === 'fichas' ? admFichas : admAcompanhar)();
+  ({ fichas:admFichas, acompanhar:admAcompanhar, documentos:() => docAdmTela('#abaAdm') })[UIAdm.aba]();
 }
 
 function admSituacao(a){
@@ -14394,7 +14403,7 @@ function admRenderForm(manterRolagem){
             <datalist id="admListaFuncoes">${Object.keys(ADM_CATALOGO).map(k => `<option value="${esc(k)}">`).join('')}</datalist>
           </div>
           ${admCampoHTML(['f_salario','Salário (R$)',1,'','00,00'], val('f_salario'))}
-          ${admCampoHTML(['f_admissao','Data de admissão',1,'date'],val('f_admissao') || (a ? '' : isoToday()))}
+          ${admCampoHTML(['f_admissao','Data de admissão',1,'date'],val('f_admissao'))}
           <div class="col-span-6 sm:col-span-2">
             <label class="block text-xs font-medium text-slate-600 mb-1">Sexo</label>
             <select id="adm_sexo" class="${ADM_CLS_CAMPO}">
@@ -15763,6 +15772,356 @@ function gerAbrirContrato(id){
   registrarAtividade('abriu_contrato', { contrato_id:id });
 }
 
+/* ═════════ documentos da admissão: carta de conta salário e pedido de demissão ═════════
+   Os dois modelos de Word mais usados pela equipe de admissão (Jessica,
+   30/10/2026). Saem preenchidos com o cadastro e a ficha, com ou sem o
+   timbrado da empresa, e ficam gravados em atlas_documento (sql/13) ligados à
+   unidade: a gerente dela baixa em "Meus acompanhamentos › Documentos".
+   Nada de telefone ou assinatura de pessoa no código (a página é pública):
+   o contato do RH é digitado na emissão e lembrado do último documento. */
+const DOCADM_TIPO = { CONTA_SALARIO:'Carta de abertura de conta (Itaú)', DEMISSAO:'Pedido de demissão' };
+const DOCADM_ICONE = { CONTA_SALARIO:'fa-building-columns', DEMISSAO:'fa-door-open' };
+const DOCADM_SUB = { CONTA_SALARIO:'Conta salário no Itaú — nome, CPF, endereço, cargo e salário',
+                     DEMISSAO:'Cumprindo aviso prévio de 30 dias — nome, CPF, cargo e admissão' };
+const LOGO_ADVANTAGE = 'data:image/jpeg;base64,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';
+/* timbrado pela raiz do CNPJ; quem não tem logo sai com o nome da marca */
+const DOCADM_MARCAS = {
+  '22963976': { nome:'ADVANTAGE', sub:'VIP LOUNGE', logo:LOGO_ADVANTAGE },
+  '57600310': { nome:'ELEVATE', sub:'ADVANTAGE SALA VIP' },
+  '61812224': { nome:'EMERALD', sub:'ADVANTAGE SALA VIP' },
+  '61180593': { nome:'RUBY HOTELS', sub:'' }
+};
+let DOCS_ADM = [];
+const UIDocAdm = { q:'', tipo:'' };
+let _docAdmPessoas = [];
+
+const docAdmDaLinha = r => ({ id:r.id, unidadeId:r.unidade_id, tipo:r.tipo, nome:r.nome || '', dados:r.dados || {},
+  timbrado:r.timbrado !== false, emitidoEm:r.emitido_em || '', emitidoPor:r.emitido_por || '', disponivelAte:r.disponivel_ate || '' });
+
+function docAdmEmpresa(unidadeId){
+  const u = admUnidade(unidadeId) || {}, k = admContratoUni(unidadeId);
+  const cnpj = (k && (k.nomeFull.match(/CNPJ\s+([\d.\/-]+)/) || [])[1]) || u.cnpj || '';
+  const raiz = cpfDigitos(cnpj).slice(0,8);
+  return {
+    razao:    k ? k.nomeFull.replace(/\s*-\s*CNPJ.*$/, '') : (u.empresa || ''),
+    cnpj,
+    endereco: k ? k.sede.replace(/^.*?com sede na\s*/i, '') : '',
+    local:    k ? k.local : [u.cidade, u.uf].filter(Boolean).join('/'),
+    marca:    DOCADM_MARCAS[raiz] || null,
+    cor:      (ADM_TEMAS[raiz] || ['#546E7A','#37474F'])[0]
+  };
+}
+function docAdmDataExtenso(iso){
+  const d = parseISO(iso) || HOJE;
+  const meses = ['janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
+  return d.getDate() + ' de ' + meses[d.getMonth()] + ' de ' + d.getFullYear();
+}
+
+/* quem pode sair no documento: o quadro da unidade e as fichas em andamento
+   (a ficha traz endereço e salário, que o cadastro não tem) */
+function docAdmPessoas(){
+  const m = new Map();
+  admQuadro().forEach(q => {
+    if(!admUnidade(q.unidadeId)) return;
+    const k = q.cpf || 'id:' + q.id;
+    m.set(k, { chave:k, unidadeId:q.unidadeId, nome:q.nome || '', cpf:q.cpf || '', funcao:q.funcao || '',
+               admissao:q.admissao || '', status:q.status || '', endereco:'', salario:'' });
+  });
+  ADMISSOES.forEach(a => {
+    const c = (a.ficha && a.ficha.campos) || {};
+    const cpf = cpfDigitos(c.f_cpf || a.cpf), k = cpf || 'adm:' + a.id;
+    const p = m.get(k) || { chave:k, unidadeId:a.unidadeId, nome:'', cpf, funcao:'', admissao:'', status:'Em admissão' };
+    p.nome = p.nome || c.f_nome || a.nome || '';
+    p.funcao = c.f_funcao || p.funcao || a.funcao || '';
+    p.admissao = c.f_admissao || p.admissao || a.admissao || '';
+    p.endereco = c.f_end || p.endereco || '';
+    p.salario = c.f_salario || p.salario || '';
+    m.set(k, p);
+  });
+  const ordem = s => s === 'Ativo' ? 0 : s === 'Em admissão' ? 1 : 2;
+  const lista = [...m.values()].filter(p => p.nome)
+    .sort((a,b) => ordem(a.status) - ordem(b.status) || a.nome.localeCompare(b.nome));
+  const vistos = {};
+  lista.forEach(p => {
+    const u = admUnidade(p.unidadeId);
+    p.rotulo = p.nome + ' · ' + ((u && (u.sigla || u.nome)) || '') + (p.status && p.status !== 'Ativo' ? ' · ' + p.status : '');
+    if(vistos[p.rotulo]) p.rotulo += ' · CPF final ' + p.cpf.slice(-4);
+    vistos[p.rotulo] = 1;
+  });
+  return lista;
+}
+
+function docAdmEmitir(tipo){
+  _docAdmPessoas = docAdmPessoas();
+  const unis = admUnidades();
+  if(!unis.length){ toast('Nenhuma unidade liberada para este login.', 'alerta'); return; }
+  const ultimo = DOCS_ADM.find(d => d.tipo === 'CONTA_SALARIO') || { dados:{} };
+  const conta = tipo === 'CONTA_SALARIO';
+  const fields = [
+    { type:'html', html:`<div class="sm:col-span-2">
+        <label class="block text-xs font-medium text-slate-600 mb-1">Colaborador</label>
+        <input id="docAdmBusca" list="docAdmLista" autocomplete="off" placeholder="Digite o nome para buscar no cadastro e nas fichas..."
+          class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent">
+        <datalist id="docAdmLista">${_docAdmPessoas.map(p => `<option value="${esc(p.rotulo)}"></option>`).join('')}</datalist>
+        <p class="text-[11px] text-slate-400 mt-1">Ao escolher, os campos abaixo se preenchem. Tudo pode ser corrigido antes de emitir.</p></div>` },
+    { name:'unidadeId', label:'Unidade', type:'select', req:true,
+      options:[{ v:'', l:'Selecione...' }].concat(unis.map(u => ({ v:u.id, l:(u.sigla ? u.sigla + ' - ' : '') + u.nome }))) },
+    { name:'timbrado', label:'Papel', type:'select',
+      options:[{ v:'1', l:'Com timbrado da empresa' }, { v:'0', l:'Sem timbrado' }] },
+    { name:'nome', label:'Nome completo', req:true },
+    { name:'cpf', label:'CPF', req:true },
+    { name:'funcao', label:'Cargo', req:true },
+    conta ? { name:'salario', label:'Salário nominal mensal (R$)', ph:'0.000,00' }
+          : { name:'admissao', label:'Data de admissão', type:'date', req:true },
+    conta ? { name:'endereco', label:'Endereço completo', col:'sm:col-span-2' } : null,
+    { name:'cidade', label:'Cidade (no cabeçalho da data)', req:true },
+    { name:'data', label:'Data do documento', type:'date', req:true },
+    conta ? { type:'sep', label:'Recursos Humanos' } : null,
+    conta ? { name:'rhContatos', label:'Responsáveis de RH e telefones', type:'textarea', rows:2, col:'sm:col-span-2',
+              hint:'sai na carta como "Responsável de RH: ..." — fica lembrado para a próxima emissão' } : null,
+    conta ? { name:'rhAssina', label:'Quem assina pelo RH' } : null
+  ].filter(Boolean);
+  openForm({
+    title: 'Emitir ' + DOCADM_TIPO[tipo].toLowerCase(),
+    largura: 'max-w-3xl',
+    fields,
+    values: { timbrado:'1', data:isoToday(), rhContatos:ultimo.dados.rhContatos || '', rhAssina:ultimo.dados.rhAssina || '' },
+    afterRender: form => {
+      const el = n => form.elements[n];
+      const poeCidade = () => {
+        const e = docAdmEmpresa(el('unidadeId').value);
+        if(e.local) el('cidade').value = e.local.split('/')[0];
+      };
+      el('unidadeId').addEventListener('change', poeCidade);
+      $('#docAdmBusca').addEventListener('change', ev => {
+        const p = _docAdmPessoas.find(x => x.rotulo === ev.target.value);
+        if(!p) return;
+        el('unidadeId').value = p.unidadeId;
+        el('nome').value = p.nome;
+        el('cpf').value = admCpfFmt(p.cpf);
+        el('funcao').value = p.funcao;
+        if(conta){ el('salario').value = p.salario; el('endereco').value = p.endereco; }
+        else el('admissao').value = p.admissao;
+        poeCidade();
+      });
+      const salvar = [...$('#modalFoot').querySelectorAll('button')].pop();
+      if(salvar) salvar.innerHTML = '<i class="fa-solid fa-file-circle-check mr-1"></i>Emitir e abrir';
+    },
+    onSave: v => docAdmGravar(tipo, v)
+  });
+}
+
+async function docAdmGravar(tipo, v){
+  const dados = Object.assign({}, v);
+  delete dados.unidadeId; delete dados.timbrado;
+  const e = docAdmEmpresa(v.unidadeId);
+  Object.assign(dados, { empresa:e.razao, cnpjEmpresa:e.cnpj });
+  const agora = new Date(), eu = String(SESSAO.email||'').toLowerCase();
+  let reg = { id:admNovoId(), unidadeId:v.unidadeId, tipo, nome:v.nome, dados, timbrado:v.timbrado !== '0',
+              emitidoEm:agora.toISOString(), emitidoPor:eu,
+              disponivelAte:new Date(agora.getTime() + ADM_DIAS_CONTRATO*86400000).toISOString() };
+  if(nuvemLigada()){
+    const { data, error } = await sb.from('atlas_documento').insert({ id:reg.id, unidade_id:reg.unidadeId, tipo,
+      nome:reg.nome, dados, timbrado:reg.timbrado, emitido_por:eu, emitido_em:reg.emitidoEm,
+      disponivel_ate:reg.disponivelAte }).select().single();
+    if(error){ toast('Não consegui gravar o documento: ' + error.message, 'erro'); return; }
+    if(data) reg = docAdmDaLinha(data);
+  }
+  DOCS_ADM.unshift(reg);
+  registrarAtividade('emitiu_documento', { documento_id:reg.id, tipo, unidade_id:reg.unidadeId });
+  closeModal();
+  docAdmAbrirJanela(reg);
+  docAdmRedesenhar();
+  toast(DOCADM_TIPO[tipo] + ' emitido. A gerente da unidade já pode baixar.');
+}
+
+function docAdmRedesenhar(){
+  if(rota === 'documentos') viewDocumentos();
+  else if(rota === 'admissoes') viewAdmissoes();
+  else if(rota === 'minhaunidade') viewMinhaUnidade();
+}
+
+async function docAdmExcluir(id){
+  const d = DOCS_ADM.find(x => x.id === id); if(!d) return;
+  if(!confirm('Excluir ' + DOCADM_TIPO[d.tipo].toLowerCase() + ' de ' + d.nome + '? A gerente deixa de ver.')) return;
+  if(nuvemLigada()){
+    const { error } = await sb.from('atlas_documento').delete().eq('id', id);
+    if(error){ toast('Não consegui excluir: ' + error.message, 'erro'); return; }
+  }
+  DOCS_ADM = DOCS_ADM.filter(x => x.id !== id);
+  docAdmRedesenhar(); toast('Documento excluído.');
+}
+
+function docAdmAbrir(id){
+  const d = DOCS_ADM.find(x => x.id === id);
+  if(!d){ toast('Este documento não está mais disponível.', 'alerta'); return; }
+  docAdmAbrirJanela(d);
+  registrarAtividade('abriu_documento', { documento_id:id });
+}
+function docAdmAbrirJanela(d){
+  const w = window.open('', '_blank');
+  if(!w){ toast('Permita pop-ups para abrir o documento.', 'erro'); return; }
+  w.document.write(docAdmDoc(d)); w.document.close();
+  setTimeout(() => { w.focus(); }, 300);
+}
+
+/* ───── o papel ───── */
+function docAdmDoc(reg){
+  const d = reg.dados || {}, e = docAdmEmpresa(reg.unidadeId);
+  const empresa = d.empresa || e.razao, cnpj = d.cnpjEmpresa || e.cnpj;
+  const lin = (v, min) => v ? `<b>${esc(v)}</b>` : '_'.repeat(min || 20);
+  const dataLinha = esc(d.cidade || '') + ', ' + docAdmDataExtenso(d.data);
+  const marca = e.marca;
+  const cab = !reg.timbrado ? '' : `<div class="cab" style="border-color:${e.cor}">
+      ${marca && marca.logo ? `<img src="${marca.logo}" alt="${esc(marca.nome)}">`
+        : `<div class="marca" style="color:${e.cor}">${esc(marca ? marca.nome : empresa)}</div>
+           ${marca && marca.sub ? `<div class="marcasub" style="color:${e.cor}">${esc(marca.sub)}</div>` : ''}`}
+    </div>`;
+  const rod = !reg.timbrado ? '' : `<div class="rod" style="border-color:${e.cor}">
+      ${esc(empresa)}${cnpj ? ' · CNPJ ' + esc(cnpj) : ''}${e.endereco ? '<br>' + esc(e.endereco) : ''}</div>`;
+
+  const corpo = reg.tipo === 'DEMISSAO' ? `
+      <p style="margin:0 0 36px">${dataLinha}.</p>
+      <p style="margin:0 0 22px">Senhores,</p>
+      <p class="j">Eu, ${lin(d.nome, 30)}, CPF ${lin(d.cpf, 14)}, venho comunicar formalmente meu pedido de demissão do cargo
+        que ocupo como ${lin(d.funcao, 16)} nessa empresa, <b>${esc(empresa)}</b>, desde ${d.admissao ? '<b>' + fmtDate(d.admissao) + '</b>' : '____/____/____'},
+        por motivos particulares.</p>
+      <p class="j">Solicito o encerramento do meu contrato de trabalho ciente que cumprirei o aviso prévio de 30 dias.</p>
+      <p style="margin:56px 0 0">${dataLinha}.</p>
+      <div style="margin-top:70px;width:320px">
+        <div style="border-top:1px solid #000;padding-top:5px">${esc(d.nome || '')}</div>
+      </div>`
+  : `
+      <p style="margin:0 0 22px">${dataLinha}.</p>
+      <p class="j">Prezado(a) ${esc(d.nome || '')},</p>
+      <p class="j">Escolhemos o Itaú como nosso parceiro para o processamento do pagamento do seu salário.</p>
+      <p class="j">Conforme determinam as Resoluções nº 3.402 e 3.424/06, do Conselho Monetário Nacional, seu salário será creditado em uma conta de registro, denominada ‘conta salário’, que não é movimentável por cheque, não admite créditos de outras naturezas que não salariais e possui serviços limitados.</p>
+      <p class="j">Você também poderá aproveitar as vantagens de ter uma CONTA CORRENTE e transferir automaticamente o seu salário, possibilitando assim fazer uso de diversos outros serviços e condições diferenciadas oferecidas pelo Itaú, que acreditamos que tenham um valor diferenciado para você. Para conhecer as vantagens de uma conta corrente compareça a uma agência até a data da sua admissão e apresente o original e uma cópia simples (frente e verso) dos documentos abaixo indicados:</p>
+      <ul class="j" style="margin:0 0 10px 18px;padding:0">
+        <li>Esta carta;</li>
+        <li>Documento de identidade com foto;</li>
+        <li>CPF – Cadastro de Pessoa Física;</li>
+        <li>Comprovante de endereço de residência atual (onde prefere receber correspondência) com prazo inferior a 60 dias da data de vencimento: Ex.: conta de luz, de água, de gás, de telefone fixo, IPTU, contrato de locação (cópia autenticada com firma reconhecida);</li>
+        <li>Se casado (a), apresentar nome completo do cônjuge, número do CPF, data de nascimento e data do casamento.</li>
+      </ul>
+      <p class="j">Se a sua opção for apenas pela utilização da conta salário, você poderá realizar a portabilidade de salário para outra instituição ou utilizar o cartão de débito, fornecido sem custo*, para os serviços mensais gratuitos** disponíveis para a conta salário. Procure a agência Itaú de sua conveniência e fale com o gerente que está apto a orientá-lo e a prestar todas as informações necessárias para a movimentação da sua conta.</p>
+      <p class="j" style="margin-top:16px"><b>Dados do Funcionário:</b><br>
+        Declaramos que o(a) Sr.(a) ${lin(d.nome, 30)}, portador(a) do CPF ${lin(d.cpf, 14)}, residente e domiciliado(a) na
+        ${lin(d.endereco, 40)}, para exercer o cargo de ${lin(d.funcao, 16)}, com salário nominal mensal de
+        ${d.salario ? '<b>R$ ' + esc(String(d.salario).replace(/^R\$\s*/i, '')) + '</b>' : 'R$' + '_'.repeat(10)}.</p>
+      ${d.rhContatos ? `<p class="j">Responsável de RH: ${esc(d.rhContatos).replace(/\n/g, '<br>')}</p>` : ''}
+      <p style="margin:12px 0 0"><b>EMPRESA</b> ${esc(empresa)}<br>CNPJ - ${esc(cnpj)}</p>
+      <div style="margin-top:44px;width:340px">
+        <div style="border-top:1px solid #000;padding-top:5px">${d.rhAssina ? esc(d.rhAssina) + '<br>' : ''}Recursos Humanos (Assinatura do responsável pelo RH)</div>
+      </div>
+      <p class="nota">*Exceto nos casos de pedidos de reposição formulados pelo cliente decorrentes de perda, roubo, danificação ou outros motivos não imputáveis ao Banco. ** Serviços gratuitos: duas consultas ao saldo de sua conta, dois extratos dos últimos 30 dias, um DOC/TED pelo valor total do crédito e cinco saques (por evento de crédito). A utilização acima desses limites ou de quaisquer outros serviços estará sujeita à cobrança de tarifas.</p>
+      <div class="banco">
+        <p style="text-align:center;font-weight:bold;margin:0 0 10px">Para uso exclusivo do Banco</p>
+        <p class="campo">Nome e Número da Agência:<span></span></p>
+        <p class="campo">Número da Conta:<span></span></p>
+        <p class="campo">Responsável pelo atendimento:<span></span></p>
+      </div>`;
+
+  const titulo = DOCADM_TIPO[reg.tipo] + ' - ' + (reg.nome || '');
+  return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${esc(titulo)}</title>
+  <style>
+    @page { size:A4; margin:14mm 18mm ${reg.timbrado ? '24mm' : '16mm'}; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:#fff; font-family:Arial, sans-serif; font-size:11pt; color:#000; line-height:1.45; }
+    .j { text-align:justify; margin:0 0 9px; }
+    .cab { text-align:center; padding-bottom:8px; border-bottom:2px solid; margin-bottom:20px; }
+    .cab img { height:78px; object-fit:contain; }
+    .marca { font-size:24pt; letter-spacing:.32em; font-weight:300; }
+    .marcasub { font-size:8.5pt; letter-spacing:.4em; margin-top:2px; }
+    .rod { position:fixed; bottom:8mm; left:18mm; right:18mm; text-align:center; font-size:8pt; color:#444; border-top:1px solid; padding-top:4px; }
+    .nota { font-size:8pt; text-align:justify; margin:22px 0 0; color:#333; }
+    .banco { border:1px solid #000; padding:10px 14px; margin-top:18px; page-break-inside:avoid; }
+    .banco p { margin:0 0 8px; }
+    .banco .campo { display:flex; gap:6px; } .banco .campo span { flex:1; border-bottom:1px solid #000; }
+    .barra { text-align:center; margin:0 0 14px; }
+    .barra button { padding:9px 18px; border:0; border-radius:8px; background:#37474F; color:#fff; font-size:13px; cursor:pointer; }
+    @media screen { body { background:#e4e8ec; padding:22px; }
+      .folha { width:210mm; max-width:100%; margin:0 auto; padding:14mm 18mm; background:#fff; box-shadow:0 4px 24px rgba(0,0,0,.14); }
+      .rod { position:static; margin-top:36px; } }
+    @media print { .barra { display:none; } }
+  </style></head><body>
+  <div class="barra"><button onclick="window.print()">Imprimir / salvar em PDF</button></div>
+  <div class="folha">${cab}${corpo}${rod}</div></body></html>`;
+}
+
+/* ───── as grades ───── */
+function docAdmGrade(lista, gerente){
+  const th = 'px-4 py-3';
+  return `<div class="overflow-x-auto"><table class="w-full text-sm data">
+    <thead class="bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500">
+      <tr><th class="${th}">Documento</th><th class="${th}">Colaborador</th>${gerente ? '' : `<th class="${th}">Unidade</th>`}
+          <th class="${th}">Emitido em</th><th class="${th}">Papel</th><th class="${th}">Disponível até</th>
+          <th class="${th} text-right">Ações</th></tr></thead>
+    <tbody class="divide-y divide-slate-100">
+      ${lista.length ? lista.map(d => { const dias = diasPara(String(d.disponivelAte).slice(0,10)); return `<tr class="hover:bg-slate-50">
+        <td class="px-4 py-3"><i class="fa-solid ${DOCADM_ICONE[d.tipo]} text-slate-400 mr-1.5"></i>${esc(DOCADM_TIPO[d.tipo] || d.tipo)}</td>
+        <td class="px-4 py-3 font-medium text-slate-700">${esc(d.nome)}</td>
+        ${gerente ? '' : `<td class="px-4 py-3 text-xs text-slate-600">${esc(admUniRotulo(d.unidadeId))}</td>`}
+        <td class="px-4 py-3 text-xs text-slate-600 whitespace-nowrap">${fmtDate(String(d.emitidoEm).slice(0,10))}</td>
+        <td class="px-4 py-3 text-xs text-slate-500">${d.timbrado ? 'Timbrado' : 'Sem timbrado'}</td>
+        <td class="px-4 py-3 text-xs whitespace-nowrap">${fmtDate(String(d.disponivelAte).slice(0,10))}
+          ${dias !== null && dias <= 7 ? badge(dias <= 0 ? 'último dia' : 'mais ' + dias + ' dia(s)', 'bg-amber-100 text-amber-700') : ''}</td>
+        <td class="px-4 py-3 text-right whitespace-nowrap">
+          <button onclick="docAdmAbrir('${d.id}')" class="px-3 py-1.5 rounded-lg text-xs bg-accent text-white hover:bg-blue-700 whitespace-nowrap">
+            <i class="fa-solid fa-download mr-1"></i>Abrir / baixar PDF</button>
+          ${gerente ? '' : `<button onclick="docAdmExcluir('${d.id}')" class="text-slate-400 hover:text-danger px-1.5 ml-1" title="Excluir"><i class="fa-solid fa-trash"></i></button>`}
+        </td></tr>`; }).join('')
+      : vazio(gerente ? 'Nenhum documento disponível.' : 'Nenhum documento emitido ainda.')}
+    </tbody></table></div>`;
+}
+
+/* tela da equipe de admissão e da Atlas: os dois modelos e o que já saiu */
+function docAdmTela(sel){
+  const alvo = $(sel); if(!alvo) return;
+  const q = norm(UIDocAdm.q);
+  const lista = DOCS_ADM.filter(d => (!UIDocAdm.tipo || d.tipo === UIDocAdm.tipo) &&
+    (!q || norm(d.nome + ' ' + admUniRotulo(d.unidadeId)).includes(q)));
+  alvo.innerHTML = `<div class="space-y-4">
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+      ${Object.keys(DOCADM_TIPO).map(t => `
+        <div onclick="docAdmEmitir('${t}')" role="button"
+          class="bg-white rounded-xl border border-slate-200 p-5 cursor-pointer hover:border-accent hover:shadow-md transition flex items-center gap-4">
+          <div class="w-11 h-11 rounded-lg bg-primary/5 text-primary flex items-center justify-center text-lg"><i class="fa-solid ${DOCADM_ICONE[t]}"></i></div>
+          <div class="min-w-0"><p class="font-display text-lg text-primary">${DOCADM_TIPO[t]}</p>
+            <p class="text-[11px] text-slate-500">${DOCADM_SUB[t]}</p></div>
+          <i class="fa-solid fa-plus ml-auto text-slate-300"></i>
+        </div>`).join('')}
+    </div>
+    <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
+      ${barraFiltros([
+        inputBusca('bDocAdm', 'Buscar colaborador ou unidade...', `UIDocAdm.q=this.value;docAdmTela('${sel}');focarBusca(&quot;bDocAdm&quot;)`, UIDocAdm.q, COL6),
+        selectFiltro('fDocAdm', 'Todos os documentos', Object.keys(DOCADM_TIPO).map(t => ({ v:t, l:DOCADM_TIPO[t] })),
+          `UIDocAdm.tipo=this.value;docAdmTela('${sel}')`, UIDocAdm.tipo, COL6)
+      ], [], { ativo: !!(UIDocAdm.q || UIDocAdm.tipo), onClick: `UIDocAdm.q='';UIDocAdm.tipo='';docAdmTela('${sel}')` })}
+      ${docAdmGrade(lista, false)}
+      <p class="px-4 py-3 text-[11px] text-slate-400 border-t border-slate-100">Cada documento fica ${ADM_DIAS_CONTRATO} dias
+        disponível para a gerente da unidade, em Meus acompanhamentos › Documentos, e depois é apagado.</p>
+    </div>
+  </div>`;
+}
+
+/* a gerente: só as unidades dela e só no prazo (o banco já filtra) */
+function docsAdmDaGerente(){
+  const agora = new Date().toISOString();
+  return DOCS_ADM.filter(d => daUnidadeGer(d.unidadeId) && (!d.disponivelAte || d.disponivelAte >= agora));
+}
+function gerDocumentos(){
+  $('#abaGer').innerHTML = `
+    <div class="space-y-4">
+      <div class="rounded-xl border border-blue-200 bg-blue-50 px-5 py-3 text-xs text-blue-900 flex items-start gap-3">
+        <i class="fa-solid fa-circle-info mt-0.5"></i>
+        <div>Cartas de abertura de conta e pedidos de demissão emitidos pela equipe de admissão para a sua unidade.
+          Ficam aqui por <b>${ADM_DIAS_CONTRATO} dias</b> para impressão e assinatura.</div>
+      </div>
+      <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">${docAdmGrade(docsAdmDaGerente(), true)}</div>
+    </div>`;
+}
+
 /* histórico do colaborador: o que houve na admissão (quando ainda há registro) */
 function admHistoricoHTML(c, secao, campo){
   const a = ADMISSOES.find(x => x.colaboradorId === c.id) || ADMISSOES.find(x => cpfDigitos(x.cpf) === cpfDigitos(c.cpf) && cpfDigitos(c.cpf));
@@ -16696,7 +17055,7 @@ async function extrairLinhasPdf(file) {
   ['f_pai','f_mae','f_conjuge','f_recado','f_zona','f_secao','f_cnh','f_ctps','f_ctps_s','f_ctps_uf','f_ctps_emissao','f_passes','f_exp'].forEach(setM);
     campos.f_salario = '';
     campos.f_orgao = 'SSP/';
-    campos.f_admissao = isoToday();
+    campos.f_admissao = '';            /* a data de admissão vem em branco (Jessica, 30/10/2026) */
     const depsLinhas = coletarRespostaDependentes(linhas);
     let deps = parseDependentesV2(depsLinhas);
     if (!deps.length) deps = parseDependentesCompleto(depsLinhas.join(', '));
