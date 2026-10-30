@@ -113,9 +113,9 @@ tailwind.config = {
   <div id="banner" class="no-print"></div>
   <main id="view" class="flex-1 p-4 sm:p-6"></main>
 
-  <!-- 2026.10.30-330f0f1 é preenchido no build: data + commit do código publicado -->
+  <!-- 2026.10.30-ab881c3 é preenchido no build: data + commit do código publicado -->
   <footer class="px-6 py-4 text-[11px] text-slate-500 border-t border-slate-200 bg-white no-print">
-    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.30-330f0f1
+    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.30-ab881c3
     <span id="rodapePlanilha" class="hidden"> ·
       <button onclick="sincronizarPlanilha()" class="underline hover:text-accent">sincronizar novidades da planilha</button>
       ·
@@ -3916,6 +3916,8 @@ function fmtDiasAcomp(d){
 }
 /* Os pedidos das gerentes, no formato das outras grades. Só os abertos: pedido
    resolvido sai da fila e o que sobra é a emissão. */
+/* a equipe de RH marcou que ela mesma agendou na Arys (ver admEnviarPedidoAso) */
+function pedidoAgendadoPeloRh(p){ return String(p && p.observacao || '').includes('Agendado na Arys pelo RH'); }
 function itensPedidos(){
   const porNome = nome => DB.colaboradores.find(x => norm(x.nome) === norm(nome)) || null;
   const recusar = { label:'Recusar', icon:'fa-xmark', dica:'exige motivo, que a gerente vê',
@@ -3923,6 +3925,7 @@ function itensPedidos(){
   return pedidosAbertos().map(p => {
     const c = (p.colaboradorId && colab(p.colaboradorId)) || porNome(p.nome);
     const novo = !c;
+    const rh = pedidoAgendadoPeloRh(p);
     return {
       origem:'Pedido', pedidoId:p.id, colaborador:p.nome, unidadeId:p.unidadeId,
       semCadastro: novo,
@@ -3931,9 +3934,12 @@ function itensPedidos(){
       quando: 'pedido ' + fmtDate((p.pedidoEm || '').slice(0,10)) +
               (p.pedidoPor ? ' · ' + p.pedidoPor : ''),
       dias: null,
-      statusLabel: novo ? 'Sem cadastro' : 'Pedido aberto',
-      statusCls: novo ? 'bg-amber-100 text-amber-700' : 'bg-indigo-100 text-indigo-700',
-      acoes: [ novo
+      statusLabel: novo ? 'Sem cadastro' : rh ? 'Agendado pelo RH' : 'Pedido aberto',
+      statusCls: novo ? 'bg-amber-100 text-amber-700' : rh ? 'bg-emerald-100 text-emerald-700' : 'bg-indigo-100 text-indigo-700',
+      acoes: [ rh && !novo
+        ? { label:'Registrar exame', icon:'fa-calendar-check', acao:`aprovarPedido('${p.id}')`,
+            dica:'o RH já agendou na Arys: só registre o exame, não agende de novo' }
+        : novo
         ? { label:'Cadastrar e agendar', icon:'fa-user-plus', acao:`aprovarPedido('${p.id}')`,
             dica:'cria a ficha marcada como "revisar" e abre o exame' }
         : { label:'Agendar', icon:'fa-calendar-plus', acao:`aprovarPedido('${p.id}')`,
@@ -7793,6 +7799,10 @@ function editarColab(id, pre){
         if(pre && pre._aposSalvar) pre._aposSalvar(alvo, em);
         closeModal(); go('exames');
         toast('Colaborador salvo.' + eco + ' Exame ' + tipoLabel(em.tipoExame).toLowerCase() + ' criado como Solicitado.');
+        /* vai direto para Agendamento de exames: sem este quadro não sobrava de
+           onde copiar os dados para a Arys */
+        abrirQuadroArys(dadosArysDoColab(alvo, em.unidadeId, em.tipoExame),
+                        'Agendar na Arys — ' + alvo.nome);
         return;
       }
       /* aberto de outra tela (Admissões): quem abriu decide para onde voltar */
@@ -7902,7 +7912,9 @@ function aprovarPedido(id){
           ${p.funcaoNova ? linha('Função nova', esc(p.funcaoNova)) : ''}
           ${linha('Pedido por', esc(p.pedidoPor||'—') + ' · ' + esc(fmtDate((p.pedidoEm||'').slice(0,10))))}
           ${p.observacao ? linha('Observação', esc(p.observacao)) : ''}
-        </div>` },
+        </div>
+        ${pedidoAgendadoPeloRh(p) ? `<div class="sm:col-span-2 rounded-lg border border-emerald-300 bg-emerald-50 px-4 py-2 text-xs text-emerald-800">
+          <i class="fa-solid fa-circle-check mr-1"></i>O RH já agendou este exame na Arys. Registre aqui sem agendar de novo.</div>` : ''}` },
 
       ...(avisos.length ? [{ type:'html', name:'avisos',
         html:`<div class="sm:col-span-2 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3">
@@ -9490,22 +9502,53 @@ const ARYS_COPIA = 'carmen@emeraldvip.com.br';
 function dadosAgendamentoArys(){
   const f = document.getElementById('modalForm'); if(!f) return null;
   const val = n => f.elements[n] ? (f.elements[n].value || '').trim() : '';
-  const nome = val('colaborador'), unidadeId = val('unidadeId'), tipoExame = val('tipoExame');
+  const nome = val('colaborador'), unidadeId = val('unidadeId');
   const c = DB.colaboradores.find(x => norm(x.nome) === norm(nome)) || {};
+  /* modal vence; senão, cadastro */
+  return dadosArysDoColab(Object.assign({}, c, { nome, funcao: val('funcao') || c.funcao || '' }),
+                          unidadeId, val('tipoExame'));
+}
+/* o mesmo quadro fora da modal de emissão: a pessoa vem do cadastro (Atlas) */
+function dadosArysDoColab(c, unidadeId, tipoExame){
   const u = uni(unidadeId), e = u ? emp(u.empresaId) : null, cli = u ? clinicaDaUnidade(u) : null;
-  const funcao = val('funcao') || c.funcao || '';           /* modal vence; senão, cadastro */
-  const cart = exigeCarteirinha(unidadeId, funcao);
+  const cart = exigeCarteirinha(unidadeId, c.funcao || '');
+  return montarDadosArys(c, tipoExame, {
+    cnpj: u ? (u.cnpj || '') : '', empresa: e ? (e.nome || '') : '', sigla: u ? (u.sigla || '') : '',
+    clinica: cli, carteirinha: !!(cart && cart.exige) });
+}
+function montarDadosArys(c, tipoExame, u){
   const obs = [];
-  if(cart && cart.exige) obs.push('Carteirinha sanitária.');
-  if(cli && cli.nome) obs.push('Clínica: ' + cli.nome + (cli.endereco ? ' - ' + cli.endereco : ''));
+  if(u.carteirinha) obs.push('Carteirinha sanitária.');
+  if(u.clinica && u.clinica.nome) obs.push('Clínica: ' + u.clinica.nome + (u.clinica.endereco ? ' - ' + u.clinica.endereco : ''));
   obs.push('Copiar para ' + ARYS_COPIA);
   return {
-    cnpj: u ? (u.cnpj || '') : '', empresa: e ? (e.nome || '') : '', solicitante: ARYS_SOLICITANTE,
-    setor: u ? (u.sigla || '') : '', funcao, nome,
+    cnpj: u.cnpj || '', empresa: u.empresa || '', solicitante: ARYS_SOLICITANTE,
+    setor: u.sigla || '', funcao: c.funcao || '', nome: c.nome || '',
     nascimento: c.nascimento || '', cpf: c.cpf || '', rg: c.rg || '',
     email: c.email || '', celular: c.celular || '', genero: SEXO_PESSOA[c.sexo || ''] || '',
     tipoExame: TIPOS[tipoExame] || tipoExame || '', telemedicina: 'Não', observacao: obs.join(' ')
   };
+}
+/* a equipe de RH não lê a base da Atlas: a pessoa vem da ficha e a clínica e a
+   carteirinha vêm do banco, só da unidade dela (sql/12) */
+async function dadosArysDaAdmissao(a){
+  const un = (typeof admUnidade === 'function' && admUnidade(a.unidadeId)) || {};
+  const s = a.sst || {};
+  const pessoa = { nome:maiusc(a.nome), cpf:admCpfFmt(a.cpf), funcao: funcaoCanonica(a.funcao || '') || a.funcao || '',
+                   nascimento:s.nascimento || '', rg:s.rg || '', email:s.email || '', celular:s.celular || '', sexo:s.sexo || '' };
+  if(ACESSO.irrestrito || !nuvemLigada()) return dadosArysDoColab(pessoa, a.unidadeId, 'ADMISSIONAL');
+  let cli = null, cart = false;
+  try{
+    const { data, error } = await sb.rpc('atlas_admissao_arys', { p_unidade:a.unidadeId });
+    const x = !error && (data || [])[0];
+    if(x){
+      cli = x.clinica_nome ? { nome:x.clinica_nome, endereco:x.clinica_endereco || '' } : null;
+      const alvo = norm(funcaoCanonica(pessoa.funcao));
+      cart = !!alvo && (x.carteirinha_funcoes || []).some(f => norm(funcaoCanonica(f)) === alvo);
+    }
+  }catch(e){ console.warn('atlas_admissao_arys', e); }
+  return montarDadosArys(pessoa, 'ADMISSIONAL',
+    { cnpj:un.cnpj || '', empresa:un.empresa || '', sigla:un.sigla || '', clinica:cli, carteirinha:cart });
 }
 function linhasArys(d){
   return [
@@ -9526,14 +9569,39 @@ function copiarArys(i){
 function atualizarPainelArys(){
   const box = document.getElementById('painelArysBox'); if(!box) return;
   const d = dadosAgendamentoArys(); if(!d) return;
+  box.innerHTML = htmlLinhasArys(d);
+}
+function htmlLinhasArys(d){
   _arysLinhas = linhasArys(d);
-  box.innerHTML = _arysLinhas.map((l, i) => `
+  return _arysLinhas.map((l, i) => `
     <div class="flex items-start gap-2 py-1 border-b border-emerald-100 last:border-0">
       <span class="text-[11px] text-slate-500 w-36 shrink-0 pt-0.5">${esc(l[0])}</span>
       <span class="text-xs text-slate-800 flex-1 min-w-0 break-words">${esc(l[1] || '—')}</span>
       <button type="button" onclick="copiarArys(${i})" title="Copiar este campo"
         class="shrink-0 text-slate-400 hover:text-emerald-700 px-1"><i class="fa-regular fa-copy"></i></button>
     </div>`).join('');
+}
+/* O quadro sozinho, numa janela própria — depois de "Salvar e solicitar ASO"
+   no cadastro (que vai direto para Agendamento de exames) e para a equipe de
+   RH, que agenda na Arys sem abrir a emissão. `rodape` substitui o Fechar. */
+function abrirQuadroArys(d, titulo, rodape, aviso){
+  openInfo(titulo || 'Dados para agendar na Arys', `
+    <div class="space-y-3">
+      ${aviso ? `<div class="text-sm text-slate-700">${aviso}</div>` : ''}
+      <div class="rounded-lg border border-emerald-200 bg-emerald-50/60 px-4 py-3">
+        <div class="flex items-center gap-2 mb-2">
+          <i class="fa-solid fa-truck-medical text-emerald-600"></i>
+          <p class="text-[11px] font-semibold uppercase tracking-wide text-emerald-700 flex-1">Dados para agendar na Arys</p>
+          <button type="button" onclick="agendarNaArys()"
+            class="px-3 py-1.5 rounded-lg text-xs bg-emerald-600 text-white hover:bg-emerald-700 whitespace-nowrap">
+            <i class="fa-solid fa-arrow-up-right-from-square mr-1"></i>Abrir site da Arys</button>
+        </div>
+        <div class="text-sm">${htmlLinhasArys(d)}</div>
+        <p class="text-[10px] text-slate-500 mt-2"><i class="fa-solid fa-circle-info mr-1"></i>Abra o site, copie cada campo pelo ícone <i class="fa-regular fa-copy"></i> e cole. A DATA você preenche no site.</p>
+      </div>
+    </div>`, 'max-w-2xl');
+  $('#modalFoot').innerHTML = rodape ||
+    `<button onclick="closeModal()" class="px-4 py-2 rounded-lg text-sm bg-accent text-white hover:bg-blue-700">Fechar</button>`;
 }
 /* botão: por ora só abre o site; o preenchimento é copiando do quadro acima */
 function agendarNaArys(){ window.open(ARYS_URL, '_blank'); }
@@ -15378,19 +15446,33 @@ async function admPedirAso(id){
                   } });
     return;
   }
-  admConfirmar('Solicitar ASO admissional',
-    `<p><b>${esc(a.nome)}</b> já está na base de colaboradores.</p>
-     <p>Pedir à Atlas o exame <b>admissional</b>?</p>
-     <p class="text-xs text-slate-500">O pedido entra na fila da Atlas, que agenda o exame na clínica da unidade.</p>`,
-    'Sim, pedir', async () => {
-      const r = await nuvemAbrirSolicitacao({ unidadeId:a.unidadeId, colaboradorId:c.id, nome:a.nome, cpf:a.cpf,
-        funcao:a.funcao || '', tipoExame:'ADMISSIONAL', observacao:'Pedido pela ficha de admissão' });
-      if(!r.ok){ toast('Não consegui enviar o pedido: ' + (r.motivo || 'motivo desconhecido'), 'erro'); return; }
-      a.asoPedidoEm = new Date().toISOString();
-      admAvisarFalha(await admSalvar(a), 'o pedido de ASO');
-      if(UIAdm.edit) admRenderForm(true); else viewAdmissoes();
-      toast('Pedido de ASO admissional enviado para a Atlas.');
-    });
+  /* Equipe de RH: vê o quadro da Arys e escolhe se agendou ela mesma.
+     Nos dois casos o pedido entra na fila da Atlas — que lança o exame e o
+     resultado; o "agendado pelo RH" avisa para não agendar de novo. */
+  _admPedidoAso = { a, c };
+  abrirQuadroArys(await dadosArysDaAdmissao(a), 'Solicitar ASO admissional — ' + a.nome,
+    `<button onclick="closeModal()" class="px-4 py-2 rounded-lg text-sm text-slate-600 hover:bg-slate-100 mr-auto">Cancelar</button>
+     <button onclick="admEnviarPedidoAso(false)" class="px-4 py-2 rounded-lg text-sm border border-slate-300 text-slate-700 hover:bg-slate-50">A Atlas agenda</button>
+     <button onclick="admEnviarPedidoAso(true)" class="px-4 py-2 rounded-lg text-sm bg-emerald-600 text-white hover:bg-emerald-700">
+       <i class="fa-solid fa-check mr-1"></i>Já agendei na Arys</button>`,
+    `<p><b>${esc(a.nome)}</b> já está na base de colaboradores. Se for agendar você mesmo, use os dados abaixo no site da Arys
+       e depois clique em <b>Já agendei na Arys</b>. Se preferir, clique em <b>A Atlas agenda</b>.</p>`);
+}
+let _admPedidoAso = null;
+const ARYS_MARCA_RH = 'Agendado na Arys pelo RH';
+async function admEnviarPedidoAso(agendou){
+  const x = _admPedidoAso; if(!x) return;
+  const { a, c } = x;
+  const r = await nuvemAbrirSolicitacao({ unidadeId:a.unidadeId, colaboradorId:c.id, nome:a.nome, cpf:a.cpf,
+    funcao:a.funcao || '', tipoExame:'ADMISSIONAL',
+    observacao:'Pedido pela ficha de admissão' + (agendou ? ' · ' + ARYS_MARCA_RH + ' em ' + fmtDate(isoToday()) : '') });
+  if(!r.ok){ toast('Não consegui enviar o pedido: ' + (r.motivo || 'motivo desconhecido'), 'erro'); return; }
+  _admPedidoAso = null; closeModal();
+  a.asoPedidoEm = new Date().toISOString();
+  admAvisarFalha(await admSalvar(a), 'o pedido de ASO');
+  if(UIAdm.edit) admRenderForm(true); else viewAdmissoes();
+  toast(agendou ? 'Pronto: a Atlas foi avisada de que você agendou na Arys.'
+                : 'Pedido de ASO admissional enviado para a Atlas, que vai agendar.');
 }
 
 /* ═════════ experiência e férias ═════════
