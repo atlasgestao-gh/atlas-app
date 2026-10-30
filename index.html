@@ -113,9 +113,9 @@ tailwind.config = {
   <div id="banner" class="no-print"></div>
   <main id="view" class="flex-1 p-4 sm:p-6"></main>
 
-  <!-- 2026.10.30-ab881c3 é preenchido no build: data + commit do código publicado -->
+  <!-- 2026.10.30-db4ba34 é preenchido no build: data + commit do código publicado -->
   <footer class="px-6 py-4 text-[11px] text-slate-500 border-t border-slate-200 bg-white no-print">
-    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.30-ab881c3
+    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.30-db4ba34
     <span id="rodapePlanilha" class="hidden"> ·
       <button onclick="sincronizarPlanilha()" class="underline hover:text-accent">sincronizar novidades da planilha</button>
       ·
@@ -13519,8 +13519,16 @@ function candidatosReparoAso(){
     return { c, em: ems[0] || null };
   });
 }
+/* o que o aviso de Backup mostra: só o que pede ação (Jessica, 30/10/2026).
+   Quem está com exame Solicitado/Agendado ainda não tem ASO por natureza, e
+   desligado sem exame nenhum não tem o que fazer — esses ficam de fora. */
+function pendenciasAso(){
+  const emAberto = c => DB.emissoes.some(e => (e.status === 'SOLICITADO' || e.status === 'AGENDADO') &&
+    norm(e.colaborador || '') === norm(c.nome || ''));
+  return candidatosReparoAso().filter(x => x.em || (x.c.status === 'Ativo' && !emAberto(x.c)));
+}
 async function repararAsosPerdidos(){
-  const cand = candidatosReparoAso();
+  const cand = pendenciasAso();
   const comExame = cand.filter(x => x.em);
   const semExame = cand.filter(x => !x.em);
   if(!cand.length){ toast('Nenhum colaborador está sem ASO — nada a reparar.', 'info'); return; }
@@ -13546,8 +13554,9 @@ async function repararAsosPerdidos(){
 
 async function viewBackup(){
   const snaps = await listarSnapshots();
-  const repAso = candidatosReparoAso();
+  const repAso = pendenciasAso();
   const repComExame = repAso.filter(x => x.em).length;
+  const repSemExame = repAso.filter(x => !x.em);
   const tamanho = (JSON.stringify(DB).length / 1024).toFixed(0);
   const registros = ['colaboradores','asos','emissoes','laudos','unidades','cargos','matriz']
     .map(k => `${(DB[k]||[]).length} ${k}`).join(' · ');
@@ -13574,13 +13583,16 @@ async function viewBackup(){
     ${repAso.length ? `
     <div class="rounded-xl border-2 border-amber-300 bg-amber-50 p-5">
       <p class="font-bold text-sm text-amber-900"><i class="fa-solid fa-heart-pulse mr-1"></i>
-        ${repAso.length} colaborador(es) sem ASO registrado</p>
+        ${repAso.length} colaborador(es) sem ASO que pedem atenção</p>
       <p class="text-xs text-amber-900 mt-1">
-        ${repComExame ? `<b>${repComExame}</b> tem exame realizado no sistema — dá para reconstruir o ASO a partir dele,
-          com a data e o vencimento corretos.` : 'Nenhum deles tem exame realizado registrado, então não há de onde reconstruir.'}
-        ${repAso.length - repComExame ? ` Os outros ${repAso.length - repComExame} não têm exame de origem.` : ''}</p>
-      <p class="text-[11px] text-amber-800 mt-1">Se isso apareceu depois de você editar fichas em 31/08/2026,
-        foi um defeito no campo de último ASO — já corrigido. Um ponto de retorno é guardado antes do reparo.</p>
+        ${repComExame ? `<b>${repComExame}</b> tem exame realizado no sistema, mas o ASO não foi registrado — dá para
+          reconstruir a partir do exame, com a data e o vencimento corretos.` : ''}
+        ${repSemExame.length ? ` <b>${repSemExame.length}</b> ativo(s) sem nenhum exame registrado nem em andamento:
+          falta lançar o exame ou conferir o cadastro.` : ''}</p>
+      ${repSemExame.length ? `<details class="mt-2 text-xs text-amber-900"><summary class="cursor-pointer font-medium">Ver quem está sem exame</summary>
+        <ul class="mt-1 ml-4 list-disc">${repSemExame.map(x => `<li>${esc(x.c.nome || '—')} · ${esc((uni(x.c.unidadeId)||{}).sigla || (uni(x.c.unidadeId)||{}).nome || 'sem unidade')}${x.c.admissao ? ' · admitido em ' + fmtDate(x.c.admissao) : ''}</li>`).join('')}</ul></details>` : ''}
+      <p class="text-[11px] text-amber-800 mt-1">Quem está com exame Solicitado ou Agendado não entra aqui: o ASO
+        aparece quando o exame for marcado como Realizado. Um ponto de retorno é guardado antes do reparo.</p>
       ${repComExame ? `<button onclick="repararAsosPerdidos()"
         class="mt-3 px-4 py-2 rounded-lg text-sm bg-amber-600 text-white hover:bg-amber-700">
         <i class="fa-solid fa-wand-magic-sparkles mr-1"></i>Reconstruir ${repComExame} ASO(s) pelos exames</button>` : ''}
@@ -13895,12 +13907,17 @@ const ADM_SECOES = [
     ['f_cpf','N° CPF',2], ['f_pis','N° PIS',2], ['f_instrucao','Escolaridade',2,'','ENSINO FUNDAMENTAL COMPLETO'],
     ['f_titulo','N° título de eleitor',2], ['f_zona','Zona',2], ['f_secao','Seção',2],
     ['f_cnh','Carteira de habilitação/Estado',2], ['f_ctps','CTPS N°',2,'','DIGITAL'], ['f_ctps_s','Série - Estado',2],
-    ['f_ctps_uf','UF',2], ['f_ctps_emissao','Emissão CTPS',2] ] },
+    ['f_ctps_uf','UF',3], ['f_ctps_emissao','Emissão CTPS',3] ] },
   { t:'Filiação', c:[ ['f_pai','Nome do pai',3], ['f_mae','Nome da mãe',3] ] },
   { t:'Dados bancários e vale-transporte', c:[
     ['f_banco','Banco',2,'','Itaú'], ['f_ag','Agência',2], ['f_conta','Conta',2],
     ['f_pix','Chave PIX',2], ['f_passes','N° passes/dia',2,'','2'], ['f_vt','Valor diário VT (R$)',2] ] }
 ];
+/* vêm preenchidos em toda ficha e podem ser editados (Jessica, 30/10/2026);
+   campo apagado volta com o padrão na próxima abertura */
+const ADM_TRACO = '---------';
+const ADM_PADROES = { f_passes:'2', f_banco:'ITAÚ', f_ctps_uf:ADM_TRACO, f_ctps_emissao:ADM_TRACO,
+  f_cnh:ADM_TRACO, f_ctps_s:ADM_TRACO, f_recado:ADM_TRACO, f_conjuge:ADM_TRACO };
 const ADM_CAMPOS = ['f_funcao','f_salario','f_admissao']
   .concat(...ADM_SECOES.map(s => s.c.map(x => x[0])));
 /* e-mail e PIX ficam como a pessoa digitou: chave PIX aleatória diferencia maiúscula */
@@ -14328,7 +14345,8 @@ function admRenderForm(manterRolagem){
   const f = (a && a.ficha) || {};
   const campos = f.campos || {}, checks = f.checks || { cb1:true, cb2:true }, radios = f.radios || {};
   const s = (a && a.sst) || {};
-  const val = id => campos[id] != null ? campos[id] : (id === 'f_orgao' ? 'SSP/' : '');
+  const val = id => (campos[id] != null && campos[id] !== '') ? campos[id]
+    : (ADM_PADROES[id] || (campos[id] == null && id === 'f_orgao' ? 'SSP/' : ''));
   const unis = admUnidades();
   const uniSel = a ? a.unidadeId : (unis.length === 1 ? unis[0].id : '');
   const radio = (nome, v, rot, marcado) => `<label class="flex items-center gap-2 text-sm cursor-pointer">
@@ -14341,7 +14359,7 @@ function admRenderForm(manterRolagem){
 
   $('#pageSub').textContent = a ? 'Ficha de ' + (a.nome || '—') : 'Nova admissão';
   $('#view').innerHTML = `
-    <div class="space-y-4 max-w-5xl">
+    <div class="space-y-4 w-full">
       <div class="flex flex-wrap items-center gap-2 no-print">
         ${botao('Voltar', 'fa-arrow-left', 'admFecharForm()', 'bg-white border border-slate-300 text-slate-700 hover:bg-slate-50')}
         <span class="text-sm font-semibold text-slate-700">${a ? esc(a.nome || 'Ficha') : 'Nova admissão'}</span>
@@ -14373,13 +14391,13 @@ function admRenderForm(manterRolagem){
 
       ${caixa('Cargo e contrato', `
         <div class="grid grid-cols-6 gap-4">
-          <div class="col-span-6 sm:col-span-3">
+          <div class="col-span-6 sm:col-span-2">
             <label class="block text-xs font-medium text-slate-600 mb-1">Função / cargo</label>
             <input id="adm_f_funcao" list="admListaFuncoes" value="${esc(val('f_funcao'))}" oninput="admCor(this)" autocomplete="off" class="${ADM_CLS_CAMPO} uppercase">
             <datalist id="admListaFuncoes">${Object.keys(ADM_CATALOGO).map(k => `<option value="${esc(k)}">`).join('')}</datalist>
           </div>
           ${admCampoHTML(['f_salario','Salário (R$)',1,'','00,00'], val('f_salario'))}
-          ${admCampoHTML(['f_admissao','Data de admissão',2,'date'], val('f_admissao') || (a ? '' : isoToday()))}
+          ${admCampoHTML(['f_admissao','Data de admissão',1,'date'],val('f_admissao') || (a ? '' : isoToday()))}
           <div class="col-span-6 sm:col-span-2">
             <label class="block text-xs font-medium text-slate-600 mb-1">Sexo</label>
             <select id="adm_sexo" class="${ADM_CLS_CAMPO}">
@@ -14726,7 +14744,7 @@ async function admImportarPdf(input){
     Object.keys(r.campos).forEach(id => {
       const el = document.getElementById('adm_' + id);
       if(!el) return;
-      const v = r.campos[id] || '';
+      const v = r.campos[id] || ADM_PADROES[id] || '';
       el.value = (ADM_SEM_CAIXA_ALTA.indexOf(id) >= 0 || el.type === 'date') ? v : String(v).toLocaleUpperCase('pt-BR');
       admCor(el);
     });
