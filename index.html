@@ -110,9 +110,9 @@ tailwind.config = {
   <div id="banner" class="no-print"></div>
   <main id="view" class="flex-1 p-4 sm:p-6"></main>
 
-  <!-- 2026.11.06-70b1a15 é preenchido no build: data + commit do código publicado -->
+  <!-- 2026.11.06-dd47db2 é preenchido no build: data + commit do código publicado -->
   <footer class="px-6 py-4 text-[11px] text-slate-500 border-t border-slate-200 bg-white no-print">
-    <span class="font-display text-primary">ATLAS</span> · versão 2026.11.06-70b1a15
+    <span class="font-display text-primary">ATLAS</span> · versão 2026.11.06-dd47db2
     <span id="rodapePlanilha" class="hidden"> ·
       <button onclick="sincronizarPlanilha()" class="underline hover:text-accent">sincronizar novidades da planilha</button>
       ·
@@ -12801,17 +12801,34 @@ function importarAtestados(input){
         return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0,10) : '';
       };
       /* casa o texto da planilha com as unidades cadastradas.
-         O relatório usa "Sala Confins - CNF": a sigla vem depois do último hífen. */
+         O relatório usa "Sala Confins - CNF": a sigla vem depois do último hífen.
+         Ordem: o texto INTEIRO (sigla, nome ou apelido) vem antes da sigla do fim —
+         senão "Emerald - SDU" caía na Advantage SDU (06/11/2026). Quando só a
+         sigla do fim casa e há mais de uma candidata, ganha a que tem as outras
+         palavras do texto (ex.: "Esmeralda") no nome, na empresa ou nos apelidos. */
       const achaUnidade = txt => {
         const bruto = String(txt||'').trim();
         const n = norm(bruto); if(!n) return '';
         const sufixo = norm(bruto.split(/[-–]/).pop());          /* "CNF" */
         const acha = f => { const u = DB.unidades.find(f); return u ? u.id : ''; };
-        return acha(x => norm(x.sigla) === sufixo)               /* sigla explícita no fim */
-            || acha(x => norm(x.sigla) === n || norm(x.nome) === n)
-            || acha(x => (x.aliases||[]).some(al => norm(al) === n || norm(al) === sufixo))
-            || acha(x => norm(x.nome).includes(n) || (sufixo.length >= 3 && n.includes(norm(x.sigla))))
+        const inteiro = acha(x => norm(x.sigla) === n || norm(x.nome) === n || (x.aliases||[]).some(al => norm(al) === n));
+        if(inteiro) return inteiro;
+        /* "SDU" também lembra "SDU - E": as duas entram e as palavras decidem */
+        const cands = DB.unidades.filter(x => sufixo.length >= 3 && (norm(x.sigla).startsWith(sufixo) || (x.aliases||[]).some(al => norm(al) === sufixo)));
+        if(cands.length){
+          const palavras = bruto.split(/[\s\-–]+/).map(norm).filter(w => w.length >= 3 && w !== sufixo && w !== 'SALA');
+          const chave = x => norm([x.nome, x.sigla, (x.aliases||[]).join(' '), (emp(x.empresaId)||{}).nome].join(' '));
+          const nota = x => palavras.filter(w => chave(x).includes(w)).length;
+          const exata = x => norm(x.sigla) === sufixo ? 1 : 0;   /* empate: a sigla idêntica */
+          return cands.slice().sort((x, y) => nota(y) - nota(x) || exata(y) - exata(x))[0].id;
+        }
+        return acha(x => norm(x.nome).includes(n) || (sufixo.length >= 3 && n.includes(norm(x.sigla))))
             || '';
+      };
+      /* a pessoa já está no cadastro numa unidade só: vale a unidade do cadastro */
+      const uniDaPessoa = nome => {
+        const us = [...new Set((DB.colaboradores||[]).filter(c => norm(c.nome) === norm(nome) && c.unidadeId).map(c => c.unidadeId))];
+        return us.length === 1 ? us[0] : '';
       };
 
       /* SÓ atestados médicos entram — faltas, dispensas e suspensões são ignoradas */
@@ -12830,7 +12847,7 @@ function importarAtestados(input){
         if(!nome || !data) return;
         candidatas.push({
           nome, data,
-          unidadeId: achaUnidade(col.loc ? l[col.loc] : ''),
+          unidadeId: uniDaPessoa(nome) || achaUnidade(col.loc ? l[col.loc] : ''),
           cid: limpaCid(col.cid ? l[col.cid] : ''),
           motivo: String(col.mot ? l[col.mot] : '').trim(),
           medico: String(col.med ? l[col.med] : '').trim()
