@@ -110,9 +110,9 @@ tailwind.config = {
   <div id="banner" class="no-print"></div>
   <main id="view" class="flex-1 p-4 sm:p-6"></main>
 
-  <!-- 2026.10.30-5258a57 é preenchido no build: data + commit do código publicado -->
+  <!-- 2026.11.06-70b1a15 é preenchido no build: data + commit do código publicado -->
   <footer class="px-6 py-4 text-[11px] text-slate-500 border-t border-slate-200 bg-white no-print">
-    <span class="font-display text-primary">ATLAS</span> · versão 2026.10.30-5258a57
+    <span class="font-display text-primary">ATLAS</span> · versão 2026.11.06-70b1a15
     <span id="rodapePlanilha" class="hidden"> ·
       <button onclick="sincronizarPlanilha()" class="underline hover:text-accent">sincronizar novidades da planilha</button>
       ·
@@ -3473,11 +3473,13 @@ function botao(txt, icon, onclick, cls='bg-accent text-white hover:bg-blue-700')
     <i class="fa-solid ${icon}"></i><span class="hidden sm:inline">${esc(txt)}</span></button>`;
 }
 function opcoesUnidades(){
-  return DB.unidades.map(u => ({ v:u.id, l:u.nome }));
+  return DB.unidades.map(u => ({ v:u.id, l:u.nome })).sort(porRotulo);
 }
 function opcoesEmpresas(){
-  return DB.empresas.map(e => ({ v:e.id, l:e.nome }));
+  return DB.empresas.map(e => ({ v:e.id, l:e.nome })).sort(porRotulo);
 }
+/* combos de unidade e empresa sempre em ordem alfabética (pedido da Jessica, 06/11/2026) */
+function porRotulo(a, b){ return String(a.l||'').localeCompare(String(b.l||''), 'pt-BR', { sensitivity:'base' }); }
 /* tamanho de página global — todas as grids usam 10 (ou 20) linhas por página */
 let PAGE_SIZE = 10;
 function setPageSize(n){ PAGE_SIZE = Number(n) || 10; if(rota) go(rota); }
@@ -13977,9 +13979,10 @@ function admCpfFmt(v){
 /* quem usa: o master (e o build local) lê de DB; a equipe de admissão não tem
    DB nenhum — recebe do banco só o nome das unidades e o quadro básico */
 function admUnidades(){
-  if(ACESSO.admissao) return ADM_UNIS || [];
-  return (DB.unidades||[]).map(u => ({ id:u.id, nome:u.nome, sigla:u.sigla||'', cnpj:u.cnpj||'',
-    cidade:u.cidade||'', uf:u.uf||'', empresa:(emp(u.empresaId)||{}).nome || '', empresaId:u.empresaId || '' }));
+  const lista = ACESSO.admissao ? (ADM_UNIS || []) :
+    (DB.unidades||[]).map(u => ({ id:u.id, nome:u.nome, sigla:u.sigla||'', cnpj:u.cnpj||'',
+      cidade:u.cidade||'', uf:u.uf||'', empresa:(emp(u.empresaId)||{}).nome || '', empresaId:u.empresaId || '' }));
+  return lista.slice().sort((a,b) => String(a.nome||'').localeCompare(String(b.nome||''), 'pt-BR', { sensitivity:'base' }));
 }
 function admUnidade(id){ return admUnidades().find(u => u.id === id) || null; }
 function admUniNome(id){ const u = admUnidade(id); return u ? u.nome : '—'; }
@@ -14413,7 +14416,7 @@ function admRenderForm(manterRolagem){
             <label class="block text-xs font-medium text-slate-600 mb-1">Unidade de trabalho <span class="text-danger">*</span></label>
             <select id="adm_unidade" class="${ADM_CLS_CAMPO}">
               <option value="">— selecione —</option>
-              ${unis.slice().sort((x,y) => x.nome.localeCompare(y.nome,'pt-BR')).map(u =>
+              ${unis.map(u => ({ u, l:(u.sigla ? u.sigla + ' - ' : '') + u.nome })).sort(porRotulo).map(({ u }) =>
                 `<option value="${esc(u.id)}" ${u.id === uniSel ? 'selected' : ''}>${esc((u.sigla ? u.sigla + ' - ' : '') + u.nome)}</option>`).join('')}
             </select>
           </div>
@@ -16001,7 +16004,7 @@ function docAdmEmitir(tipo){
         <datalist id="docAdmLista">${_docAdmPessoas.map(p => `<option value="${esc(p.rotulo)}"></option>`).join('')}</datalist>
         <p class="text-[11px] text-slate-400 mt-1">Ao escolher, os campos abaixo se preenchem. Tudo pode ser corrigido antes de emitir.</p></div>` },
     { name:'unidadeId', label:'Unidade', type:'select', req:true,
-      options:[{ v:'', l:'Selecione...' }].concat(unis.map(u => ({ v:u.id, l:(u.sigla ? u.sigla + ' - ' : '') + u.nome }))) },
+      options:[{ v:'', l:'Selecione...' }].concat(unis.map(u => ({ v:u.id, l:(u.sigla ? u.sigla + ' - ' : '') + u.nome })).sort(porRotulo)) },
     { name:'timbrado', label:'Papel', type:'select',
       options:[{ v:'1', l:'Com timbrado da empresa' }, { v:'0', l:'Sem timbrado' }] },
     { name:'nome', label:'Nome completo', req:true },
