@@ -110,9 +110,9 @@ tailwind.config = {
   <div id="banner" class="no-print"></div>
   <main id="view" class="flex-1 p-4 sm:p-6"></main>
 
-  <!-- 2026.11.06-dd47db2 é preenchido no build: data + commit do código publicado -->
+  <!-- 2026.11.17-b908a8d é preenchido no build: data + commit do código publicado -->
   <footer class="px-6 py-4 text-[11px] text-slate-500 border-t border-slate-200 bg-white no-print">
-    <span class="font-display text-primary">ATLAS</span> · versão 2026.11.06-dd47db2
+    <span class="font-display text-primary">ATLAS</span> · versão 2026.11.17-b908a8d
     <span id="rodapePlanilha" class="hidden"> ·
       <button onclick="sincronizarPlanilha()" class="underline hover:text-accent">sincronizar novidades da planilha</button>
       ·
@@ -13981,6 +13981,20 @@ const ADM_ANEXO_MAX = 5 * 1024 * 1024;
 let ADMISSOES = [], FERIAS = [], CONTRATOS = [];
 let ANEXOS = {};      /* contratoId → { nome, tamanho } — o arquivo em si só é buscado ao abrir */
 let ADM_UNIS = null, ADM_QUADRO = null;       /* só para o perfil admissão (vêm por função do banco) */
+let ADM_CARGOS = null;                         /* perfil admissão: Cargos/CBO lidos do catálogo comum */
+/* funções do contrato: o catálogo fixo + toda função de Cargos/CBO que tenha
+   descrição das atividades (ex.: Concierge). Na mesma função, vale o texto fixo. */
+function admCatalogo(){
+  const cat = Object.assign({}, ADM_CATALOGO);
+  const tem = new Set(Object.keys(cat).map(k => k.trim().toLowerCase()));
+  ((DB && DB.cargos && DB.cargos.length ? DB.cargos : ADM_CARGOS) || []).forEach(c => {
+    const f = String(c.funcao||'').trim(), d = String(c.descricao||'').trim();
+    if(f && d && !tem.has(f.toLowerCase())){ cat[f] = d; tem.add(f.toLowerCase()); }
+  });
+  const out = {};
+  Object.keys(cat).sort((a,b) => a.localeCompare(b,'pt-BR',{ sensitivity:'base' })).forEach(k => out[k] = cat[k]);
+  return out;
+}
 const UIAdm = { aba:'fichas', q:'', uni:'', page:1, pageAc:1, filtroAc:'', qAc:'', uniAc:'', edit:null };
 
 const admissao = id => ADMISSOES.find(a => a.id === id) || null;
@@ -14021,8 +14035,9 @@ function admTema(unidadeId){
 function admDescricaoFuncao(func){
   if(!func) return '';
   const alvo = String(func).trim().toLowerCase();
-  const k = Object.keys(ADM_CATALOGO).find(x => x.trim().toLowerCase() === alvo);
-  return k ? ADM_CATALOGO[k] : '';
+  const cat = admCatalogo();
+  const k = Object.keys(cat).find(x => x.trim().toLowerCase() === alvo);
+  return k ? cat[k] : '';
 }
 /* já está no cadastro? pelo vínculo gravado ou, na falta dele, pelo CPF */
 function admNoCadastro(a){
@@ -14119,6 +14134,9 @@ async function admCarregar(){
       if(!u.error) ADM_UNIS = (u.data || []).map(x => ({ id:x.unidade_id, nome:x.nome || x.unidade_id,
         sigla:x.sigla || '', cnpj:x.cnpj || '', cidade:x.cidade || '', uf:x.uf || '', empresa:x.empresa || '',
         empresaId:x.empresa_id || '' }));
+      const cm = await sb.from('atlas_comum').select('dados').eq('id', 1).single();
+      if(!cm.error) ADM_CARGOS = ((cm.data && cm.data.dados && cm.data.dados.cargos) || [])
+        .map(c => ({ funcao:c.funcao || '', descricao:c.descricao || '' }));
       const q = await sb.rpc('atlas_admissao_quadro');
       if(!q.error) ADM_QUADRO = (q.data || []).map(x => ({ unidadeId:x.unidade_id, id:x.colaborador_id,
         nome:x.nome || '', cpf:x.cpf || '', funcao:x.funcao || '', admissao:x.admissao || '', status:x.status || '' }));
@@ -14455,7 +14473,7 @@ function admRenderForm(manterRolagem){
           <div class="col-span-6 sm:col-span-2">
             <label class="block text-xs font-medium text-slate-600 mb-1">Função / cargo</label>
             <input id="adm_f_funcao" list="admListaFuncoes" value="${esc(val('f_funcao'))}" oninput="admCor(this)" autocomplete="off" class="${ADM_CLS_CAMPO} uppercase">
-            <datalist id="admListaFuncoes">${Object.keys(ADM_CATALOGO).map(k => `<option value="${esc(k)}">`).join('')}</datalist>
+            <datalist id="admListaFuncoes">${Object.keys(admCatalogo()).map(k => `<option value="${esc(k)}">`).join('')}</datalist>
           </div>
           ${admCampoHTML(['f_salario','Salário (R$)',1,'','00,00'], val('f_salario'))}
           ${admCampoHTML(['f_admissao','Data de admissão',1,'date'],val('f_admissao'))}
@@ -15245,7 +15263,7 @@ function admAbrirContrato(id){
     : { nome:a.nome, cpf:admCpfFmt(a.cpf), endereco:c.f_end || '', funcao:c.f_funcao || a.funcao || '',
         salario:(c.f_salario && c.f_salario !== '00,00') ? c.f_salario : '', data:fimExp };
   /* a função da ficha vem em caixa alta; o contrato usa a grafia do catálogo */
-  const chave = Object.keys(ADM_CATALOGO).find(k => k.trim().toLowerCase() === String(valores.funcao||'').trim().toLowerCase());
+  const chave = Object.keys(admCatalogo()).find(k => k.trim().toLowerCase() === String(valores.funcao||'').trim().toLowerCase());
   if(chave) valores.funcao = chave;
   openForm({
     title: (ja ? 'Retificar contrato — ' : 'Gerar contrato — ') + (a.nome || ''),
@@ -15266,7 +15284,7 @@ function admAbrirContrato(id){
       { name:'salario', label:'Salário mensal (R$)', req:true, ph:'Ex.: 2.600,00' },
       { name:'endereco', label:'Endereço residencial', req:true, col:'sm:col-span-2', ph:'Logradouro, número, bairro, cidade - UF' },
       { name:'funcao', label:'Função / cargo', type:'datalist', req:true, col:'sm:col-span-2',
-        options:Object.keys(ADM_CATALOGO), hint:'escolha da lista — o contrato leva a descrição das atividades da função' },
+        options:Object.keys(admCatalogo()), hint:'escolha da lista — o contrato leva a descrição das atividades da função' },
       { type:'painel', name:'admDescFuncao', col:'sm:col-span-2' },
       { name:'data', label:'Data do contrato', type:'date', req:true,
         hint:'vai na linha de local e data — por padrão, o último dia da experiência' }
@@ -15294,7 +15312,7 @@ function admAbrirContrato(id){
       if(!desc){ toast('A função "' + v.funcao + '" não tem descrição no catálogo. Escolha uma função da lista.', 'erro'); return; }
       const maius = x => String(x||'').toLocaleUpperCase('pt-BR');
       const dados = { uniKey:cu.chave, nome:maius(v.nome), cpf:admCpfFmt(v.cpf), endereco:maius(v.endereco),
-                      funcao:Object.keys(ADM_CATALOGO).find(k => k.trim().toLowerCase() === v.funcao.trim().toLowerCase()),
+                      funcao:Object.keys(admCatalogo()).find(k => k.trim().toLowerCase() === v.funcao.trim().toLowerCase()),
                       descricao:desc, salario:v.salario, data:v.data };
       /* gerar não é enviar: a pergunta vem antes de gravar qualquer coisa */
       admConfirmarEnvio(a.id, dados);
@@ -16327,7 +16345,6 @@ function admHistoricoHTML(c, secao, campo){
    diferença é que aqui nada escreve na tela: as funções devolvem os campos e
    quem chamou decide o que fazer. Nada do PDF vai para o console. */
 const ADMPDF = (() => {
-  const catalogo = ADM_CATALOGO;
 function limparTexto(str) {
     return str ? str.replace(/\s+/g, ' ').trim() : '';
 }
@@ -16339,7 +16356,7 @@ function limparTexto(str) {
 function mapearFuncao(cargoExtraido) {
     if (!cargoExtraido) return '';
     const norm = limparTexto(cargoExtraido).toLowerCase();
-    const chaves = Object.keys(catalogo);
+    const chaves = Object.keys(admCatalogo());
     let match = chaves.find(k => k.toLowerCase() === norm);
     if (match) return match;
     match = chaves.find(k => norm.includes(k.toLowerCase()));
