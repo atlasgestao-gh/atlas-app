@@ -54,9 +54,17 @@ tailwind.config = {
   table.data { width: 100%; table-layout: auto; }
   @media (min-width: 1024px){
     table.data th, table.data td { padding-left: .6rem; padding-right: .6rem; padding-top: .5rem; padding-bottom: .5rem; }
-    table.data td, table.data th { font-size: 12px; word-break: break-word; }
+    table.data td, table.data th { font-size: 12px; }
     table.data td .truncate { white-space: normal; }
   }
+  /* quebra de linha: só entre palavras, nunca no meio ("Statu/s").
+     Palavra longa demais (e-mail) só quebra se não couber de jeito nenhum. */
+  #main table td, #main table th { word-break: normal; overflow-wrap: break-word; hyphens: manual; vertical-align: middle; }
+  /* cabeçalhos centralizados (quebram só entre palavras) */
+  #main table thead th { text-align: center !important; vertical-align: middle; }
+  /* coluna de ações (botões) centralizada */
+  #main table td.no-print:last-child { text-align: center !important; white-space: nowrap; }
+  #main table td.no-print:last-child > .flex { justify-content: center; }
   /* valores em R$ ficam numa linha só: "R$ 1.234,00" tem espaço e quebrava em duas */
   table.data td.text-right, table.data th.text-right { white-space: nowrap; word-break: normal; }
   /* grades do faturamento: a unidade cede espaço para os números */
@@ -110,9 +118,9 @@ tailwind.config = {
   <div id="banner" class="no-print"></div>
   <main id="view" class="flex-1 p-4 sm:p-6"></main>
 
-  <!-- 2026.11.19-27db760 é preenchido no build: data + commit do código publicado -->
+  <!-- 2026.11.23-f30a14e é preenchido no build: data + commit do código publicado -->
   <footer class="px-6 py-4 text-[11px] text-slate-500 border-t border-slate-200 bg-white no-print">
-    <span class="font-display text-primary">ATLAS</span> · versão 2026.11.19-27db760
+    <span class="font-display text-primary">ATLAS</span> · versão 2026.11.23-f30a14e
     <span id="rodapePlanilha" class="hidden"> ·
       <button onclick="sincronizarPlanilha()" class="underline hover:text-accent">sincronizar novidades da planilha</button>
       ·
@@ -7202,7 +7210,7 @@ function abaColaboradores(){
                     ? `<span class="px-1.5 py-0.5 rounded bg-orange-100 text-orange-800" title="Função fora do catálogo — cadastre em Cargos para ter CBO, atividades e matriz de exames"><i class="fa-solid fa-briefcase mr-1"></i>${esc(c.funcao)}</span>`
                     : `<span class="text-slate-600">${esc(c.funcao)}</span>`}</td>
               <td class="px-4 py-3 text-xs text-slate-500">
-                <p>${esc(c.celular||'—')}</p>
+                <p class="whitespace-nowrap">${esc(c.celular||'—')}</p>
                 <p class="truncate max-w-[180px]">${esc(c.email||'')}</p></td>
               <td class="px-4 py-3 text-xs whitespace-nowrap">${a
                   ? `<input type="date" value="${ultimoExameDe(c)||''}" onchange="setUltimoExame('${c.id}', this.value)"
@@ -9994,7 +10002,7 @@ function abaAsos(){
             <tr><th class="px-4 py-3">Colaborador</th><th class="px-4 py-3">Unidade</th><th class="px-4 py-3">Função</th>
                 <th class="px-4 py-3">Tipo</th><th class="px-4 py-3">Último exame</th><th class="px-4 py-3">Vencimento</th>
                 <th class="px-4 py-3">Dias restantes</th><th class="px-4 py-3">Situação</th>
-                <th class="px-4 py-3">S-2220</th><th class="px-4 py-3">S-2240</th><th class="px-4 py-3 text-right no-print">Ações</th></tr></thead>
+                <th class="px-4 py-3 whitespace-nowrap">S-2220</th><th class="px-4 py-3 whitespace-nowrap">S-2240</th><th class="px-4 py-3 text-right no-print">Ações</th></tr></thead>
           <tbody class="divide-y divide-slate-100">
             ${lista.length ? lista.map(({a,c}) => { const s = situacaoAso(a, c);
               return `<tr class="hover:bg-slate-50">
