@@ -118,9 +118,9 @@ tailwind.config = {
   <div id="banner" class="no-print"></div>
   <main id="view" class="flex-1 p-4 sm:p-6"></main>
 
-  <!-- 2026.11.23-2cb3379 é preenchido no build: data + commit do código publicado -->
+  <!-- 2026.11.23-eb001af é preenchido no build: data + commit do código publicado -->
   <footer class="px-6 py-4 text-[11px] text-slate-500 border-t border-slate-200 bg-white no-print">
-    <span class="font-display text-primary">ATLAS</span> · versão 2026.11.23-2cb3379
+    <span class="font-display text-primary">ATLAS</span> · versão 2026.11.23-eb001af
     <span id="rodapePlanilha" class="hidden"> ·
       <button onclick="sincronizarPlanilha()" class="underline hover:text-accent">sincronizar novidades da planilha</button>
       ·
@@ -9687,7 +9687,7 @@ function linhasArys(d){
     ['Setor', d.setor], ['Função', d.funcao], ['Nome', d.nome],
     ['Data de Nascimento', fmtDate(d.nascimento)], ['CPF', d.cpf], ['RG', d.rg],
     ['E-mail Colaborador', d.email], ['Celular', d.celular], ['Gênero', d.genero],
-    ['Tipo de Exame', d.tipoExame], ['Telemedicina', d.telemedicina], ['Observação', d.observacao]
+    ['Tipo de Exame', d.tipoExame], ['Já é cliente?', 'Sim'], ['Observação', d.observacao]
   ];
 }
 let _arysLinhas = [];
@@ -9793,9 +9793,20 @@ try{await navigator.clipboard.writeText('')}catch(e){}
 const dt=f.querySelector('[name="form_fields[data_exame]"]');if(dt)dt.scrollIntoView({block:'center'});
 alert(ok+' campo(s) preenchido(s).\\n\\nAgora: escolha a DATA do exame'+(falta.length?', complete: '+falta.join(', '):'')+', confira tudo e clique em Agendar.')})()`;
 function urlFavoritoArys(){ return 'javascript:' + encodeURIComponent(ARYS_FAVORITO_JS.replace(/\n/g, '')); }
+/* abre POR CIMA do quadro (janela própria): o quadro do RH tem os botões
+   "Já agendei" / "A Atlas agenda" e não pode ser trocado por esta ajuda */
+function fecharFavoritoArys(){ const o = document.getElementById('ovFavArys'); if(o) o.remove(); }
 function instalarFavoritoArys(){
-  openInfo('Instalar o favorito "Preencher Arys"', `
-    <div class="space-y-3 text-sm text-slate-700">
+  fecharFavoritoArys();
+  document.body.insertAdjacentHTML('beforeend', `
+  <div id="ovFavArys" class="fixed inset-0 z-[70] bg-slate-900/50 flex items-start justify-center overflow-y-auto"
+       onclick="if(event.target===this)fecharFavoritoArys()">
+   <div class="relative mx-auto my-10 w-[95%] max-w-lg bg-white rounded-xl shadow-2xl fade-in">
+    <div class="flex items-center px-5 py-4 border-b border-slate-200">
+      <h3 class="font-semibold text-slate-800 flex-1">Instalar o favorito "Preencher Arys"</h3>
+      <button type="button" onclick="fecharFavoritoArys()" class="text-slate-400 hover:text-slate-700 px-1"><i class="fa-solid fa-xmark"></i></button>
+    </div>
+    <div class="px-5 py-4 space-y-3 text-sm text-slate-700">
       <p>Faz isso <b>uma vez só</b> em cada computador, no Chrome.</p>
       <ol class="list-decimal pl-5 space-y-1">
         <li>Mostre a barra de favoritos: <b>Ctrl+Shift+B</b> (no Mac, <b>Cmd+Shift+B</b>).</li>
@@ -9808,7 +9819,12 @@ function instalarFavoritoArys(){
       <p><b>Para usar:</b> no quadro "Dados para agendar na Arys", clique em <b>Copiar e abrir a Arys</b>. No site da Arys, clique no favorito <b>Preencher Arys</b>.</p>
       <p>Da primeira vez, o Chrome pode perguntar se o site pode "ver o texto copiado": clique em <b>Permitir</b>. Se negar, ele pede para você colar (Ctrl+V) e funciona do mesmo jeito.</p>
       <p class="text-xs text-slate-500"><i class="fa-solid fa-shield-halved mr-1"></i>Os dados vão do Atlas para a Arys pela área de transferência do seu computador. Nada passa por link ou servidor. O favorito não clica em "Agendar" e limpa a área de transferência depois de preencher.</p>
-    </div>`, 'max-w-lg');
+    </div>
+    <div class="px-5 py-3 border-t border-slate-200 text-right">
+      <button type="button" onclick="fecharFavoritoArys()" class="px-4 py-2 rounded-lg text-sm bg-slate-100 hover:bg-slate-200">Fechar</button>
+    </div>
+   </div>
+  </div>`);
 }
 /* atalho a partir do módulo de ASOs: exame já como Realizado, para virar ASO na hora */
 function novaEmissaoRetroativa(){
