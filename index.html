@@ -118,9 +118,9 @@ tailwind.config = {
   <div id="banner" class="no-print"></div>
   <main id="view" class="flex-1 p-4 sm:p-6"></main>
 
-  <!-- 2026.11.23-f30a14e é preenchido no build: data + commit do código publicado -->
+  <!-- 2026.11.23-2cb3379 é preenchido no build: data + commit do código publicado -->
   <footer class="px-6 py-4 text-[11px] text-slate-500 border-t border-slate-200 bg-white no-print">
-    <span class="font-display text-primary">ATLAS</span> · versão 2026.11.23-f30a14e
+    <span class="font-display text-primary">ATLAS</span> · versão 2026.11.23-2cb3379
     <span id="rodapePlanilha" class="hidden"> ·
       <button onclick="sincronizarPlanilha()" class="underline hover:text-accent">sincronizar novidades da planilha</button>
       ·
@@ -1818,7 +1818,7 @@ function registrarAtividade(acao, detalhe){
 
 const LOG_ACOES = {
   entrou:'Entrou no sistema', saiu:'Saiu do sistema', sessao_expirada:'Sessão encerrada (6h)',
-  exportou:'Exportou planilha', baixou_copia:'Baixou cópia da base', baixou_historico:'Baixou histórico de colaborador',
+  exportou:'Exportou planilha', copiou_arys:'Copiou dados para agendar na Arys', baixou_copia:'Baixou cópia da base', baixou_historico:'Baixou histórico de colaborador',
   abriu_ficha:'Abriu ficha de colaborador', restaurou_backup:'Restaurou backup de arquivo', trocou_senha:'Trocou a própria senha',
   incluiu:'Incluiu', alterou:'Alterou', excluiu:'Excluiu',
   abriu_ficha_admissao:'Abriu ficha de admissão', imprimiu_ficha_admissao:'Gerou ficha de admissão',
@@ -9489,12 +9489,12 @@ function novaEmissao(pre, opts){
             <div class="flex items-center gap-2 mb-2">
               <i class="fa-solid fa-truck-medical text-emerald-600"></i>
               <p class="text-[11px] font-semibold uppercase tracking-wide text-emerald-700 flex-1">Dados para agendar na Arys</p>
-              <button type="button" onclick="agendarNaArys()"
+              <button type="button" onclick="copiarEAbrirArys()" title="Copia os dados e abre o site; lá, clique no favorito Preencher Arys"
                 class="px-3 py-1.5 rounded-lg text-xs bg-emerald-600 text-white hover:bg-emerald-700 whitespace-nowrap">
-                <i class="fa-solid fa-arrow-up-right-from-square mr-1"></i>Abrir site da Arys</button>
+                <i class="fa-solid fa-wand-magic-sparkles mr-1"></i>Copiar e abrir a Arys</button>
             </div>
             <div id="painelArysBox" class="text-sm"></div>
-            <p class="text-[10px] text-slate-500 mt-2"><i class="fa-solid fa-circle-info mr-1"></i>Abra o site, copie cada campo pelo ícone <i class="fa-regular fa-copy"></i> e cole. A DATA você preenche no site.</p>
+            <p class="text-[10px] text-slate-500 mt-2"><i class="fa-solid fa-circle-info mr-1"></i>Clique em <b>Copiar e abrir a Arys</b> e, no site, no favorito <b>Preencher Arys</b>. Escolha a DATA, confira e clique em Agendar. Ainda dá para copiar campo a campo pelo ícone <i class="fa-regular fa-copy"></i>. <a href="#" onclick="instalarFavoritoArys();return false" class="text-emerald-700 underline whitespace-nowrap">Instalar o favorito</a></p>
           </div>`);
       }
       ['colaborador','unidadeId','tipoExame','funcao'].forEach(n => {
@@ -9702,7 +9702,9 @@ function atualizarPainelArys(){
   const d = dadosAgendamentoArys(); if(!d) return;
   box.innerHTML = htmlLinhasArys(d);
 }
+let _arysDados = null;
 function htmlLinhasArys(d){
+  _arysDados = d;
   _arysLinhas = linhasArys(d);
   return _arysLinhas.map((l, i) => `
     <div class="flex items-start gap-2 py-1 border-b border-emerald-100 last:border-0">
@@ -9723,19 +9725,91 @@ function abrirQuadroArys(d, titulo, rodape, aviso){
         <div class="flex items-center gap-2 mb-2">
           <i class="fa-solid fa-truck-medical text-emerald-600"></i>
           <p class="text-[11px] font-semibold uppercase tracking-wide text-emerald-700 flex-1">Dados para agendar na Arys</p>
-          <button type="button" onclick="agendarNaArys()"
+          <button type="button" onclick="copiarEAbrirArys()" title="Copia os dados e abre o site; lá, clique no favorito Preencher Arys"
             class="px-3 py-1.5 rounded-lg text-xs bg-emerald-600 text-white hover:bg-emerald-700 whitespace-nowrap">
-            <i class="fa-solid fa-arrow-up-right-from-square mr-1"></i>Abrir site da Arys</button>
+            <i class="fa-solid fa-wand-magic-sparkles mr-1"></i>Copiar e abrir a Arys</button>
         </div>
         <div class="text-sm">${htmlLinhasArys(d)}</div>
-        <p class="text-[10px] text-slate-500 mt-2"><i class="fa-solid fa-circle-info mr-1"></i>Abra o site, copie cada campo pelo ícone <i class="fa-regular fa-copy"></i> e cole. A DATA você preenche no site.</p>
+        <p class="text-[10px] text-slate-500 mt-2"><i class="fa-solid fa-circle-info mr-1"></i>Clique em <b>Copiar e abrir a Arys</b> e, no site, no favorito <b>Preencher Arys</b>. Escolha a DATA, confira e clique em Agendar. Ainda dá para copiar campo a campo pelo ícone <i class="fa-regular fa-copy"></i>. <a href="#" onclick="instalarFavoritoArys();return false" class="text-emerald-700 underline whitespace-nowrap">Instalar o favorito</a></p>
       </div>
     </div>`, 'max-w-2xl');
   $('#modalFoot').innerHTML = rodape ||
     `<button onclick="closeModal()" class="px-4 py-2 rounded-lg text-sm bg-accent text-white hover:bg-blue-700">Fechar</button>`;
 }
-/* botão: por ora só abre o site; o preenchimento é copiando do quadro acima */
 function agendarNaArys(){ window.open(ARYS_URL, '_blank'); }
+/* ── Preencher a Arys com um clique ──
+   Um site não pode preencher o formulário de outro. Então: o Atlas copia os
+   dados (área de transferência, nada vai em link nem em servidor) e um
+   favorito do Chrome, clicado já no site da Arys, cola cada um no seu campo.
+   O favorito nunca clica em "Agendar": a conferência é sempre de quem agenda.
+   Os nomes são os do formulário "Aryz _Form" (form_fields[...]). Ficam de fora:
+   data do exame (escolhida lá) e CEP (em branco). "Já é cliente?" vai Sim. */
+const ARYS_PREFIXO = 'ATLAS-ARYS:';
+function celularArys(v){
+  const d = String(v || '').replace(/\D/g, '').replace(/^55(?=\d{11}$)/, '');
+  return d.length === 11 ? '(' + d.slice(0,2) + ')' + d.slice(2,7) + '-' + d.slice(7)
+       : d.length === 10 ? '(' + d.slice(0,2) + ')' + d.slice(2,6) + '-' + d.slice(6) : String(v || '');
+}
+function camposArys(d){
+  return [
+    ['cnpj','CNPJ',d.cnpj], ['empresa','Nome da Empresa',d.empresa], ['email_solicitante','E-mail Solicitante',d.solicitante],
+    ['setor','Setor',d.setor], ['funcao','Função',d.funcao], ['nome','Nome',d.nome],
+    ['nascimento','Data de Nascimento',fmtDate(d.nascimento)], ['cpf','CPF',d.cpf], ['rg','RG',d.rg],
+    ['email_colaborador','E-mail Colaborador',d.email], ['telefone','Celular',celularArys(d.celular)],
+    ['genero','Gênero',d.genero], ['tipo_exame','Tipo de Exame',d.tipoExame], ['presencial','Já é cliente','Sim'], ['field_58086e5','Observação',d.observacao]
+  ].map(c => [c[0], c[1], String(c[2] == null ? '' : c[2]).trim()]);
+}
+async function copiarEAbrirArys(){
+  const d = _arysDados;
+  if(!d){ agendarNaArys(); return; }
+  /* a janela abre já, no clique: se esperasse a cópia o Chrome poderia bloquear */
+  const w = window.open(ARYS_URL, '_blank');
+  try{
+    await navigator.clipboard.writeText(ARYS_PREFIXO + JSON.stringify({ v:1, campos:camposArys(d) }));
+    toast('Dados copiados. No site da Arys, clique no favorito "Preencher Arys".');
+    registrarAtividade('copiou_arys', { nome: d.nome || '', tipo: d.tipoExame || '' });
+  }catch(e){
+    toast('Não foi possível copiar. Use os ícones de copiar de cada campo.', 'erro');
+  }
+  if(!w) toast('O Chrome bloqueou a nova aba. Abra o site da Arys pelo botão de novo.', 'erro');
+}
+/* código do favorito. Roda NO SITE DA ARYS: lê a área de transferência (ou
+   pede para colar), preenche, limpa a área de transferência e avisa o que
+   faltou. Não envia nada. */
+const ARYS_FAVORITO_JS = `(async()=>{const P=${JSON.stringify(ARYS_PREFIXO)};
+const f=document.querySelector('form[name="Aryz _Form"]');
+if(!f){alert('Abra a página de agendamento da Arys e clique de novo.');return}
+let t='';try{t=await navigator.clipboard.readText()}catch(e){}
+if(!t||t.indexOf(P)!==0)t=prompt('Cole aqui (Ctrl+V) os dados copiados no Atlas e clique OK:')||'';
+if(t.indexOf(P)!==0){alert('Não achei os dados do Atlas. No Atlas, clique em "Copiar e abrir a Arys" e tente de novo.');return}
+let d;try{d=JSON.parse(t.slice(P.length))}catch(e){alert('Os dados copiados estão incompletos. Copie de novo no Atlas.');return}
+const n=s=>String(s||'').normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').toLowerCase().trim();
+let ok=0;const falta=[];
+for(const c of d.campos||[]){const el=f.querySelector('[name="form_fields['+c[0]+']"]');if(!el)continue;const v=c[2]||'';
+if(!v){falta.push(c[1]);continue}
+if(el.tagName==='SELECT'){const o=[...el.options].find(o=>o.value&&(n(o.value)===n(v)||n(o.text)===n(v)));if(!o){falta.push(c[1]);continue}el.value=o.value}else el.value=v;
+el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));ok++}
+try{await navigator.clipboard.writeText('')}catch(e){}
+const dt=f.querySelector('[name="form_fields[data_exame]"]');if(dt)dt.scrollIntoView({block:'center'});
+alert(ok+' campo(s) preenchido(s).\\n\\nAgora: escolha a DATA do exame'+(falta.length?', complete: '+falta.join(', '):'')+', confira tudo e clique em Agendar.')})()`;
+function urlFavoritoArys(){ return 'javascript:' + encodeURIComponent(ARYS_FAVORITO_JS.replace(/\n/g, '')); }
+function instalarFavoritoArys(){
+  openInfo('Instalar o favorito "Preencher Arys"', `
+    <div class="space-y-3 text-sm text-slate-700">
+      <p>Faz isso <b>uma vez só</b> em cada computador, no Chrome.</p>
+      <ol class="list-decimal pl-5 space-y-1">
+        <li>Mostre a barra de favoritos: <b>Ctrl+Shift+B</b> (no Mac, <b>Cmd+Shift+B</b>).</li>
+        <li><b>Arraste</b> o botão abaixo até a barra de favoritos e solte.</li>
+      </ol>
+      <div class="text-center py-2">
+        <a id="favArys" href="${esc(urlFavoritoArys())}" onclick="toast('Não clique aqui: arraste o botão para a barra de favoritos.');return false"
+           class="inline-block px-4 py-2 rounded-lg bg-emerald-600 text-white font-medium cursor-move"><i class="fa-solid fa-wand-magic-sparkles mr-1"></i>Preencher Arys</a>
+      </div>
+      <p><b>Para usar:</b> no quadro "Dados para agendar na Arys", clique em <b>Copiar e abrir a Arys</b>. No site da Arys, clique no favorito <b>Preencher Arys</b>.</p>
+      <p>Da primeira vez, o Chrome pode perguntar se o site pode "ver o texto copiado": clique em <b>Permitir</b>. Se negar, ele pede para você colar (Ctrl+V) e funciona do mesmo jeito.</p>
+      <p class="text-xs text-slate-500"><i class="fa-solid fa-shield-halved mr-1"></i>Os dados vão do Atlas para a Arys pela área de transferência do seu computador. Nada passa por link ou servidor. O favorito não clica em "Agendar" e limpa a área de transferência depois de preencher.</p>
+    </div>`, 'max-w-lg');
+}
 /* atalho a partir do módulo de ASOs: exame já como Realizado, para virar ASO na hora */
 function novaEmissaoRetroativa(){
   novaEmissao({ status:'REALIZADO', tipoExame:'PERIODICO', dataClinico: isoToday(), valor:0 },
