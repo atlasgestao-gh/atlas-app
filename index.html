@@ -118,9 +118,9 @@ tailwind.config = {
   <div id="banner" class="no-print"></div>
   <main id="view" class="flex-1 p-4 sm:p-6"></main>
 
-  <!-- 2026.11.26-5629e76 é preenchido no build: data + commit do código publicado -->
+  <!-- 2026.11.26-157732b é preenchido no build: data + commit do código publicado -->
   <footer class="px-6 py-4 text-[11px] text-slate-500 border-t border-slate-200 bg-white no-print">
-    <span class="font-display text-primary">ATLAS</span> · versão 2026.11.26-5629e76
+    <span class="font-display text-primary">ATLAS</span> · versão 2026.11.26-157732b
     <span id="rodapePlanilha" class="hidden"> ·
       <button onclick="sincronizarPlanilha()" class="underline hover:text-accent">sincronizar novidades da planilha</button>
       ·
@@ -3865,10 +3865,16 @@ function proximoTipoExame(aso){
   const t = aso && aso.tipo;
   return (!t || TIPOS_NAO_RENOVAM.indexOf(t) >= 0) ? 'PERIODICO' : t;
 }
+/* sem ASO nenhum: quem entrou há pouco (ou sem data) faz o admissional */
+function tipoSemAso(c){
+  const d = c && c.admissao ? diasDesde(c.admissao) : null;
+  return (d === null || d <= 90) ? 'ADMISSIONAL' : 'PERIODICO';
+}
 function agendarDeAlerta(colaboradorId){
   const c = colab(colaboradorId);
+  const aso = asoVigente(colaboradorId);
   novaEmissao({ colaborador:c.nome, unidadeId:c.unidadeId,
-                tipoExame: proximoTipoExame(asoVigente(colaboradorId)) },
+                tipoExame: aso ? proximoTipoExame(aso) : tipoSemAso(c) },
               { statusColab: colaboradorId });
 }
 /* Quem aparece em "A fazer" às vezes já saiu ou está afastado: a modal de
@@ -3991,6 +3997,16 @@ function itensAcompanhamento(){
     tipo: a.tipoExameLabel, funcao: a.funcao, quando: 'vence ' + fmtDate(a.vencimento), dias: a.dias, data: a.vencimento || '',
     statusLabel:a.sem.label, statusCls:a.sem.cls,
     acaoLabel:a.acaoLabel, acaoIcon:a.acaoIcon, acao:a.acao
+  }));
+  /* ativo SEM nenhum ASO também é pendência (Jessica, 26/11/2026): antes só
+     entrava quem tinha um ASO para vencer, e quem nunca fez exame não aparecia
+     em lugar nenhum. Se já houver exame no fornecedor ou pedido, a fusão
+     abaixo tira daqui, como nos outros. */
+  colaboradoresAtivos().filter(c => !asoVigente(c.id)).forEach(c => asoItens.push({
+    origem:'ASO', colaborador:c.nome, unidadeId:c.unidadeId,
+    tipo: tipoLabel(tipoSemAso(c)), funcao: c.funcao || '', quando: 'nunca fez ASO', dias: null, data: '',
+    statusLabel:'Sem ASO', statusCls:'bg-red-100 text-red-700',
+    acaoLabel:'Agendar exame', acaoIcon:'fa-calendar-plus', acao:`agendarDeAlerta('${c.id}')`
   }));
   const fornItens = emissoesPendentesFornecedor().map(e => ({
     origem:'Fornecedor', colaborador:e.colaborador, unidadeId:e.unidadeId, semCadastro: !colabDe(e.colaborador),
