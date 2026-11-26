@@ -118,9 +118,9 @@ tailwind.config = {
   <div id="banner" class="no-print"></div>
   <main id="view" class="flex-1 p-4 sm:p-6"></main>
 
-  <!-- 2026.11.23-eb001af é preenchido no build: data + commit do código publicado -->
+  <!-- 2026.11.26-5629e76 é preenchido no build: data + commit do código publicado -->
   <footer class="px-6 py-4 text-[11px] text-slate-500 border-t border-slate-200 bg-white no-print">
-    <span class="font-display text-primary">ATLAS</span> · versão 2026.11.23-eb001af
+    <span class="font-display text-primary">ATLAS</span> · versão 2026.11.26-5629e76
     <span id="rodapePlanilha" class="hidden"> ·
       <button onclick="sincronizarPlanilha()" class="underline hover:text-accent">sincronizar novidades da planilha</button>
       ·
@@ -9178,7 +9178,8 @@ function viewExames(){
         selectFiltro('fExF','Fechamento: todos', [{v:'SIM',l:'Com mês'},{v:'NAO',l:'Sem mês'}], 'UIEx.fech=this.value;UIEx.page=1;viewExames()', UIEx.fech, COL4),
         selectFiltro('fExCart','Carteirinha: todas', [{v:'SIM',l:'Emitida (ok)'},{v:'PEND',l:'Pendente'},{v:'NAO',l:'Sem carteirinha'}], 'UIEx.cart=this.value;UIEx.page=1;viewExames()', UIEx.cart, COL4)
       ], [
-        botao('Nova emissão','fa-plus','novaEmissao()'),
+        rhPedeExame() ? botao('Pedir exame à Atlas','fa-paper-plane','rhPedirExame()','bg-emerald-600 text-white hover:bg-emerald-700')
+                      : botao('Nova emissão','fa-plus','novaEmissao()'),
         (() => { const n = emissoesSemCadastro().length; return n
           ? `<button onclick="conciliarSemCadastro()" class="inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm bg-white border border-amber-300 text-amber-700 hover:bg-amber-50"><i class="fa-solid fa-wand-magic-sparkles"></i>Conciliar sem cadastro <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700">${n}</span></button>`
           : ''; })(),
@@ -15754,11 +15755,61 @@ async function admPedirAso(id){
   _admPedidoAso = { a, c };
   abrirQuadroArys(await dadosArysDaAdmissao(a), 'Solicitar ASO admissional — ' + a.nome,
     `<button onclick="closeModal()" class="px-4 py-2 rounded-lg text-sm text-slate-600 hover:bg-slate-100 mr-auto">Cancelar</button>
-     <button onclick="admEnviarPedidoAso(false)" class="px-4 py-2 rounded-lg text-sm border border-slate-300 text-slate-700 hover:bg-slate-50">A Atlas agenda</button>
      <button onclick="admEnviarPedidoAso(true)" class="px-4 py-2 rounded-lg text-sm bg-emerald-600 text-white hover:bg-emerald-700">
        <i class="fa-solid fa-check mr-1"></i>Já agendei na Arys</button>`,
     `<p><b>${esc(a.nome)}</b> já está na base de colaboradores. Se for agendar você mesmo, use os dados abaixo no site da Arys
-       e depois clique em <b>Já agendei na Arys</b>. Se preferir, clique em <b>A Atlas agenda</b>.</p>`);
+       e depois clique em <b>Já agendei na Arys</b>.</p>`);
+}
+/* ═════════ RH pede exame (fora da admissão) ═════════
+   A equipe de RH só LÊ os exames (save() recusa: base recortada). Antes, a
+   "Nova emissão" abria, ela copiava para a Arys, salvava... e nada ficava
+   gravado (Francidalva, 26/11/2026). Agora o botão vira um pedido na fila da
+   Atlas, já marcado como agendado pelo RH — a Atlas lança o exame e o
+   resultado. Precisa do sql/13 (o RH pode pedir qualquer tipo de exame). */
+function rhPedeExame(){ return !!(ACESSO.admissao && !podeGravar()); }
+let _rhPedido = null;
+function rhPedirExame(){
+  const gente = DB.colaboradores.filter(c => STATUS_INATIVOS.indexOf(c.status) < 0)
+    .slice().sort((a,b) => a.nome.localeCompare(b.nome,'pt-BR'));
+  const cargos = (DB.cargos||[]).map(c => c.funcao).filter(Boolean).sort();
+  openForm({
+    title:'Pedir exame à Atlas', largura:'max-w-2xl',
+    fields: [
+      { name:'colaboradorId', label:'Quem?', type:'select', req:true, col:'sm:col-span-2',
+        options: [{ v:'', l:'— selecione —' }].concat(gente.map(c => ({ v:c.id,
+          l: c.nome + ' · ' + ((uni(c.unidadeId)||{}).sigla || '') + (c.status !== 'Ativo' ? ' (' + c.status + ')' : '') }))),
+        hint:'pessoa nova? use a tela Admissões' },
+      { name:'tipoExame', label:'Tipo de exame', type:'select', req:true,
+        options: Object.keys(TIPOS).filter(t => t !== 'ADMISSIONAL').map(t => ({ v:t, l:TIPOS[t] })) },
+      { name:'funcaoNova', label:'Função nova (só mudança de risco)', type:'datalist', options: cargos },
+      { name:'observacao', label:'Alguma observação?', type:'textarea', col:'sm:col-span-2' }
+    ],
+    values: { tipoExame:'PERIODICO' },
+    onSave: v => {
+      const c = colab(v.colaboradorId);
+      if(!c){ toast('Escolha a pessoa.', 'erro'); return; }
+      if(cpfDigitos(c.cpf).length !== 11){ toast(c.nome + ' está sem CPF no cadastro. Peça à Atlas para completar.', 'erro'); return; }
+      if(v.tipoExame === 'TROCA_FUNCAO' && !v.funcaoNova){ toast('Informe a função nova.', 'erro'); return; }
+      _rhPedido = { c, v };
+      const pessoa = Object.assign({}, c, v.funcaoNova ? { funcao: v.funcaoNova } : {});
+      abrirQuadroArys(dadosArysDoColab(pessoa, c.unidadeId, v.tipoExame),
+        TIPOS[v.tipoExame] + ' — ' + c.nome,
+        `<button onclick="closeModal()" class="px-4 py-2 rounded-lg text-sm text-slate-600 hover:bg-slate-100 mr-auto">Cancelar</button>
+         <button onclick="rhEnviarPedidoExame()" class="px-4 py-2 rounded-lg text-sm bg-emerald-600 text-white hover:bg-emerald-700">
+           <i class="fa-solid fa-check mr-1"></i>Já agendei na Arys</button>`,
+        `<p>Agende na Arys com os dados abaixo e depois clique em <b>Já agendei na Arys</b>. A Atlas recebe o aviso e lança o exame.</p>`);
+    }
+  });
+}
+async function rhEnviarPedidoExame(){
+  const x = _rhPedido; if(!x) return;
+  const { c, v } = x;
+  const r = await nuvemAbrirSolicitacao({ unidadeId:c.unidadeId, colaboradorId:c.id, nome:c.nome, cpf:c.cpf,
+    funcao:c.funcao || '', funcaoNova:v.funcaoNova || '', tipoExame:v.tipoExame,
+    observacao:'Pedido pelo RH' + (v.observacao ? ' · ' + v.observacao : '') + ' · ' + ARYS_MARCA_RH + ' em ' + fmtDate(isoToday()) });
+  if(!r.ok){ toast('Não consegui enviar: ' + (r.motivo || 'motivo desconhecido'), 'erro'); return; }
+  _rhPedido = null; closeModal();
+  toast('Pronto: a Atlas foi avisada do ' + TIPOS[v.tipoExame].toLowerCase() + ' de ' + c.nome + '.');
 }
 let _admPedidoAso = null;
 const ARYS_MARCA_RH = 'Agendado na Arys pelo RH';
